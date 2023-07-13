@@ -1,0 +1,22 @@
+Package
+
+coinor-libipopt1
+libblas3
+libc6 (>= 2.14)
+libcolamd2.9.x
+libcxsparse3.1.x
+libgcc1 (>= 1:4.1.1)
+libgfortran3 (>= 4.6)
+libgmp10
+libhdf5-10 
+liblapack3
+libmumps-seq-4.10.0
+libssl1.0.0 (>= 1.0.0)
+libstdc++6 (>= 4.6)
+libxerces-c3.1
+libsoap-lite-perl
+perl-tk
+libxml-libxml-perl
+python-h5py
+python-numpy
+

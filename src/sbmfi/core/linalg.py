@@ -1,0 +1,654 @@
+import numpy as np
+import copy
+np.seterr(all='raise')
+import scipy
+from scipy.special import expit, logit
+import random
+import inspect
+
+
+def _conditional_torch_import():
+    # if 'torch' in sys.modules:
+    #     return
+    try:
+        global torch
+        import torch
+        version = int(torch.__version__.split('.')[1])
+    except ImportError as e:
+        print('torch not installed, cannot use this backend')
+        raise e
+    global _NP_TORCH_DTYPE
+
+    _NP_TORCH_DTYPE = {
+        np.bool_: torch.bool,
+        np.uint8: torch.uint8,
+        np.int8: torch.int8,
+        np.int16: torch.int16,
+        np.int32: torch.int32,
+        np.int64: torch.int64,
+        np.float16: torch.float16,
+        np.float32: torch.float32,
+        np.float64: torch.float64,
+        np.complex64: torch.complex64,
+        np.complex128: torch.complex128,
+        np.double: torch.double,
+    }
+    return version
+
+
+def _merge_duplicate_indices(indices, values):
+    if values.size == 0:
+        return indices, values
+    uniq_indices, where, counts = np.unique(indices, axis=0, return_counts=True, return_index=True)
+    new_values = values[where]
+    for i in np.where(counts > 1)[0]:
+        aka = (uniq_indices[i] == indices).all(1)
+        new_values[i] = values[aka].sum()
+    return uniq_indices, new_values
+
+
+def torch_auto_jacobian(inputs, outputs, create_graph=False, squeeze=False):
+    """
+    TODO: https://pytorch.org/docs/stable/generated/torch.autograd.functional.jacobian.html
+        check whether torch has a better/ faster implementation of this via the link above
+    Stolen from: https://gist.github.com/sbarratt/37356c46ad1350d4c30aefbd488a4faa#gistcomment-2955749
+    Computes the jacobian of outputs with respect to inputs
+
+    :param outputs: tensor for the output of some function
+    :param inputs: tensor for the input of some function (probably a vector)
+    :param create_graph: set True for the resulting jacobian to be differentible
+    :returns: a tensor of size (outputs.size() + inputs.size()) containing the
+        jacobian of outputs with respect to inputs
+    """
+
+    if inputs.ndim == 1:
+        nbatch, nin = 1, inputs.shape[0]
+    elif inputs.ndim == 2:
+        nbatch, nin = inputs.shape
+    else:
+        raise NotImplementedError
+
+    nout = outputs.shape[-1]
+
+    jac = torch.zeros(size=(nbatch, nin, nout), dtype=torch.double)
+    for i, out in enumerate(outputs.view(-1)):
+        col_i = torch.autograd.grad(out, inputs, retain_graph=True, create_graph=create_graph, allow_unused=True)[0]
+        if col_i is None:
+            # this element of output doesn't depend on the inputs, so leave gradient 0
+            continue
+        else:
+            if inputs.ndim == 1:
+                jac[i//nout, :, i%nout] = col_i
+            else:
+                jac[i//nout, :, i%nout] = col_i[i//nout, :]
+
+    if create_graph:
+        jac.requires_grad_()
+    if squeeze:
+        return jac.squeeze(0)
+    return jac
+
+
+class NumpyBackend(object):
+    _DEFAULT_FKWARGS = {
+        'LU': {'overwrite_a': True, 'check_finite': False},
+        'solve': {'trans': 0, 'overwrite_b': True, 'check_finite': False},
+    }
+    _AUTO_DIFF = False
+    _BATCH_PROCESSING = True
+
+    def __init__(self, seed=0):
+        self._rng = np.random.default_rng(seed=seed)
+
+    @staticmethod
+    def get_tensor(shape, indices, values, squeeze, dtype, device):
+        if shape is not None:
+            if (values is not None) and values.size:
+                if dtype is None:
+                    dtype = values.dtype
+            elif dtype is None:
+                dtype = np.double
+            A = np.zeros(shape=shape, dtype=dtype)
+            if (indices is not None) and indices.size:
+                indices, values = _merge_duplicate_indices(indices=indices, values=values)
+                indices = tuple(col for col in indices.T)
+                A[indices] = values
+        else:
+            if dtype is None:
+                dtype = values.dtype
+            A = np.array(values, dtype=dtype)
+
+        if (A.ndim == 3) and squeeze:
+            A = A.squeeze(0)
+        return A
+
+    @staticmethod
+    def LU(A, **kwargs):
+        # this is fucking slow! This has to do with the fact that a fortran object is passed around;
+        #  for our use-case (solving only once or at most a len(linsys_reactions) times, this is not worth it
+        # return scipy.linalg.lu(a=A, **kwargs) # this is also fekkin slow...
+
+        if A.ndim == 3:
+            return [NumpyBackend.LU(A[i, :, :], **kwargs) for i in range(A.shape[0])]
+        return scipy.linalg.lu_factor(a=A, **kwargs)
+
+    @staticmethod
+    def vecopy(A):
+        return A.copy()
+
+    @staticmethod
+    def solve(LU, b, **kwargs):
+        # lu_solve is only useful with lu_factor, which is horribly slow
+        # P, L, U = LU
+        # z = P.T @ b
+        # y = scipy.linalg.solve_triangular(L, z, lower=True, **kwargs)
+        # x = scipy.linalg.solve_triangular(U, y, lower=False, **kwargs)
+        # return x
+
+        if b.ndim == 3:
+            solution = np.zeros(b.shape)
+            for i in range(b.shape[0]):
+                solution[i, :, :] = NumpyBackend.solve(LU=LU[i], b=b[i, :, :], **kwargs)
+            return solution
+        return scipy.linalg.lu_solve(lu_and_piv=LU, b=b, **kwargs)  # TODO: overwrite_b=False, trans=0, check_finite=False
+
+    @staticmethod
+    def add_at(x, y, indices, stoich):
+        np.add.at(x, indices[:, 0], stoich * np.prod(y[indices[:, 1:]], axis=1))
+        return x
+
+    @staticmethod
+    def dadd_at(x, y, indices, stoich):
+        sub_indices = np.arange(1, indices.shape[1])
+        for i in sub_indices:
+            np.add.at(x, indices[:, 0], np.prod(y[indices[:, sub_indices[sub_indices != i]]], axis=1) * x[indices[:, i]] * stoich)
+        return x
+
+    @staticmethod
+    def convolve(a, v):
+        if a.ndim == 2:
+            solution = np.zeros((a.shape[0], a.shape[1] + v.shape[1] - 1))
+            for i in range(a.shape[0]):
+                solution[i, :] = NumpyBackend.convolve(a[i, :], v[i, :])
+            return solution
+        return np.convolve(a=a, v=v)
+
+    @staticmethod
+    def nonzero(A):
+        nonzero_indices = A.nonzero()
+        return np.array(nonzero_indices, dtype=int).T, A[nonzero_indices]
+
+    @staticmethod
+    def tonp(A):
+        return A
+
+    @staticmethod
+    def set_to(A, vals):
+        if isinstance(vals, (int, float)):
+            A[:] = vals
+        else:
+            A[:] = vals[:]
+        return A
+
+    @staticmethod
+    def permutax(A, *args):
+        return A.transpose(*args)
+
+    @staticmethod
+    def transax(A, dim0, dim1):
+        return np.swapaxes(A, dim0, dim1)
+
+    @staticmethod
+    def unsqueeze(A, dim):
+        return np.expand_dims(A, dim)
+
+    @staticmethod
+    def cat(As, dim=0):
+        return np.concatenate(As, axis=dim)
+
+    @staticmethod
+    def view(A, shape):
+        return A.reshape(shape)
+
+    def randn(self, shape, dtype=np.float64):
+        return self._rng.standard_normal(shape, dtype=dtype)
+
+    def randu(self, shape, dtype=np.float64):
+        return self._rng.random(shape, dtype=dtype)
+
+    def randperm(self, n):
+        return self._rng.permutation(n)
+
+    def choice(self, n, tot):
+        return np.random.choice(tot, n)
+
+
+class FactorExTorchBackend():
+    # necessary so that everything in a batch is computed except for the ones that fail, with lu_factor the whole batch fails
+    @staticmethod
+    def LU(A, **kwargs):
+        return torch.linalg.lu_factor_ex(A)
+
+    @staticmethod
+    def solve(LU, b, **kwargs):
+        if b.ndim == 1:
+            b = torch.atleast_2d(b).T
+        return torch.lu_solve(b, *LU[:2])
+
+
+class NonDiffTorchBackend():
+    """TODO use this backend if torch<1.10.0, since there lu_solve is not differentiable yet"""
+    # torch.lu_solve(b, *LU) is currently not differentiable
+    #   this will soon be solved: https://github.com/pytorch/pytorch/pull/61681
+    @staticmethod
+    def LU(A, **kwargs):
+        return A
+
+    @staticmethod
+    def solve(LU, b, **kwargs):
+        # NOTE: return 1d thing if were working with cumos, otherwise return 2d thing...
+        # TODO: make use of the returned LU for jacobians...
+        if b.ndim == 1:
+            b = torch.atleast_2d(b).T
+        X = torch.linalg.solve(LU, b)
+        # X = X.squeeze()
+        # if X.dim() < 2:
+        #     X = X.unsqueeze(0)
+        return X
+
+
+class TorchBackend(object):
+    # https://github.com/torch/torch7/wiki/Torch-for-Numpy-users
+
+    # torch.lu_solve(b, *LU) is currently not differentiable
+    #   this will soon be solved: https://github.com/pytorch/pytorch/pull/61681
+    _DEFAULT_FKWARGS = {
+        'LU': {},
+        'solve': {},
+    }
+    _AUTO_DIFF = True
+    _BATCH_PROCESSING = True
+
+    def __init__(self, seed=None, solver='lu_solve_ex', device='cpu'):
+        version = _conditional_torch_import()
+
+        self._device = torch.device('cpu')
+        if (torch.cuda.is_available()) and ('cuda' in device):
+            self._device = torch.device(device)
+
+        self._rng = torch.Generator(self._device)
+        if isinstance(seed, int):
+            self._rng.manual_seed(seed)
+
+        if (version < 10) or (solver == 'lu_solve_nondiff'):
+            TorchBackend.LU = staticmethod(NonDiffTorchBackend.LU)
+            TorchBackend.solve = staticmethod(NonDiffTorchBackend.solve)
+        elif solver == 'lu_solve_ex':
+            TorchBackend.LU = staticmethod(FactorExTorchBackend.LU)
+            TorchBackend.solve = staticmethod(FactorExTorchBackend.solve)
+        elif solver != 'lu_solve':
+            raise ValueError('not a legal solver option')
+        torch.set_default_tensor_type(torch.DoubleTensor)
+        torch.autograd.set_detect_anomaly(True)
+
+    def get_tensor(self, shape, indices, values, squeeze, dtype, device):
+        if shape is not None:
+            if (values is not None) and values.size:
+                if dtype is None:
+                    dtype = values.dtype.type
+            elif dtype is None:
+                dtype = np.double
+
+            dtype = _NP_TORCH_DTYPE[dtype]
+
+            if device is None:
+                device = self._device
+
+            A = torch.zeros(size=shape, dtype=dtype, device=device)
+            if (indices is not None) and indices.size:
+                indices, values = _merge_duplicate_indices(indices=indices, values=values)
+                indices = torch.as_tensor(indices, dtype=torch.int64, device=device)
+                indices = tuple(col for col in indices.T)
+                A[indices] = torch.as_tensor(values, device=device)
+        else:
+            if dtype is None:
+                if isinstance(values, np.ndarray):
+                    dtype = values.dtype.type
+                else:
+                    dtype = values.dtype
+
+            if not isinstance(dtype, torch.dtype):
+                dtype = _NP_TORCH_DTYPE[dtype]
+            A = torch.as_tensor(values, device=device, dtype=dtype)
+        if (A.ndim == 3) and squeeze:
+            A = A.squeeze(0)
+        return A
+
+    @staticmethod
+    def LU(A, **kwargs):# NOTE: this is currently differentiable via autograd! torch>0.10.0
+        # return torch.lu(A) # TODO check whether this is desirable?
+        return torch.linalg.lu_factor(A)
+
+    @staticmethod
+    def solve(LU, b, **kwargs):
+        if b.ndim == 1:
+            b = torch.atleast_2d(b).T
+        return torch.lu_solve(b, *LU)
+
+    @staticmethod
+    def vecopy(A):
+        return A.clone()
+
+    @staticmethod
+    def add_at(x, y, indices, stoich):
+        x.index_add_(0, indices[:, 0], stoich * torch.prod(y[indices[:, 1:]], dim=1))
+        return x
+
+    @staticmethod
+    def dadd_at(x, y, indices, stoich):
+        sub_indices = torch.arange(1, indices.shape[1])
+        for i in sub_indices:
+            x.index_add_(0, indices[:, 0],
+                         torch.prod(y[indices[:, sub_indices[sub_indices != i]]], axis=1) * x[indices[:, i]] * stoich)
+        return x
+
+    @staticmethod
+    def convolve(x, y):
+        if x.ndim == 1:
+            x = x.view(1, 1, -1)
+            y = y.view(1, 1, -1).flip(2)
+        elif x.ndim == 2:
+            x = x.unsqueeze(0)
+            y = y.unsqueeze(1).flip(2)
+        else:
+            raise ValueError(f'only up to 2D tensors!')
+        # padding = torch.min(torch.tensor([v1.shape[-1], v2.shape[-1]])).item() - 1
+        return torch.conv1d(x, y, padding=y.size(2) - 1, groups=x.size(1)).squeeze()
+
+    @staticmethod
+    def nonzero(A):
+        nonzero_indices = torch.nonzero(A)
+        indices = tuple(col for col in nonzero_indices.T)
+        return nonzero_indices, A[indices]
+
+    @staticmethod
+    def tonp(A):
+        if torch.is_tensor(A):
+            return A.to(device='cpu', copy=False).detach().numpy()
+        return A
+
+    @staticmethod
+    def view(A, shape):
+        return A.view(shape)
+
+    @staticmethod
+    def diff(inputs, outputs):
+        return torch_auto_jacobian(inputs=inputs, outputs=outputs, create_graph=False).detach()
+
+    @staticmethod
+    def permutax(A, *args):
+        return A.permute(*args)
+
+    @staticmethod
+    def transax(A, dim0, dim1):
+        return A.transpose(dim0, dim1)
+
+    @staticmethod
+    def unsqueeze(A, dim):
+        return A.unsqueeze(dim)
+
+    @staticmethod
+    def cat(As, dim):
+        return torch.cat(As, dim)
+
+    def randn(self, shape, dtype=np.double):
+        if dtype in _NP_TORCH_DTYPE:
+            dtype = _NP_TORCH_DTYPE[dtype]
+        return torch.randn(shape, generator=self._rng, dtype=dtype)
+
+    def randu(self, shape, dtype=np.double):
+        if dtype in _NP_TORCH_DTYPE:
+            dtype = _NP_TORCH_DTYPE[dtype]
+        return torch.rand(shape, generator=self._rng, dtype=dtype, device=self._device)
+
+    def randperm(self, n):
+        return torch.randperm(n, generator=self._rng)
+
+    def choice(self, n, tot):
+        return torch.argsort(self.randu(tot))[:n]
+
+
+class CupyBackend(object):
+    # TODO: make a cupy backend: https://cupy.dev/
+    pass
+
+
+class LinAlg(object):
+
+    _SAME_SIGNATURE = [
+        # these functions have the same signature in numpy and torch, thus we can dynamically add them
+        'exp', 'log10', 'log', 'atleast_2d', 'diag', 'trace', 'allclose', 'where', 'arange', 'divide',
+        'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'ones', 'zeros', 'sum', 'mean', 'amax', 'linspace',
+        'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
+        'cumsum', 'argmin', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit'
+    ]
+
+    def __getstate__(self):
+        return_dict = self.__dict__.copy()
+        functions = self._fill_functions(self._backwargs['backend'])
+        return_dict['_BACKEND'] = None
+        return_dict = {k: v for k, v in return_dict.items() if k not in functions}
+        return return_dict
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        functions = self._fill_functions(self._backwargs['backend'])
+        self.__dict__.update(functions)
+
+    def __eq__(self, other):
+        if not isinstance(other, LinAlg):
+            return False
+        return self._backwargs == other._backwargs
+
+    def __init__(
+            self,
+            backend:str,
+            batch_size: int = 1,
+            solver: str = 'lu_solve_ex', # solver to use for the linear system A_tot • x = b and for Jacobians
+            device: str = 'cpu',
+            fkwargs: dict = None,
+            auto_diff: bool = False,
+            seed: int = None,
+    ):
+        random.seed(seed)
+        np.random.seed(seed)
+
+        self._backwargs = {'backend': backend, 'seed': seed, 'solver': solver, 'device': device}
+
+        if backend == 'numpy':
+            self._BACKEND = NumpyBackend(seed=seed)
+        elif backend == 'torch':
+            self._BACKEND = TorchBackend(seed=seed, solver=solver, device=device)
+        else:
+            raise ValueError('not a valid backend, you bellend')
+
+        functions = self._fill_functions(backend)
+        self.__dict__.update(functions)
+
+        if fkwargs is None:
+            fkwargs = {}
+
+        self._auto_diff = False
+        if self._BACKEND._AUTO_DIFF and auto_diff:
+            self._auto_diff = auto_diff
+
+        self._batch_size = 1
+        if self._BACKEND._BATCH_PROCESSING and (batch_size > 1):
+            self._batch_size = int(batch_size)
+
+        kwargs = copy.deepcopy(self._BACKEND._DEFAULT_FKWARGS)
+        for function_name, function_kwargs in kwargs.items():
+            user_function_kwargs = fkwargs.get(function_name)
+            if user_function_kwargs:
+                function_kwargs.update(user_function_kwargs)
+        self._fkwargs = kwargs
+
+    def _fill_functions(self, backend):
+        # TODO make function partial and pass self._device in torch
+        functions = {}
+        for fname in LinAlg._SAME_SIGNATURE:
+            pack_func = fname.split('.')
+            n = len(pack_func)
+            if n == 1:
+                if backend == 'numpy':
+                    package = np
+                elif backend == 'torch':
+                    package = torch
+            elif n == 2:
+                if backend == 'torch':
+                    package = torch.__dict__[pack_func[0]]
+                elif backend == 'numpy':
+                    if pack_func[0] == 'special':
+                        package = scipy.special
+                    else:
+                        package = np.__dict__[pack_func[0]]
+                fname = pack_func[1]
+            function = package.__dict__[fname]
+            functions[fname] = function
+        return functions
+
+    @property
+    def backend(self):
+        if isinstance(self._BACKEND, NumpyBackend):
+            return 'numpy'
+        elif isinstance(self._BACKEND, TorchBackend):
+            return 'torch'
+
+    def get_tensor(self, shape=None, indices=None, values=None, squeeze=False, dtype=None, device=None):
+        # TODO make the default shape (0, ) and the default dtype np.float64!
+        return self._BACKEND.get_tensor(shape, indices, values, squeeze, dtype, device)
+
+    def LU(self, A, **kwargs):
+        return self._BACKEND.LU(A, **{**self._fkwargs['LU'], **kwargs})
+
+    def vecopy(self, A):
+        return self._BACKEND.vecopy(A)
+
+    def solve(self, LU, b, **kwargs):
+        return self._BACKEND.solve(LU, b, **{**self._fkwargs['solve'], **kwargs})
+
+    def add_at(self, x, y, indices, stoich):
+        return self._BACKEND.add_at(x, y, indices, stoich)
+
+    def dadd_at(self, x, y, indices, stoich):
+        return self._BACKEND.dadd_at(x, y, indices, stoich)
+
+    def convolve(self, a, v):
+        # TODO: https://en.wikipedia.org/wiki/Toeplitz_matrix#Discrete_convolution
+        #   Toeplitz discrete convolution might be a better option
+        #   We would have to store a Toeplitz matrix for every ConvolutedEmu object
+        #   this is a head-ache and not terribly 'clean' and Im not sure whether this
+        #   would actually make anything much faster
+        return self._BACKEND.convolve(a, v)
+
+    def nonzero(self, A):
+        return self._BACKEND.nonzero(A)
+
+    def tonp(self, A):
+        return self._BACKEND.tonp(A)
+
+    def view(self, A, shape):
+        return self._BACKEND.view(A, shape)
+
+    def set_to(self, A, vals):
+        return NumpyBackend.set_to(A, vals)
+
+    def diff(self, inputs, outputs):
+        return self._BACKEND.diff(inputs, outputs)
+
+    def randn(self, shape, dtype=np.double):
+        return self._BACKEND.randn(shape, dtype)
+
+    def randu(self, shape, dtype=np.double):
+        return self._BACKEND.randu(shape, dtype)
+
+    def randperm(self, n):
+        return self._BACKEND.randperm(n)
+
+    def permutax(self, A, *args):
+        return self._BACKEND.permutax(A, *args)
+
+    def transax(self, A, dim0=-2, dim1=-1):
+        return self._BACKEND.transax(A, dim0, dim1)
+
+    def unsqueeze(self, A, dim):
+        return self._BACKEND.unsqueeze(A, dim)
+
+    def cat(self, As, dim):
+        return self._BACKEND.cat(As, dim)
+
+    def choice(self, n, tot):
+        return self._BACKEND.choice(n, tot)
+
+    def sample_hypersphere(self, shape):
+        rnd = self.randu(shape)
+        return rnd / self.norm(rnd, 2, -1, True)
+
+    def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, which='uniform', std=0.1):
+        if not (lo.shape == hi.shape) or (len(lo.shape) != 1):
+            raise ValueError
+        if not isinstance(std, float):
+            raise NotImplementedError('cannot do mvn stuff yet')
+        dim = lo.shape[0]
+        u = self.randu(shape=(*shape, dim))
+        if which == 'uniform':
+            return u * (hi - lo) + lo
+        elif which == 'gauss':
+            # truncated multivariate normal sampling
+            # publication: Efficient Sampling Methods for Truncated Multivariate
+            #   Normal and Student-t Distributions Subject to Linear
+            #   Inequality Constraints
+            # http://web.michaelchughes.com/research/sampling-from-truncated-normal
+            alpha = self.erf((lo - mu) / std)
+            beta = self.erf((hi - mu) / std)
+            return self.erfinv(alpha + u * (beta - alpha)) * std + mu
+        else:
+            raise ValueError
+
+
+if __name__ == "__main__":
+    import pickle, timeit, cProfile, torch
+    l = LinAlg(backend='numpy')
+    dim = 2
+    bounds = np.random.rand(dim)
+    # xch = l.sample_bounded_distribution(
+    #     shape=(10,), lo=bounds - 1.0, hi=bounds, mu=bounds - 0.5, which='gauss', std=0.1
+    # )
+
+    xch = l.sample_bounded_distribution(
+        shape=(10,), lo=np.zeros(dim), hi=np.ones(dim), mu=bounds, which='gauss', std=0.1
+    )
+
+
+    # ding = l.__dict__.keys()
+    # pickle.dump(l, open('linlg.p', 'wb'))
+    # l = pickle.load(open('linlg.p', 'rb'))
+    # print(ding)
+    #
+    # print(l.__dict__.keys())
+    # print(ding == l.__dict__.keys())
+    # l = LinAlg(backend='numpy')
+    # pickle.dump(l, open('linlg.p', 'wb'))
+    # from scipy.linalg import lu_factor
+
+
+    # pickle.dump(l, open('linalg.p', 'wb'))
+    # pickle.load(open('linalg.p', 'rb'))
+    # _DEVICE = 'cpu'
+    # a = abs(l.randn((20,20)))
+    # b = abs(l.randn(20))
+    # c = l.LU(a)
+    #
+    # cProfile.run('l.solve(c, b)')
+
+

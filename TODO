@@ -1,0 +1,89 @@
+Thermodynamic sampling:
+    Make setting reaction energies and sampling fluxes as fast as possible DONE
+
+
+Polytope transforms:
+    get polytope in vertex representation -> compute barycentric coordintates
+        use softmax function, since this is a convex combination over output variables (like required for vertex representation)
+        transform to log-ratio space and use normal MCMC to sample in unconstrained space
+        https://math.stackexchange.com/questions/4484178/computing-barycentric-coordinates-for-convex-n-dimensional-polytope-that-is-not
+
+
+Compositional analysis
+    Make the observation model play out on the simplex by transforming to ALR
+    Test differen log ratio transforms (LR) and neural net convergence (I would guess ILR would work best)
+
+Net, exchange uniform sampling:
+    Sample net fluxes uniformely and sample exchange fluxes uniformely DONE
+    calculate PSRF for net/xch fluxes or fwd/rev fluxes
+
+Msc student project [pending Nicola]:
+    Write proposal on pyruvate, succinate and combination
+
+usefull websites
+    http://bebi103.caltech.edu.s3-website-us-east-1.amazonaws.com/2019a/content/index.html
+
+Look for conferences to attend!
+    https://psb.stanford.edu/
+    https://recomb2022.net/
+    https://ecmtb2022.org/
+    https://www.qbioconference.com/?linkId=152523161
+    https://www.iscb.org/cms_addon/events/details.php?uid=2950
+    https://fmi.unibuc.ro/en/cmsb-2022/
+    https://icml-compbio.github.io/
+    https://nips.cc/  WORKSHOP ON BIOLOGY! https://www.lmrl.org/
+
+Incorporate uncertainty in biomass reaction by sampling coefficients (kind of like ratios)
+
+Observation model:
+    Multi-variate normal intensities
+    Normalizing flow with 4 covarying values in decreasing order of intensity
+    Deal with missing signals
+    Figure out whether bias is a thing in LC-MS
+
+Normalizing flow optimization: normalizing flow allow for evaluation of exact likelihood and computation of derivatives.
+    this means we can locally optimize! L^max = max( L(theta / v) = NF(x^obs) ): maximum likelhihood!
+
+Experiment design:
+    Fix this with ConstantAdditiveGaussianMDVErrors
+    Design for Succinate, Pyruvate, Succinate+Pyruvate (Xylose, Glycerol...)
+
+Measurement model:
+    Do Alaa method with own samples
+    Test code with Covid model
+
+Posterior bleeding:
+    Idea 1: penalize likelihood by euclidian distance from polytope
+    Idea 2: transform every point in polytope to barycentric coordinates that lie on simplex
+        (requires computing all vertices of the polytope) and tranform simplectic coordinates to real coordinates
+        Do conditional density estimation in the real coordinates and transform back topolytope guaranteeing support.
+
+Check out flowtorch: https://github.com/facebookincubator/flowtorch
+
+https://math.nyu.edu/~tabak/PDEs.html
+Post-doc labs: Drew Endy
+https://www.growbyginkgo.com/
+mail Charlotte Nicod for what is she investing in, how is she liking it etc.
+    I want to move to US (pref SF, maybe Boston) how is it?
+    Prolly for post-doc in a space that could lead to startup
+
+Include in paper:
+    Discussion of MFA in microbial communities, mammalian cells and complex media NEED incorporation of prior info
+    Highlight that many screens in sys-bio have a high false discovery rate
+    Compare inference on an out of distribution sample between normalizing flow network and 13CFLUX2
+
+
+Experimental design:
+    READ: https://journals.sagepub.com/doi/10.1177/0037549703040937
+    Use framework from: https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1002888
+    Since we have a normalizing flow, this problem is much easier, since we can more easily estimate evidence P(X)
+    Write arXiv paper on this approach?
+
+Journal Club:
+    https://www.nature.com/articles/s41559-018-0734-9
+    https://www.phy.cam.ac.uk/directory/dr-diana-fusco
+    https://physics.berkeley.edu/people/faculty/oskar-hallatschek
+
+
+Conference 2023:
+    https://bc2.ch/registration-info
