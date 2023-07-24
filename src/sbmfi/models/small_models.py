@@ -1,8 +1,7 @@
 import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMUModel
-from sbmfi.core.cumodel import CumomerModel
-from sbmfi.estimate.simulator import DataSetSim
+from sbmfi.inference.simulator import DataSetSim
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory
@@ -12,7 +11,6 @@ import sys, os
 import cobra
 from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
-from pta import ConcentrationsPrior
 
 
 def spiro(
@@ -234,6 +232,8 @@ def spiro(
             'bm':     1.50,
         }
         bm = model.reactions.get_by_id('bm')
+        model.objective = {bm: 1}
+    else:
         model.objective = {bm: 1}
 
     if not v2_reversible:

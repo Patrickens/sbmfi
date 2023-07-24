@@ -1265,7 +1265,7 @@ class RatioEMUModel(EMU_Model, RatioMixin): pass
 if __name__ == "__main__":
     # from pta.sampling.tfs import sample_drg
     from sbmfi.settings import BASE_DIR
-    from sbmfi.estimate.priors import *
+    from sbmfi.inference.priors import *
     from sbmfi.models.build_models import build_e_coli_tomek, build_e_coli_anton_glc
     from sbmfi.models.small_models import spiro
 

@@ -16,6 +16,7 @@ from typing import Iterable, Union, Dict, Tuple
 from torch.distributions import constraints
 from torch.utils.data import Dataset
 from collections import OrderedDict
+from scipy.spatial import ConvexHull
 from functools import lru_cache
 from PolyRound.api import PolyRoundApi
 # from torch.distributions import Distribution  # TODO perhaps make this the base class of _BaseSimulator
@@ -38,20 +39,21 @@ from sbmfi.core.observation import (
     MDV_LogRatioTransform,
 
 )
-from pta.sampling.commons import (
-    SamplingResult, split_chains, apply_to_chains, fill_common_sampling_settings, sample_from_chains
-)
-from sbmfi.estimate.priors import (
+# from pta.sampling.commons import (
+#     SamplingResult, split_chains, apply_to_chains, fill_common_sampling_settings, sample_from_chains
+# )
+from sbmfi.inference.priors import (
     _BasePrior,
+    _FluxPrior,
     UniFluxPrior,
-    ThermoPrior,
+    # ThermoPrior,
     RatioPrior,
     _CannonicalPolytopeSupport,
 )
-from pta.constants import (
-    default_min_chains,
-    us_steps_multiplier,
-)
+# from pta.constants import (
+#     default_min_chains,
+#     us_steps_multiplier,
+# )
 from sbmfi.core.util import (
     _excel_polytope,
     hdf_opener_and_closer,
@@ -60,7 +62,7 @@ from sbmfi.core.util import (
     profile,
 )
 from line_profiler import line_profiler
-from sbmfi.core.polytopia import PolytopeSamplingModel
+from sbmfi.core.polytopia import PolytopeSamplingModel, V_representation, fast_FVA, LabellingPolytope
 from arviz.data.io_dict import from_dict
 from arviz import InferenceData
 import arviz as az
@@ -80,6 +82,298 @@ https://distribution-explorer.github.io/multivariate_continuous/lkj.html
 https://bayesiancomputationbook.com/markdown/chp_08.html
 """
 
+# necessary to be able to plot stuff in arviz
+
+bw = 'scott'
+bw = 'silverman'
+bw = 0.1
+from arviz.stats.density_utils import (
+    _fast_kde_2d,
+    kde,
+    _find_hdi_contours,
+    _get_bw,
+    _get_grid,
+    _kde_adaptive,
+    _kde_convolution,
+    histogram,
+)
+
+import xarray as xr
+from arviz.rcparams import rcParams
+from arviz.plots.plot_utils import default_grid, get_plotting_function
+from arviz.stats.density_utils import _fast_kde_2d, kde, _find_hdi_contours
+from arviz.plots.plot_utils import get_plotting_function, _init_kwargs_dict
+def plot_dist(
+    values,
+    values2=None,
+    color="C0",
+    kind="auto",
+    cumulative=False,
+    label=None,
+    rotated=False,
+    rug=False,
+    bw=bw,
+    quantiles=None,
+    contour=True,
+    fill_last=True,
+    figsize=None,
+    textsize=None,
+    plot_kwargs=None,
+    fill_kwargs=None,
+    rug_kwargs=None,
+    contour_kwargs=None,
+    contourf_kwargs=None,
+    pcolormesh_kwargs=None,
+    hist_kwargs=None,
+    is_circular=False,
+    ax=None,
+    backend=None,
+    backend_kwargs=None,
+    show=None,
+    **kwargs,
+):
+    values = np.asarray(values)
+
+    if isinstance(values, (InferenceData, xr.Dataset)):
+        raise ValueError(
+            "InferenceData or xarray.Dataset object detected,"
+            " use plot_posterior, plot_density or plot_pair"
+            " instead of plot_dist"
+        )
+
+    if kind not in ["auto", "kde", "hist"]:
+        raise TypeError(f'Invalid "kind":{kind}. Select from {{"auto","kde","hist"}}')
+
+    if kind == "auto":
+        kind = "hist" if values.dtype.kind == "i" else rcParams["plot.density_kind"]
+
+    dist_plot_args = dict(
+        # User Facing API that can be simplified
+        values=values,
+        values2=values2,
+        color=color,
+        kind=kind,
+        cumulative=cumulative,
+        label=label,
+        rotated=rotated,
+        rug=rug,
+        bw=bw,
+        quantiles=quantiles,
+        contour=contour,
+        fill_last=fill_last,
+        figsize=figsize,
+        textsize=textsize,
+        plot_kwargs=plot_kwargs,
+        fill_kwargs=fill_kwargs,
+        rug_kwargs=rug_kwargs,
+        contour_kwargs=contour_kwargs,
+        contourf_kwargs=contourf_kwargs,
+        pcolormesh_kwargs=pcolormesh_kwargs,
+        hist_kwargs=hist_kwargs,
+        ax=ax,
+        backend_kwargs=backend_kwargs,
+        is_circular=is_circular,
+        show=show,
+        **kwargs,
+    )
+
+    if backend is None:
+        backend = rcParams["plot.backend"]
+    backend = backend.lower()
+
+    plot = get_plotting_function("plot_dist", "distplot", backend)
+    ax = plot(**dist_plot_args)
+    return ax
+
+def plot_kde(
+    values,
+    values2=None,
+    cumulative=False,
+    rug=False,
+    label=None,
+    bw=bw,
+    adaptive=False,
+    quantiles=None,
+    rotated=False,
+    contour=True,
+    hdi_probs=None,
+    fill_last=False,
+    figsize=None,
+    textsize=None,
+    plot_kwargs=None,
+    fill_kwargs=None,
+    rug_kwargs=None,
+    contour_kwargs=None,
+    contourf_kwargs=None,
+    pcolormesh_kwargs=None,
+    is_circular=False,
+    ax=None,
+    legend=True,
+    backend=None,
+    backend_kwargs=None,
+    show=None,
+    return_glyph=False,
+    **kwargs
+):
+    print(bw)
+    if isinstance(values, xr.Dataset):
+        raise ValueError(
+            "Xarray dataset object detected. Use plot_posterior, plot_density "
+            "or plot_pair instead of plot_kde"
+        )
+    if isinstance(values, InferenceData):
+        raise ValueError(
+            " Inference Data object detected. Use plot_posterior "
+            "or plot_pair instead of plot_kde"
+        )
+
+    if values2 is None:
+
+        if bw == "default":
+            bw = "taylor" if is_circular else "experimental"
+
+        grid, density = kde(values, is_circular, bw=bw, adaptive=adaptive, cumulative=cumulative)
+        lower, upper = grid[0], grid[-1]
+
+        density_q = density if cumulative else density.cumsum() / density.sum()
+
+        # This is just a hack placeholder for now
+        xmin, xmax, ymin, ymax, gridsize = [None] * 5
+    else:
+        gridsize = (128, 128) if contour else (256, 256)
+        density, xmin, xmax, ymin, ymax = _fast_kde_2d(values, values2, gridsize=gridsize)
+
+        if hdi_probs is not None:
+            # Check hdi probs are within bounds (0, 1)
+            if min(hdi_probs) <= 0 or max(hdi_probs) >= 1:
+                raise ValueError("Highest density interval probabilities must be between 0 and 1")
+
+            # Calculate contour levels and sort for matplotlib
+            contour_levels = _find_hdi_contours(density, hdi_probs)
+            contour_levels.sort()
+
+            contour_level_list = [0] + list(contour_levels) + [density.max()]
+
+            # Add keyword arguments to contour, contourf
+            contour_kwargs = _init_kwargs_dict(contour_kwargs)
+            if "levels" in contour_kwargs:
+                warnings.warn(
+                    "Both 'levels' in contour_kwargs and 'hdi_probs' have been specified."
+                    "Using 'hdi_probs' in favor of 'levels'.",
+                    UserWarning,
+                )
+            contour_kwargs["levels"] = contour_level_list
+
+            contourf_kwargs = _init_kwargs_dict(contourf_kwargs)
+            if "levels" in contourf_kwargs:
+                warnings.warn(
+                    "Both 'levels' in contourf_kwargs and 'hdi_probs' have been specified."
+                    "Using 'hdi_probs' in favor of 'levels'.",
+                    UserWarning,
+                )
+            contourf_kwargs["levels"] = contour_level_list
+
+        lower, upper, density_q = [None] * 3
+
+    kde_plot_args = dict(
+        # Internal API
+        density=density,
+        lower=lower,
+        upper=upper,
+        density_q=density_q,
+        xmin=xmin,
+        xmax=xmax,
+        ymin=ymin,
+        ymax=ymax,
+        gridsize=gridsize,
+        # User Facing API that can be simplified
+        values=values,
+        values2=values2,
+        rug=rug,
+        label=label,
+        quantiles=quantiles,
+        rotated=rotated,
+        contour=contour,
+        fill_last=fill_last,
+        figsize=figsize,
+        textsize=textsize,
+        plot_kwargs=plot_kwargs,
+        fill_kwargs=fill_kwargs,
+        rug_kwargs=rug_kwargs,
+        contour_kwargs=contour_kwargs,
+        contourf_kwargs=contourf_kwargs,
+        pcolormesh_kwargs=pcolormesh_kwargs,
+        is_circular=is_circular,
+        ax=ax,
+        legend=legend,
+        backend_kwargs=backend_kwargs,
+        show=show,
+        return_glyph=return_glyph,
+        **kwargs,
+    )
+
+    if backend is None:
+        backend = rcParams["plot.backend"]
+    backend = backend.lower()
+
+    # TODO: Add backend kwargs
+    plot = get_plotting_function("plot_kde", "kdeplot", backend)
+    ax = plot(**kde_plot_args)
+
+    return ax
+az.plots.distplot.plot_dist = plot_dist
+def _kde_linear(
+    x,
+    bw=bw,
+    adaptive=False,
+    extend=False,
+    bound_correction=True,
+    extend_fct=0,
+    bw_fct=1,
+    bw_return=False,
+    custom_lims=None,
+    cumulative=False,
+    grid_len=512,
+    **kwargs,  # pylint: disable=unused-argument
+):
+    # Check `bw_fct` is numeric and positive
+    if not isinstance(bw_fct, (int, float, np.integer, np.floating)):
+        raise TypeError(f"`bw_fct` must be a positive number, not an object of {type(bw_fct)}.")
+
+    if bw_fct <= 0:
+        raise ValueError(f"`bw_fct` must be a positive number, not {bw_fct}.")
+
+    # Preliminary calculations
+    x_min = x.min()
+    x_max = x.max()
+    x_std = np.std(x)
+    x_range = x_max - x_min
+
+    # Determine grid
+    grid_min, grid_max, grid_len = _get_grid(
+        x_min, x_max, x_std, extend_fct, grid_len, custom_lims, extend, bound_correction
+    )
+    grid_counts, _, grid_edges = histogram(x, grid_len, (grid_min, grid_max))
+
+    # Bandwidth estimation
+    bw = bw_fct * _get_bw(x, bw, grid_counts, x_std, x_range)
+
+    # Density estimation
+    if adaptive:
+        grid, pdf = _kde_adaptive(x, bw, grid_edges, grid_counts, grid_len, bound_correction)
+    else:
+        grid, pdf = _kde_convolution(x, bw, grid_edges, grid_counts, grid_len, bound_correction)
+
+    if cumulative:
+        pdf = pdf.cumsum() / pdf.sum()
+
+    if bw_return:
+        return grid, pdf, bw
+    else:
+        return grid, pdf
+az.plots.kdeplot.plot_kde = plot_kde
+az.stats.density_utils._kde_linear = _kde_linear
+
 # prof2 = line_profiler.LineProfiler()
 class _BaseSimulator(object):
     def __init__(
@@ -87,12 +381,20 @@ class _BaseSimulator(object):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
+            prior: _FluxPrior = None,
             boundary_observation_model: BoundaryObservationModel = None,
     ):
         if not model._is_built:
             raise ValueError('need to build model')
         if not substrate_df.index.unique().all():
             raise ValueError('non-unique identifiers for labelling!')
+
+        self._prior = prior
+        if prior is not None:
+            if not prior._fcm.labelling_fluxes_id.equals(model.fluxes_id):
+                raise ValueError('prior has different labelling fluxes than model')
+            if not model._fcm.theta_id.equals(prior.theta_id):
+                raise ValueError('theta of model and prior are different')
 
         self._obmods = OrderedDict()
         self._obsize = {}
@@ -247,11 +549,12 @@ class DataSetSim(_BaseSimulator):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
+            prior: _FluxPrior = None,
             boundary_observation_model: BoundaryObservationModel = None,
             num_processes=0,
             epsilon=1e-12,
     ):
-        super(DataSetSim, self).__init__(model, substrate_df, mdv_observation_models, boundary_observation_model)
+        super(DataSetSim, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
         self._eps = epsilon
         if num_processes < 0:
             num_processes = psutil.cpu_count(logical=False)
@@ -290,7 +593,7 @@ class DataSetSim(_BaseSimulator):
             fluxes,
             n_obs=3,
             fluxes_per_task=None,
-            what='all',
+            what='data',
             break_i=-1,
             close_pool=True,
     ) -> OrderedDict:
@@ -308,11 +611,13 @@ class DataSetSim(_BaseSimulator):
         if what != 'data':
             result['mdv'] = self._la.get_tensor(shape=(fluxes.shape[0], len(self._obmods), len(self._model.state_id)))
         if what != 'mdv':
-            result['data'] = self._la.get_tensor(shape=(fluxes.shape[0], n_obs, len(self.data_id)))
+            n_obshape = max(1, n_obs)
+            result['data'] = self._la.get_tensor(shape=(fluxes.shape[0], n_obshape, len(self.data_id)))
 
         if self._bomsize > 0:
+            slicer = 0 if n_obs == 0 else slice(None)
             bo_fluxes = fluxes[:, self._bo_idx]  # TODO only works with torch now, since we sample from a torch distribution!
-            result['data'][:, :, -self._bomsize:] = self._bom(bo_fluxes, n_obs=n_obs)
+            result['data'][:, slicer, -self._bomsize:] = self._bom(bo_fluxes, n_obs=n_obs)
 
         if fluxes_per_task is None:
             fluxes_per_task = math.ceil(fluxes.shape[0] / max(self._num_processes, 1))
@@ -324,8 +629,8 @@ class DataSetSim(_BaseSimulator):
         if self._num_processes == 0:
             init_observer(self._model, self._obmods, self._eps)
             for i, task in enumerate(tasks):
-                ress = obervervator_worker(task)
-                self._fill_results(result, ress)
+                worker_result = obervervator_worker(task)
+                self._fill_results(result, worker_result)
                 # self._fill_results(result, obervervator_worker(task))
                 if (break_i > -1) and (i > break_i):
                     break
@@ -479,6 +784,52 @@ class DataSetSim(_BaseSimulator):
         pass
 
 
+def simulate_prior_predictive(
+        simulator: _BaseSimulator,
+        inference_data: az.InferenceData,
+        n=30000,
+        include_prior_predictive=True,
+        num_processes=2,
+        n_obs=0,
+):
+    model = simulator._model
+    prior_theta = simulator._prior.sample(sample_shape=(n, ))
+    prior_dataset = az.convert_to_dataset(
+        {'theta': prior_theta[None, :, :]},
+        dims={'theta': ['theta_id']},
+        coords={'theta_id': model._fcm.theta_id.tolist()},
+    )
+    inference_data.add_groups(
+        group_dict={'prior': prior_dataset},
+    )
+
+    if include_prior_predictive:
+        dsim = DataSetSim(
+            model=model,
+            substrate_df=simulator._substrate_df,
+            mdv_observation_models=simulator._obmods,
+            boundary_observation_model=simulator._bom,
+            num_processes=num_processes,
+        )
+        fluxes = model._fcm.map_theta_2_fluxes(prior_theta)
+        prior_data = dsim.simulate_set(fluxes, n_obs=n_obs)['data']
+        dims = {'simulated_data': ['data_id']}
+        coords = {'data_id': [f'{i[0]}: {i[1]}' for i in simulator.data_id.tolist()]}
+        if n_obs == 0:
+            prior_data = model._la.transax(prior_data, 0, 1)
+        else:
+            dims['simulated_data'] = ['obs_idx', 'data_id']
+            prior_data = prior_data[None, :, :, :]
+        prior_dataset = az.convert_to_dataset(
+            {'simulated_data': prior_data},
+            dims=dims,
+            coords=coords,
+        )
+        inference_data.add_groups(
+            group_dict={'prior_predictive': prior_dataset},
+        )
+
+
 class MCMC(_BaseSimulator):
     # TODO think about implementing MALA, this only requires the computation of gradients of log_prob
 
@@ -487,16 +838,11 @@ class MCMC(_BaseSimulator):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _BasePrior = None,
+            prior: _BasePrior,
             boundary_observation_model: BoundaryObservationModel = None,
     ):
-        super(MCMC, self).__init__(model, substrate_df, mdv_observation_models, boundary_observation_model)
-        self._prior = prior
-        if prior is not None:
-            if not prior._fcm.labelling_fluxes_id.equals(model.fluxes_id):
-                raise ValueError('prior has different labelling fluxes than model')
-            if not model._fcm.theta_id.equals(prior.theta_id):
-                raise ValueError('theta of model and prior are different')
+        super(MCMC, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
+
         self._fcm = model._fcm
         self._sampler = self._fcm._sampler
 
@@ -559,22 +905,22 @@ class MCMC(_BaseSimulator):
             self,
             value,
             return_posterior_predictive=False,
+            evaluate_prior=False,
     ):
         if self._x_meas is None:
             raise ValueError('set an observation first')
         # NB we do not evaluate the log_prob of the measured boundary fluxes, since it is a constant for _x_meas
 
         vape = value.shape
-        viewlue = self._la.view(value, shape=(self._la.prod(vape[:-1]), vape[-1]))
+        viewlue = self._la.view(value, shape=(math.prod(vape[:-1]), vape[-1]))
 
         n_f = viewlue.shape[0]
         k = len(self._obmods) + (1 if self._bom is None else 2) # the 2 is for a column of prior and boundary probabilities
         n_meas = self._x_meas.shape[0]
         log_prob = self._la.get_tensor(shape=(n_f, n_meas, k))
-
         fluxes = self._fcm.map_theta_2_fluxes(viewlue)
 
-        if self._prior is not None:
+        if evaluate_prior:
             # NB not necessary for uniform prior
             # NB this also checks support! the hr is guaranteed to sample within the support
             # NB since priors are currently torch objects, this will not work with numpy backend
@@ -593,7 +939,7 @@ class MCMC(_BaseSimulator):
 
     def run(
             self,
-            x0 = None,
+            initial_points = None,
             n: int = 2000,
             n_burn = 0,
             thinning_factor=3,
@@ -605,14 +951,14 @@ class MCMC(_BaseSimulator):
             xch_how='gauss',
             xch_proposal_std=0.4,
             return_post_pred=False,
-            kernel_kwargs=None
-    ):
+            evaluate_prior=False,
+            kernel_kwargs=None,
+    ) -> az.InferenceData:
         # TODO: this publication talks about this algo, but has a different acceptance procedure:
         #  doi:10.1080/01621459.2000.10473908
         #  doi:10.1007/BF02591694  Rinooy Kan article
-
         batch_size = n_chains * n_cdf
-        if self._la._batch_size != batch_size:
+        if (self._la._batch_size != batch_size) or not self._model._is_built:
             # this way the batch processing is corrected
             self._la._batch_size = batch_size
             self._model.build_simulator(**self._fcm.fcm_kwargs)
@@ -626,15 +972,15 @@ class MCMC(_BaseSimulator):
         if return_post_pred:
             sim_data = self._la.get_tensor(shape=(n, n_chains, len(self.data_id)))
 
-        if x0 is None:
+        if initial_points is None:
             net_basis_points = self._sampler.get_initial_points(num_points=n_chains)
             x = self._fcm.append_xch_flux_samples(net_basis_samples=net_basis_points, return_type='theta')
         else:
-            x = x0
+            x = initial_points
 
         x = self._la.tile(x, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
 
-        ker_kwargs = {'return_posterior_predictive': return_post_pred}
+        ker_kwargs = {'return_posterior_predictive': return_post_pred, 'evaluate_prior': evaluate_prior}
         if kernel is None:
             kernel = self.log_prob
             if kernel_kwargs is not None:
@@ -731,9 +1077,8 @@ class MCMC(_BaseSimulator):
             line_kernel_dist[0] = accepted_probs # set the log-probs of the current sample
             x = line_xs[accept_idx[:, 0], log_probs_selecta]
             line_xs[0, :] = x  # set the log-probs of the current sample
-
             j = i - n_burn
-            if j % thinning_factor == 0:
+            if (j % thinning_factor == 0) and (j > 0):
                 k = j // thinning_factor
                 kernel_dist[k] = accepted_probs
                 chains[k] = x
@@ -744,12 +1089,14 @@ class MCMC(_BaseSimulator):
             sim_data = {
                 'simulated_data': self._la.transax(sim_data, dim0=1, dim1=0)
             }
+        if self._fcm._sampler.basis_coordinates == 'transformed':
+            raise NotImplementedError('transform the chains to transformed')
         return az.from_dict(
             posterior={
-                'param': self._la.transax(chains, dim0=1, dim1=0)  # chains x draws x param
+                'theta': self._la.transax(chains, dim0=1, dim1=0)  # chains x draws x param
             },
             dims={
-                'param': ['theta_id'],
+                'theta': ['theta_id'],
                 'observed_data': ['measurement_id', 'data_id'],
                 'simulated_data': ['data_id'],
             },
@@ -765,8 +1112,63 @@ class MCMC(_BaseSimulator):
                 'lp': kernel_dist.squeeze(-1).T
             },
             posterior_predictive=sim_data,
+            attrs={
+                'n_burn': n_burn,
+                'thinning_factor': thinning_factor,
+                'n_cdf': n_cdf,
+                'line_how': line_how,
+                'line_proposal_std': line_proposal_std,
+                'xch_how': xch_how,
+                'xch_proposal_std': xch_proposal_std,
+            }
         )
 
+    # @staticmethod
+    def run_parallel(
+            self,
+            num_processes = 4,
+            initial_points = None,
+            n: int = 2000,
+            n_burn = 0,
+            thinning_factor=3,
+            n_chains: int = 7,
+            kernel=None,
+            n_cdf=5,
+            line_how='uniform',
+            line_proposal_std=2.0,
+            xch_how='gauss',
+            xch_proposal_std=0.4,
+            return_post_pred=False,
+            evaluate_prior=False,
+            kernel_kwargs=None
+    ) -> az.InferenceData:
+        mcmc_kwargs = dict(
+            initial_points=initial_points,
+            n=n,
+            n_burn=n_burn,
+            thinning_factor=thinning_factor,
+            n_chains=n_chains,
+            kernel=kernel,
+            n_cdf=n_cdf,
+            line_how=line_how,
+            line_proposal_std=line_proposal_std,
+            xch_how=xch_how,
+            xch_proposal_std=xch_proposal_std,
+            return_post_pred=return_post_pred,
+            evaluate_prior=evaluate_prior,
+            kernel_kwargs=kernel_kwargs
+        )
+        if num_processes < 0:
+            num_processes = psutil.cpu_count(logical=False)
+        elif num_processes == 0:
+            return self.run(**mcmc_kwargs)
+
+        if num_processes > 0:
+            pool = mp.Pool(num_processes)
+            res = pool.starmap(self.run, [tuple(mcmc_kwargs.values()) for i in range(num_processes)])
+            pool.close()
+            pool.join()
+            return az.concat(res, dim='chain')
 
 
 class MCMC_ABC(MCMC):
@@ -789,8 +1191,8 @@ class MCMC_ABC(MCMC):
     def euclidian(
             self,
             fluxes,
-            n_obs=5,
-            return_posterior_predictive=False,
+            n_obs: int = 5,
+            return_posterior_predictive: bool = False,
     ):
         if self._x_meas is None:
             raise ValueError('set measurement')
@@ -807,17 +1209,151 @@ class MCMC_ABC(MCMC):
     def log_prob(
             self,
             value,
-            return_posterior_predictive=False,
+            return_posterior_predictive: bool = False,
     ):
         pass
+
+
+import holoviews as hv
+class PlotMonster(object):
+    def __init__(
+            self,
+            polytope: LabellingPolytope,
+            inference_data: az.InferenceData,
+            v_rep: pd.DataFrame = None
+    ):
+        self._pol = polytope
+        self._data = inference_data
+
+        if not all(polytope.A.columns.isin(inference_data.posterior.theta_id.values)):
+            raise ValueError
+
+        if v_rep is None:
+            v_rep = V_representation(polytope, number_type='fraction')
+        else:
+            if not v_rep.columns.equals(polytope.A.columns):
+                raise ValueError
+
+        self._v_rep = v_rep
+        self._fva = fast_FVA(polytope)
+
+    def _axes_range(
+            self,
+            var_id,
+            return_dimension=True,
+            label=None,
+            tol=12,
+    ):
+        fva_min = self._fva.loc[var_id, 'min']
+        fva_max = self._fva.loc[var_id, 'max']
+
+        if tol > 0:
+            tol = abs(fva_min - fva_max) / 12
+
+        range = (fva_min - tol, fva_max + tol)
+        if return_dimension:
+            kwargs = dict(spec=var_id, range=range)
+            if label is not None:
+                kwargs['label'] = label
+            return hv.Dimension(**kwargs)
+        return range
+
+    def _process_points(self, points: np.ndarray):
+        hull = ConvexHull(points)
+        verts = hull.vertices.copy()
+        verts = np.concatenate([verts, [verts[0]]])
+        return hull.points[verts]
+
+    def _plot_density(
+            self,
+            var_id,
+            num_samples=30000,
+            group='posterior',
+            var_names='theta',
+            bw=None,
+            include_fva = True,
+    ):
+        sampled_points = az.extract(
+            self._data,
+            group=group,
+            var_names=var_names,
+            combined=True,
+            num_samples=num_samples,
+            rng=True,
+        ).loc[var_id].values[1:].T
+        xax = self._axes_range(var_id)
+        plots = [
+            hv.Distribution(sampled_points, kdims=[xax], label=group).opts(bandwidth=bw)
+        ]
+        if include_fva and (group in ['posterior', 'prior']):
+            fva_min, fva_max = self._axes_range(var_id, return_dimension=False, tol=0)
+            opts = dict(color='#000000', line_dash='dashed')
+            plots.extend([
+                hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
+            ])
+        return hv.Overlay(plots)
+
+    def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None):
+        xax = self._axes_range(var1_id)
+        yax = self._axes_range(var2_id)
+        area = hv.Area(vertices, kdims=[xax], vdims=[yax], label=label).opts(
+            alpha=0.2, show_grid=True, width=600, height=600,
+        )
+        curve = hv.Curve(vertices, kdims=[xax], vdims=[yax])
+        return area * curve
+
+    def _plot_polytope_area(self, var1_id, var2_id):
+        pol_verts = self._v_rep.loc[:, [var1_id, var2_id]].drop_duplicates()
+        vertices = self._process_points(pol_verts.values)
+        return self._plot_area(vertices, var1_id, var2_id, label='polytope')
+
+    def _data_hull(
+            self,
+            var1_id,
+            var2_id,
+            group='posterior',
+            num_samples=None
+    ):
+        sampled_points = az.extract(
+            self._data,
+            group=group,
+            var_names='theta',
+            combined=True,
+            num_samples=num_samples,
+            rng=True,
+        ).loc[[var1_id, var2_id]].values[:, 1:].T
+        vertices = self._process_points(sampled_points)
+        return self._plot_area(vertices, var1_id, var2_id, label='sampled support')
+
+    def _bivariate_plot(
+            self,
+            var1_id,
+            var2_id,
+            group='posterior',
+            num_samples=30000,
+            bandwidth=None,
+    ):
+        sampled_points = az.extract(
+            self._data,
+            group=group,
+            var_names='theta',
+            combined=True,
+            num_samples=num_samples,
+            rng=True,
+        ).loc[[var1_id, var2_id]].values[:, 1:].T
+        xax = self._axes_range(var1_id)
+        yax = self._axes_range(var2_id)
+        return hv.Bivariate(sampled_points, kdims=[xax, yax], label='density').opts(
+            bandwidth=bandwidth, filled=True, alpha=1.0, cmap='Blues'
+        )
 
 
 
 
 
 if __name__ == "__main__":
-    from pta.sampling.uniform import sample_flux_space_uniform, UniformSamplingModel
-    from pta.sampling.tfs import TFSModel
+    # from pta.sampling.uniform import sample_flux_space_uniform, UniformSamplingModel
+    # from pta.sampling.tfs import TFSModel
     import pickle, os
     from sbmfi.models.small_models import spiro, multi_modal
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
@@ -825,26 +1361,92 @@ if __name__ == "__main__":
     from sbmfi.core.observation import MVN_BoundaryObservationModel
     from sbmfi.settings import SIM_DIR
     from sbmfi.core.polytopia import FluxCoordinateMapper, compute_volume
-
-
+    # from sbmfi.inference.simulator import MCMC
+    from cdd import Fraction
+    from bokeh.plotting import show, output_file
+    from arviz import plot_density
+    from holoviews.operation.stats import univariate_kde
+    hv.extension('bokeh')
 
     bs = 10
-    model, kwargs = spiro(batch_size=3, which_measurements='com', build_simulator=True,
-                          which_labellings=list('CD'), v2_reversible=True, logit_xch_fluxes=True, include_bom=False)
-    # model, kwargs = build_e_coli_anton_glc(backend='numpy', build_simulator=True, batch_size=bs, which_measurements='anton')
-
-    sdf = kwargs['substrate_df']
-    simm = kwargs['datasetsim']._obmods
-    bom = kwargs['datasetsim']._bom
-
-    mcmc = MCMC(
-        model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom
+    # model, kwargs = spiro(
+    #     backend='torch',
+    #     batch_size=3, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
+    #     v2_reversible=True, logit_xch_fluxes=True, include_bom=False, seed=None
+    # )
+    # TODO TORCH IS MUUUUUUUUUCH FASTER THAN NUMPY FOR PARALLEL RUNNING
+    # model, kwargs = build_e_coli_anton_glc(
+    #     backend='numpy', build_simulator=True, batch_size=bs, which_measurements='anton', seed=None
+    # )
+    # pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
+    pol = pickle.load(open('pol.p', 'rb'))
+    # nc_file = "C:\python_projects\sbmfi\src\sbmfi\inference\e_coli_anton_glc7_prior.nc"
+    nc_file = "C:\python_projects\sbmfi\spiro.nc"
+    post = az.from_netcdf(nc_file).sel()
+    post = post.sel(draw=slice(3, None))
+    # az.plot_trace(post)
+    # print(123123123)
+    coord = post.posterior_predictive.coords['data_id'].values[7]
+    az.plot_ppc(
+        post,
+        data_pairs={'observed_data': 'simulated_data'},
+        observed=False,
+        coords={'data_id': [coord]},
     )
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    post = mcmc.run(n=100, n_chains=3, thinning_factor=3, n_cdf=10, return_post_pred=True, line_proposal_std=5.0)
+
+    # az.plot_trace(post)
+    #
+    # post = post.rename({'param': 'theta'})
+    # v_rep = pd.read_excel('v_rep.xlsx')
+    # pm = PlotMonster(pol, post, v_rep=v_rep)
+    # var1_id = 'B_svd0'
+    # var2_id = 'B_svd1'
+    # group = 'prior'
+    #
+    # a = pm._plot_polytope_area(var1_id, var2_id)
+    # b = pm._data_hull(var1_id=var1_id, var2_id=var2_id, group=group)
+    # # c = pm._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group)
+    # d = pm._plot_density(var1_id)
+    # e = pm._plot_density(var1_id, group=group)
+    # output_file('test.html')
+    #
+    # show(hv.render(d * e))
+
+    # sdf = kwargs['substrate_df']
+    # datasetsim = kwargs['datasetsim']
+    # simm = datasetsim._obmods
+    # bom = datasetsim._bom
+    #
+    # up = UniFluxPrior(model, cache_size=25000)
+    #
+    # mcmc = MCMC(
+    #     model=model,
+    #     substrate_df=sdf,
+    #     mdv_observation_models=simm,
+    #     boundary_observation_model=bom,
+    #     prior=up,
+    # )
+    # mcmc.set_measurement(x_meas=kwargs['measurements'])
+    #
+    # # pickle.dump(mcmc, open('mcmc.p', 'wb'))
+    # # mcmc = pickle.load(open('mcmc.p', 'rb'))
+    #
+    # run_kwargs = dict(
+    #     n=5, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=5, return_post_pred=True, line_proposal_std=5.0,
+    #     evaluate_prior=True,
+    # )
+    #
+    # parallel = False
+    # num_processes = 3
+    #
+    # if parallel:
+    #     post = mcmc.run_parallel(num_processes=num_processes, **run_kwargs)
+    # else:
+    #     run_kwargs['n_chains'] *= num_processes
+    #     post = mcmc.run(**run_kwargs)
+
+
+    # az.to_netcdf(post, filename='e_coli_anton_glc9.nc')
 
     # model, kwargs = spiro(batch_size=3, which_measurements='lcms', build_simulator=True,
     #                       which_labellings=list('CD'), v2_reversible=True, logit_xch_fluxes=True)
@@ -871,46 +1473,3 @@ if __name__ == "__main__":
     # az.plot_trace(
     #     post,
     # )
-
-
-
-    # t, f = prior.sample_dataframes(5)
-    # f.to_excel('f2.xlsx')
-    # dss = DataSetSim(model, sdf, simm, bom, num_processes=2)
-    # f = pd.read_excel('f2.xlsx', index_col=0)
-
-    # co2 = model.metabolites.get_by_id('co2_c')
-    # co2_consume = []
-    # co2_produce = []
-    # for reaction in co2._reaction:
-    #     if reaction.id not in f.columns:
-    #         continue
-    #     if co2 in reaction.reactants:
-    #         co2_consume.append(reaction.id)
-    #     elif co2 in reaction.products:
-    #         co2_produce.append(reaction.id)
-    #
-    # f.loc[:, co2_consume].to_excel('co2_consume.xlsx')
-    # f.loc[:, co2_produce].to_excel('co2_produce.xlsx')
-    # print(f.loc[:, co2_consume])
-    # print(f.loc[:, co2_consume].sum(1))
-    # print(f.loc[:, co2_produce])
-    # print(f.loc[:, co2_produce].sum(1))
-
-
-    # result = dss.simulate_set(fluxes=f, n_obs=3)
-    # model.pretty_cascade(1)['A'].loc[(0, slice(None))].to_excel('a_1_1.xlsx')
-    # model.reactions.get_by_id('GLYCL').pretty_tensors(1)['A'].to_excel('glycl_a_2.xlsx')
-
-    # result['fluxes'] = f.values
-    #
-    # file = 'test_tomek.h5'
-    # if os.path.exists(file):
-    #     os.remove(file)
-    #
-    # dss.to_hdf(file, result, 'ding')
-    # a, v = DataSetSim.read_hdf('test_tomek.h5', 'ding', 'mdv', pandalize=True)
-    # print(1 - (model._sum @ a.T))
-    # aa = DataSetSim.read_hdf('test.h5', 'ding', 'validx', pandalize=True)
-
-

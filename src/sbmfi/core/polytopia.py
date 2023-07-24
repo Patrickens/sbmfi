@@ -19,11 +19,11 @@ from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_
 from sbmfi.core.linalg import NumpyBackend, LinAlg
 from sbmfi.core.reaction import LabellingReaction
 
-from pta import UniformSamplingModel
-from pta.sampling.uniform import pb
-from pta.sampling.commons import (
-    SamplingResult, split_chains, apply_to_chains, fill_common_sampling_settings, sample_from_chains
-)
+# from pta import UniformSamplingModel
+# from pta.sampling.uniform import pb
+# from pta.sampling.commons import (
+#     SamplingResult, split_chains, apply_to_chains, fill_common_sampling_settings, sample_from_chains
+# )
 import copy
 import multiprocessing as mp
 
@@ -118,11 +118,16 @@ class LabellingPolytope(Polytope):
         return self._cvx_result
 
     @staticmethod
-    def from_Polytope(polytope:Polytope, labellingpolytope: 'LabellingPolytope'):
-        pol = LabellingPolytope(
-            polytope.A, polytope.b, polytope.S, polytope.h,
-            labellingpolytope.mapper, labellingpolytope.objective, labellingpolytope.non_labelling_reactions
-        )
+    def from_Polytope(polytope:Polytope, labellingpolytope: 'LabellingPolytope' = None):
+        kwargs = {}
+        if labellingpolytope is not None:
+            kwargs = {
+                'mapper': labellingpolytope.mapper,
+                'objective': labellingpolytope.objective,
+                'non_labelling_reactions': labellingpolytope.non_labelling_reactions,
+            }
+
+        pol = LabellingPolytope(polytope.A, polytope.b, polytope.S, polytope.h, **kwargs)
         pol.transformation = polytope.transformation
         pol.shift = polytope.shift
         return pol
@@ -213,7 +218,10 @@ def V_representation(polytope: Polytope, number_type='fraction'):
     # # TODO try bretl, somehow give it some equality constraints...
     # vertices = compute_polytope_vertices(A=polytope.A.values, b=polytope.b.values, number_type='float')
     # pypoman.duality.compute_polytope_vertices(A=self.A.values, b=self.b.values)
-    return pd.DataFrame(vertices, columns=polytope.A.columns)
+    v_rep = pd.DataFrame(vertices, columns=polytope.A.columns)
+    if number_type == 'fraction':
+        v_rep = v_rep.applymap(lambda x: float(x))
+    return v_rep
 
 
 def compute_polytope_halfspaces(vertices, number_type='fraction'):
@@ -623,7 +631,8 @@ def transform_polytope_keep_transform(
 
 
 # prof2 = line_profiler.LineProfiler()
-class PolytopeSamplingModel(UniformSamplingModel):
+# class PolytopeSamplingModel(UniformSamplingModel):
+class PolytopeSamplingModel(object):
     # combine stuff from labelling polytope and mapping things
     # this one is meant to be used by
     def __init__(
@@ -636,9 +645,9 @@ class PolytopeSamplingModel(UniformSamplingModel):
             **kwargs
     ):
         if transform_type not in ['rref', 'svd']:
-            raise ValueError
+            raise ValueError(f'{transform_type}')
         if basis_coordinates not in ['transformed', 'rounded']:
-            raise ValueError
+            raise ValueError(f'{basis_coordinates}')
         if polytope.A.columns.str.contains(_xch_reactions_rex).any() or \
                 polytope.A.columns.str.contains(_rev_reactions_rex).any():
             print(
@@ -661,7 +670,8 @@ class PolytopeSamplingModel(UniformSamplingModel):
         else:
             self._T_1 = pd.DataFrame(np.eye(F_simp.A.shape[1]), index=F_simp.A.columns, columns=F_simp.A.columns)
             self._tau = np.zeros(F_simp.A.shape[1])
-        self._F_round, E, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
+        F_round, E, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
+        self._F_round = LabellingPolytope.from_Polytope(F_round)
         self._basis_pol = self._F_round if basis_coordinates == 'rounded' else F_trans
         self._E_1 = pd.DataFrame(np.linalg.inv(E.T), index=E.index, columns=E.columns).T
         self._log_det_E = np.log(np.linalg.eig(E)[0]).sum()
@@ -699,6 +709,10 @@ class PolytopeSamplingModel(UniformSamplingModel):
     def basis_polytope(self):
         return self._basis_pol
 
+    @property
+    def dimensionality(self) -> int:
+        return self._G.shape[1]
+
     def to_basis(self, fluxes: pd.DataFrame, pandalize=False):
         index = None
         if isinstance(fluxes, pd.DataFrame):
@@ -718,7 +732,7 @@ class PolytopeSamplingModel(UniformSamplingModel):
 
     def get_initial_points(self, num_points: int):
         # UniformSamplingModel.get_initial_points(self, num_points)
-        distances = self.h / self._la.norm(self.G, 2, 1)  # the arguments are ord and axis
+        distances = self._h / self._la.norm(self._G, ord=2, axis=1)  # the arguments are ord and axis
         radius = distances.min()
         # Sample random directions and scale them to a random length inside the hypersphere.
         samples = self._la.randu(shape=(self.dimensionality, num_points))
@@ -727,6 +741,11 @@ class PolytopeSamplingModel(UniformSamplingModel):
         ) / self._la.norm(samples, 2, 0)
         samples = samples * self._la.diag(length) * radius
         return samples.T
+
+    @property
+    def reaction_ids(self):
+        """Gets the IDs of the reactions in the model."""
+        return self._reaction_ids
 
     def to_linalg(self, linalg: LinAlg):
         new = copy.copy(self)
@@ -1053,6 +1072,8 @@ class FluxCoordinateMapper(object):
             n = net_fluxes.shape[0]
             if return_type in ['theta', 'both']:
                 net_basis_samples = self._sampler.to_basis(net_fluxes)
+        else:
+            n = net_fluxes.shape[0]
 
         if len(self._fwd_id) > 0:
             if xch_fluxes is None:
@@ -1103,7 +1124,7 @@ class FluxCoordinateMapper(object):
             net_basis_variables = theta
         thermo_fluxes = self._sampler.to_fluxes(net_basis_variables)  # should be in linalg form already
         if len(self._fwd_id) > 0:
-            thermo_fluxes = self._la.cat([thermo_fluxes, xch_fluxes], dim=1)
+            thermo_fluxes = self._la.cat([thermo_fluxes, xch_fluxes], dim=-1)
         if pandalize:
             thermo_fluxes = pd.DataFrame(self._la.tonp(thermo_fluxes), index=index, columns=self.thermo_fluxes_id)
         if return_thermo:
@@ -1177,10 +1198,16 @@ def coordinate_hit_and_run_cpp(  # this is a very fast sampler written in C++ an
         new_basis_points=False,
         return_basis_samples=False,
         return_psm=False,
+        linalg: LinAlg = None,
+        transform_type: str = 'svd',
+        basis_coordinates: str = 'rounded',
+        pandalize=False,
 ):
     result = {}
     if isinstance(model, LabellingPolytope):
-        model = PolytopeSamplingModel(model, model.A.columns.tolist())
+        model = PolytopeSamplingModel(
+            model, transform_type=transform_type, basis_coordinates=basis_coordinates,
+        )
         if return_psm:
             result['psm'] = model
 
@@ -1206,7 +1233,7 @@ def coordinate_hit_and_run_cpp(  # this is a very fast sampler written in C++ an
     print(A.shape, b.shape)
     fluxes = pd.DataFrame(model.to_fluxes(basis_samples), columns=model.reaction_ids)
     result['fluxes'] = fluxes
-
+    # TODO use linalg to convert stuff to right dtype
     if return_basis_samples:
         result['basis_samples'] = pd.DataFrame(basis_samples, columns=model.basis_id)
     if new_basis_points:
@@ -1217,11 +1244,20 @@ def coordinate_hit_and_run_cpp(  # this is a very fast sampler written in C++ an
 
 # @profile(profiler=prof2)
 def sample_polytope(
-        psm: PolytopeSamplingModel,
+        model: Union[PolytopeSamplingModel, LabellingPolytope],
         n: int = 2000,
-        n0: int = 100,
-        n_chains: int = 12,
+        n_burn: int = 100,
+        initial_points = None,
+        thinning_factor = 3,
+        n_chains: int = 4,
+        new_basis_points=False,
+        return_basis_samples=False,
+        return_psm = False,
         phi: float = None,
+        linalg: LinAlg = None,
+        transform_type: str = 'svd',
+        basis_coordinates: str = 'rounded',
+        pandalize=False,
 ):
     # TODO just use the function MCMC from sbmfi.estimate.simulator!
     r"""
@@ -1236,7 +1272,7 @@ def sample_polytope(
         x0: A `d`-dim Tensor representing a starting point of the chain
             satisfying the constraints.
         n: The number of resulting samples kept in the output.
-        n0: The number of burn-in samples. The chain will produce
+        n_burn: The number of burn-in samples. The chain will produce
             n+n0 samples but the first n0 samples are not saved.
         seed: The seed for the sampler. If omitted, use a random seed.
 
@@ -1244,31 +1280,52 @@ def sample_polytope(
         (n, d) dim Tensor containing the resulting samples.
     """
 
+    result = {}
+    if isinstance(model, LabellingPolytope):
+        model = PolytopeSamplingModel(
+            model, transform_type=transform_type, basis_coordinates=basis_coordinates, linalg=linalg
+        )
+        if return_psm:
+            result['psm'] = model
+
     if (phi is not None) and (phi < 1.0):
         raise ValueError('c`est ne pas possiblementenete')
 
-    rands = psm._la.randu((n, n_chains), dtype=psm._G.dtype)
-    K = psm.dimensionality
-    rs = psm._la.sample_hypersphere(shape=(n, n_chains, K))
+    K = model.dimensionality
 
-    # compute matprods in batch
-    ARs = psm._G[None, ...] @ psm._la.transax(rs)
-    chains = psm._la.get_tensor(shape=(n, n_chains, K))  # use for PSRF computation
-    x = psm.get_initial_points(num_points=n_chains).T
+    n_per_chain = math.ceil(n / n_chains)
+    n_tot = n_burn + n_per_chain * thinning_factor
+    chains = model._la.get_tensor(shape=(n_per_chain, n_chains, K))  # use for PSRF computation
 
-    for i in range(n):
+    if initial_points is None:
+        x = model.get_initial_points(num_points=n_chains)
+    else:
+        x = initial_points
+        if not x.shape[0] == n_chains:
+            raise ValueError
+
+    biatch = min(2500, n_tot)
+    for i in range(n_tot):
         # given x, the next point in the chain is x+alpha*r
         #             # it also satisfies A(x+alpha*r)<=b which implies A*alpha*r<=b-Ax
         #             # so alpha<=(b-Ax)/ar for ar>0, and alpha>=(b-Ax)/ar for ar<0.
         #             # b - A @ x is always >= 0, clamping for numerical tolerances
-        ar = ARs[i]
-        r = rs[i]
-        rnd = rands[i]
 
-        dist = psm._h - psm._G @ x.T
+        if i % biatch == 0:
+            # pre-sample samples from hypersphere
+            # uniform samples from unit ball in d dims
+            sphere_samples = model._la.sample_hypersphere(shape=(biatch, n_chains, K))
+            # batch compute distances to all planes
+            ARs = model._G[None, ...] @ model._la.transax(sphere_samples)
+            rands = model._la.randu((biatch, n_chains), dtype=model._G.dtype)
+
+        ar = ARs[i % biatch]
+        sphere_sample = sphere_samples[i % biatch]
+        rnd = rands[i % biatch]
+        dist = model._h - model._G @ x.T
         dist[dist < 0.0] = 0.0
         alpha_min = dist / ar
-        alpha_max = psm._la.vecopy(alpha_min)
+        alpha_max = model._la.vecopy(alpha_min)
 
         alpha_max[alpha_max < 0.0] = alpha_max.max()
         alpha_max = alpha_max.min(0)
@@ -1284,28 +1341,46 @@ def sample_polytope(
             # this is ellipsoid aware sampling for volume computation, meaning that
             # we choose the next step to be in the intersection of the polytope and a ball of radius rho
             # a = 1  # length of ball(1)-vector is 1...
-            b = (r * x).sum(1) * 2
+            b = (sphere_sample * x).sum(1) * 2
             c = (x * x).sum(1) - phi ** 2   # elements of ax**2 + bx + c = 0
-            sqrt = psm._la.sqrt(b ** 2 - 4 * c)
+            sqrt = model._la.sqrt(b ** 2 - 4 * c)
 
             phi_max = (-b + sqrt) / 2
             phi_min = (-b - sqrt) / 2
 
-            alpha_max = psm._la.minimum(phi_max, alpha_max)
-            alpha_min = psm._la.maximum(phi_min, alpha_min)
+            alpha_max = model._la.minimum(phi_max, alpha_max)
+            alpha_min = model._la.maximum(phi_min, alpha_min)
 
         # this means we do vanilla hit-and-run with uniform proposal along the line
         alpha = alpha_min + rnd * (alpha_max - alpha_min)
-        x = x + alpha[:, None] * r
-        if i >= n0:
-            chains[i - n0, :, :] = x
+        x = x + alpha[:, None] * sphere_sample
 
-    return chains
+        j = i - n_burn
+        if (j > -1) & (j % thinning_factor == 0):
+            k = j // thinning_factor
+            chains[k] = x
+
+    basis_samples = model._la.view(chains, (n_chains * n_per_chain, K))[:n, :]
+    fluxes = model.to_fluxes(basis_samples)
+
+    if new_basis_points:
+        new_points_idx = model._la.choice(n_chains, n)
+        result['new_basis_points'] = basis_samples[new_points_idx, :].T
+    if return_basis_samples:
+        if basis_coordinates == 'transformed':
+            basis_samples = model.to_basis(fluxes)
+        if pandalize:
+            basis_samples = pd.DataFrame(model._la.tonp(basis_samples), columns=model.basis_id)
+        result['basis_samples'] = basis_samples
+    if pandalize:
+        fluxes = pd.DataFrame(model._la.tonp(fluxes), columns=model.reaction_ids)
+    result['fluxes'] = fluxes
+    return result
 
 def compute_volume(
         psm: PolytopeSamplingModel,
         n: int = -1,
-        thinning_factor: int = 12,
+        thinning_factor: int = 4,
         epsilon: float = 1.0,
         enumerate_vertices: bool = False,
         return_all_ratios: bool = False
@@ -1322,8 +1397,8 @@ def compute_volume(
     #  but it seems that its random whose is bigger
     # basis_samples = self.sample_polytope(n=5*n, thinning_factor=thinning_factor, phi=1.1)
     # phis = self._la.norm(basis_samples, 2, 1)
-    vsm = psm.to_linalg(LinAlg('numpy'))
-    sampling_result = coordinate_hit_and_run_cpp(model=vsm, n=n * 5, thinning_factor=thinning_factor * 2, return_basis_samples=True)
+    psm = psm.to_linalg(LinAlg('numpy'))
+    sampling_result = sample_polytope(model=psm, n=n * 5, thinning_factor=thinning_factor * 2, return_basis_samples=True)
     basis_samples = sampling_result['basis_samples']
     phis = np.linalg.norm(basis_samples, ord=2, axis=1)
 
@@ -1366,8 +1441,7 @@ def compute_volume(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
-    from sbmfi.estimate.priors import UniFluxPrior
-    from pta.sampling.uniform import sample_flux_space_uniform
+    from sbmfi.inference.priors import UniFluxPrior
 
     # n = 5
     # m, k = spiro(build_simulator=False, v2_reversible=True, batch_size=n, backend='torch')
@@ -1377,14 +1451,14 @@ if __name__ == "__main__":
     # fcm = FluxCoordinateMapper(m, linalg=LinAlg('numpy'))
     # pickle.dump(fcm._Fn, open('ff.p', 'wb'))
 
-    # m, k = spiro(build_simulator=True)
+    # m, k = spiro(build_simulator=True, backend='torch')
     m, k = build_e_coli_anton_glc(build_simulator=True)
 
-    print(m._fcm._sampler.reaction_ids)
-    print(m._fcm._sampler.dimensionality)
 
-    usm = UniformSamplingModel(m._fcm._Fn, reaction_ids=m._fcm._Fn.A.columns.tolist())
-    res = sample_flux_space_uniform(usm, num_samples=200)
+    a = V_representation(m._fcm._sampler._F_round, number_type='float')
+    # samples = sample_polytope(m._fcm._sampler, n=50, new_basis_points=True)
+    # print(samples['fluxes'].shape)
+
 
     # res = coordinate_hit_and_run_cpp(m._fcm._sampler)
 

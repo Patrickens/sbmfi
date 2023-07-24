@@ -194,9 +194,6 @@ class MDV_LogRatioTransform():
         # TODO come up with some reasonable transform_id!
         # self._obsmod = mdv_observation_model
 
-        if transformation not in ['alr', 'clr', 'ilr']:
-            raise ValueError('not a valid log-ratio transoformation')
-
         self._observation_df = observation_df
         self._la = linalg
 
@@ -232,9 +229,9 @@ class MDV_LogRatioTransform():
         elif transformation == 'alr':
             raise NotImplementedError('TODO, also need to implement self.transformation_id')
         elif transformation == 'clr':
-            raise NotImplementedError('figure out how to prase sumatrix and meanatrix')
+            pass
         else:
-            raise ValueError
+            raise ValueError('not a valid log-ratio transoformation')
 
         self._transfunc = eval(f'self._{transformation}')
         self._inv_transfunc = eval(f'self._{transformation}_inv')
@@ -970,7 +967,7 @@ if __name__ == "__main__":
     from sbmfi.models.build_models import build_e_coli_anton_glc
     from sbmfi.core.polytopia import coordinate_hit_and_run_cpp
     import pickle
-    from sbmfi.estimate.priors import UniFluxPrior
+    from sbmfi.inference.priors import UniFluxPrior
 
     import pandas as pd
 

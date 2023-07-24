@@ -97,7 +97,7 @@ class NumpyBackend(object):
     _AUTO_DIFF = False
     _BATCH_PROCESSING = True
 
-    def __init__(self, seed=0):
+    def __init__(self, seed=None, **kwargs):
         self._rng = np.random.default_rng(seed=seed)
 
     @staticmethod
@@ -269,7 +269,7 @@ class TorchBackend(object):
     _AUTO_DIFF = True
     _BATCH_PROCESSING = True
 
-    def __init__(self, seed=None, solver='lu_solve_ex', device='cpu'):
+    def __init__(self, seed=None, solver='lu_solve_ex', device='cpu', **kwargs):
         version = _conditional_torch_import()
 
         self._device = torch.device('cpu')
@@ -442,6 +442,12 @@ class LinAlg(object):
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        kwargs = state['_backwargs']
+        backend = kwargs['backend']
+        if backend == 'numpy':
+            self._BACKEND = NumpyBackend(**kwargs)
+        elif backend == 'torch':
+            self._BACKEND = TorchBackend(**kwargs)
         functions = self._fill_functions(self._backwargs['backend'])
         self.__dict__.update(functions)
 
@@ -584,7 +590,7 @@ class LinAlg(object):
     def unsqueeze(self, A, dim):
         return self._BACKEND.unsqueeze(A, dim)
 
-    def cat(self, As, dim):
+    def cat(self, As, dim=0):
         return self._BACKEND.cat(As, dim)
 
     def choice(self, n, tot):
@@ -593,6 +599,10 @@ class LinAlg(object):
     def sample_hypersphere(self, shape):
         rnd = self.randu(shape)
         return rnd / self.norm(rnd, 2, -1, True)
+
+
+    # def norm(self):
+    #     pass
 
     def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, which='uniform', std=0.1):
         if not (lo.shape == hi.shape) or (len(lo.shape) != 1):

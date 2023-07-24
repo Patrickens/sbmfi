@@ -6,14 +6,14 @@ from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservatio
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex, _excel_polytope
-from sbmfi.estimate.simulator import DataSetSim
+from sbmfi.inference.simulator import DataSetSim
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os
 import cobra
 from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
-from pta import ConcentrationsPrior
+# from pta import ConcentrationsPrior
 import pickle
 from sbmfi.lcmsanalysis.formula import Formula, isotopologues
 from sbmfi.lcmsanalysis.util import build_correction_matrix
@@ -1569,8 +1569,6 @@ def read_anton_substrates(which_labellings=None):
     return pd.read_csv(file, index_col=0).loc[which_labellings]
 
 
-from sbmfi.estimate.priors import UniFluxPrior
-from sbmfi.core.polytopia import coordinate_hit_and_run_cpp
 def _parse_anton_fluxes():
     v_map = {}
     for pway, vdct in _anton_model_kwargs.items():
@@ -1615,8 +1613,8 @@ def _parse_anton_fluxes():
     xch_fluxes = xch_fluxes.clip(lower=LabellingReaction._RHO_MIN, upper=LabellingReaction._RHO_MAX)
     xch_fluxes.index += '_xch'
 
-    ptaf = pd.read_excel('pta_fluxes.xlsx', index_col=0)
-    ptaf_odering = ptaf.columns.drop(['EX_pi_e', 'PIt2r', 'EX_h2o_e', 'H2Ot', 'EX_h_e', 'PPA'])
+    # ptaf = pd.read_excel('pta_fluxes.xlsx', index_col=0)
+    # ptaf_odering = ptaf.columns.drop(['EX_pi_e', 'PIt2r', 'EX_h2o_e', 'H2Ot', 'EX_h_e', 'PPA'])
 
     net_fluxes = (net_fluxes / -net_fluxes.loc['EX_glc__D_e']) * 10.0  # NB scales input fluxes to 10
 
@@ -1994,15 +1992,17 @@ def build_e_coli_anton_glc(
         total_intensities = pd.Series(total_intensities)
         obsmods = LCMS_ObservationModel.build_models(model, annotation_dfs, total_intensities=total_intensities)
 
+    thermo_fluxes, theta = None, None
     if annotation_df is not None:
         bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, _bmid_ANTON)
-        datasetsim = DataSetSim(model, substrate_df, obsmods, bom)
+        datasetsim = DataSetSim(model, substrate_df, obsmods, None, bom)
 
+        thermo_fluxes = read_anton_fluxes()
+        fluxes = model._fcm.map_thermo_2_fluxes(thermo_fluxes=thermo_fluxes, pandalize=True)
+        theta = model._fcm.map_fluxes_2_theta(fluxes, pandalize=True)
         if which_measurements == 'anton':
             measurements = measurements.loc[datasetsim.data_id]
         elif which_measurements == 'tomek':
-            thermo_fluxes = read_anton_fluxes()
-            fluxes = model._fcm.map_thermo_2_fluxes(thermo_fluxes=thermo_fluxes, pandalize=True)
             batched_fluxes = model._la.tile(fluxes.T, (batch_size,)).T
             measurements = datasetsim.simulate(batched_fluxes, n_obs=1, pandalize=True).iloc[[0]]
             raise ValueError('not entirely working yet')
@@ -2015,6 +2015,8 @@ def build_e_coli_anton_glc(
         'measurements': measurements,
         'datasetsim': datasetsim,
         'ratio_repo': _gluc_ratio_repo,
+        'thermo_fluxes': thermo_fluxes,
+        'theta': theta,
     }
 
     return model, kwargs

@@ -42,14 +42,14 @@ from pathlib import Path
 import shutil
 import pandas as pd
 from sbmfi.core.model import RatioMixin
-from sbmfi.estimate.priors import (
+from sbmfi.inference.priors import (
     _BasePrior,
     UniFluxPrior,
     ThermoPrior,
     RatioPrior,
     _CannonicalPolytopeSupport,
 )
-from sbmfi.estimate.simulator import (
+from sbmfi.inference.simulator import (
     BoundaryObservationModel,
     FluxSimulator
 )

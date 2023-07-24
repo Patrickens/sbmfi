@@ -113,12 +113,14 @@ def obervervator_worker(task: OrderedDict, model=None):
 
     n_obs = task['n_obs']
     observation_model = _OBSMODS[task['input_labelling'].name]
-    data_chunk = MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], n_obs, observation_model._n_d))
+    n_obshape = max(1, n_obs)
+    slicer = 0 if n_obs == 0 else slice(None)
+    data_chunk = MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], n_obshape, observation_model._n_d))
     bs = MODEL._la._batch_size
 
     for i in range(0, mdv_chunk.shape[0], bs):
         data_slice = observation_model(mdv=mdv_chunk[i: i + bs, :], n_obs=n_obs)  # TODO sizing!
-        data_chunk[i: i + bs] = data_slice
+        data_chunk[i: i + bs, slicer, :] = data_slice
 
     result_chunk['data_chunk'] = data_chunk
 
