@@ -692,7 +692,7 @@ class LabellingModel(Model):
     def build_simulator(
             self,
             free_reaction_id=None,
-            transform_type='svd',
+            kernel_basis='svd',
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
             verbose=False,
@@ -700,7 +700,7 @@ class LabellingModel(Model):
         self._initialize_state()
         self._fcm = FluxCoordinateMapper(
             model=self,
-            transform_type=transform_type,
+            kernel_basis=kernel_basis,
             basis_coordinates=basis_coordinates,
             free_reaction_id=free_reaction_id,
             logit_xch_fluxes=logit_xch_fluxes,
@@ -1080,12 +1080,12 @@ class EMU_Model(LabellingModel):
     def build_simulator(
             self,
             free_reaction_id=None,
-            transform_type='svd',
+            kernel_basis='svd',
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
             verbose=False,
     ):
-        super().build_simulator(free_reaction_id, transform_type, basis_coordinates, logit_xch_fluxes, verbose)
+        super().build_simulator(free_reaction_id, kernel_basis, basis_coordinates, logit_xch_fluxes, verbose)
         self._initialize_emu_split()
 
         for reaction in self.labelling_reactions + self.pseudo_reactions:

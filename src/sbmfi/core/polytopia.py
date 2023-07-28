@@ -555,19 +555,25 @@ def round_polytope_keep_ellipsoid(polytope: Polytope, settings: PolyRoundSetting
     # check if 0 is a solution
     if not blank_polytope.b.min() > 0:
         raise ValueError("Zero point not inside rounded polytope")
-    polytope.apply_shift(blank_polytope.shift.values)
-    polytope.apply_transformation(blank_polytope.transformation.values)
+
     E = blank_polytope.transformation
+    epsilon = blank_polytope.shift.to_frame()
+
     E.columns = 'B_' + cols
     E.index = cols
+
+    polytope.apply_shift(epsilon.values)
+    polytope.apply_transformation(E.values)
+    E_1 = pd.DataFrame(np.linalg.inv(E), index=E.columns, columns=E.index)
     polytope.A.columns = E.columns
-    return polytope, E, blank_polytope.shift.values[None, :]
+    polytope.transformation.columns = E.columns
+    return polytope, E, E_1, epsilon
 
-
+# PolyRoundApi.transform_polytope()
 def transform_polytope_keep_transform(
     polytope: Polytope,
     settings: PolyRoundSettings = PolyRoundSettings(),
-    transform_type = 'svd',
+    kernel_basis ='svd',
 ) -> Polytope:
     """
     Express polytope in a (shifted) orthogonal basis in the null space of the equality constraints to remove all
@@ -590,9 +596,6 @@ def transform_polytope_keep_transform(
         pre_b_dist = polytope.border_distance(x)
         print("border distance pre-transformation is: " + str(pre_b_dist))
 
-    # put x at zero!
-    polytope.apply_shift(x)
-
     if settings.verbose:
         x_0 = np.zeros(x.shape)
         b_dist_at_zero = polytope.border_distance(x_0)
@@ -601,33 +604,43 @@ def transform_polytope_keep_transform(
     cols = polytope.A.columns
     stoichiometry = polytope.S
 
-    if transform_type =='svd':
-        transformation = svd_null_space(stoichiometry, tolerance=settings.numerics_threshold)
-        T_1 = transformation.T
-    elif transform_type == 'rref':
-        transformation, free_vars = rref_null_space(stoichiometry, tolerance=settings.numerics_threshold)
-        T_1 = pd.DataFrame(0, index=transformation.columns, columns=transformation.index)
-        T_1.loc[transformation.columns, transformation.columns] = np.eye(len(free_vars))
+    if kernel_basis == 'svd':
+        T = svd_null_space(stoichiometry, tolerance=settings.numerics_threshold)
+        T_1 = T.T
+
+        # put x at zero! # TODO is this correct
+        polytope.apply_shift(x)
+    elif kernel_basis == 'rref':
+        T, free_vars = rref_null_space(stoichiometry, tolerance=settings.numerics_threshold)
+        T_1 = pd.DataFrame(0, index=T.columns, columns=T.index)
+        T_1.loc[T.columns, T.columns] = np.eye(len(free_vars))
+
+        x_star = T_1 @ x
+        tau = (x - (T @ x_star))
+        tau[abs(tau) < settings.numerics_threshold] = 0.0
+        polytope.apply_shift(tau.values)
     else:
         raise ValueError
 
+    tau = polytope.shift.to_frame()
+
     polytope.transformation.columns = cols
-    polytope.apply_transformation(transformation)
-    polytope.A.columns = transformation.columns
+    polytope.apply_transformation(T)
+    polytope.A.columns = T.columns
     if settings.verbose:
-        u = np.zeros((transformation.shape[1], 1))
-        norm_check = np.linalg.norm(np.matmul(stoichiometry.values, transformation))
+        u = np.zeros((T.shape[1], 1))
+        norm_check = np.linalg.norm(np.matmul(stoichiometry.values, T))
         print("norm of the null space is: " + str(norm_check))
         b_dist = polytope.border_distance(u)
         print("border distance after transformation is: " + str(b_dist))
         # test if we can reproduce the original x
         trans_x = polytope.back_transform(u)
-        x_rec_diff = np.max(trans_x - np.squeeze(x))
+        x_rec_diff = np.max(trans_x - np.squeeze(tau.values))
         print("the deviation of the back transform is: " + str(x_rec_diff))
     if isinstance(polytope, LabellingPolytope):
         polytope._mapper = None
         polytope._objective = None
-    return polytope, T_1, x.T
+    return polytope, T, T_1, tau
 
 
 # prof2 = line_profiler.LineProfiler()
@@ -639,13 +652,13 @@ class PolytopeSamplingModel(object):
             self,
             polytope: LabellingPolytope,
             pr_verbose = False,
-            transform_type = 'svd',
+            kernel_basis ='svd',
             basis_coordinates = 'rounded',
             linalg: LinAlg = None,
             **kwargs
     ):
-        if transform_type not in ['rref', 'svd']:
-            raise ValueError(f'{transform_type}')
+        if kernel_basis not in ['rref', 'svd']:
+            raise ValueError(f'{kernel_basis}')
         if basis_coordinates not in ['transformed', 'rounded']:
             raise ValueError(f'{basis_coordinates}')
         if polytope.A.columns.str.contains(_xch_reactions_rex).any() or \
@@ -657,25 +670,25 @@ class PolytopeSamplingModel(object):
             )
 
         self._pr_settings = PolyRoundSettings(verbose=pr_verbose, **kwargs)
-        self._transtype = transform_type # if transform_type in ['svd', 'rref']
-        self._bascoor = basis_coordinates  # if coordinates in ['rouded', 'transform']
+        self._kerbas = kernel_basis # if transform_type in ['svd', 'rref']
+        self._bascoor = basis_coordinates  # if coordinates in ['rounded', 'transform']
 
-        normalize = transform_type != 'rref'
+        normalize = kernel_basis != 'rref'
         F_simp = PolyRoundApi.simplify_polytope(polytope, settings=self._pr_settings, normalize=normalize)
         F_trans = LabellingPolytope.from_Polytope(F_simp, polytope)
         if F_simp.S is not None:
-            F_trans, self._T_1, self._tau = transform_polytope_keep_transform(
-                F_simp, self._pr_settings, transform_type
+            F_trans, self._T, self._T_1, self._tau = transform_polytope_keep_transform(
+                F_simp, self._pr_settings, kernel_basis
             )
         else:
-            self._T_1 = pd.DataFrame(np.eye(F_simp.A.shape[1]), index=F_simp.A.columns, columns=F_simp.A.columns)
+            self._T = pd.DataFrame(np.eye(F_simp.A.shape[1]), index=F_simp.A.columns, columns=F_simp.A.columns)
+            self._T_1 = self._T.copy()
             self._tau = np.zeros(F_simp.A.shape[1])
-        F_round, E, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
+        F_round, self._E, self._E_1, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
         self._F_round = LabellingPolytope.from_Polytope(F_round)
         self._basis_pol = self._F_round if basis_coordinates == 'rounded' else F_trans
-        self._E_1 = pd.DataFrame(np.linalg.inv(E.T), index=E.index, columns=E.columns).T
-        self._log_det_E = np.log(np.linalg.eig(E)[0]).sum()
-
+        # self._E_1 = pd.DataFrame(np.linalg.inv(E), index=E.index, columns=E.columns).T
+        self._log_det_E = np.log(np.linalg.eig(self._E)[0]).sum()
         if basis_coordinates == 'transformed':
             self._basis_id = self._T_1.index
         else:
@@ -698,8 +711,8 @@ class PolytopeSamplingModel(object):
         return self._bascoor
 
     @property
-    def transform_type(self):
-        return self._transtype
+    def kernel_basis(self):
+        return self._kerbas
 
     @property
     def basis_id(self):
@@ -713,22 +726,34 @@ class PolytopeSamplingModel(object):
     def dimensionality(self) -> int:
         return self._G.shape[1]
 
-    def to_basis(self, fluxes: pd.DataFrame, pandalize=False):
+    def to_basis(self, net_fluxes: pd.DataFrame, pandalize=False):
         index = None
-        if isinstance(fluxes, pd.DataFrame):
-            index = fluxes.index
-            fluxes = fluxes.loc[:, self.reaction_ids].values
-        fluxes = self._la.get_tensor(values=fluxes)
-        result = (self._T_1 @ (fluxes - self._tau).T).T
-        if self._bascoor == 'basis':
-            result = (self._E_1 @ (result - self._epsilon).T).T
+        if isinstance(net_fluxes, pd.DataFrame):
+            index = net_fluxes.index
+            net_fluxes = net_fluxes.loc[:, self.reaction_ids].values
+        net_fluxes = self._la.get_tensor(values=net_fluxes)
+        result = (self._T_1 @ (net_fluxes - self._tau.T).T).T
+        if self._bascoor == 'rounded':
+            result = (self._E_1 @ (result - self._epsilon.T).T).T
         if pandalize:
-            result = pd.DataFrame(result, index=index, columns=self.basis_id)
+            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
         return result
 
-    def to_fluxes(self, value):
-        A, b = self._to_fluxes_transform
-        return self._la.transax(A @ self._la.transax(value) + b)
+    def to_fluxes(self, theta: pd.DataFrame, is_rounded=True, pandalize=True):
+        index = None
+        if isinstance(theta, pd.DataFrame):
+            index = theta.index
+            theta = theta.loc[:, self.basis_id].values
+        theta = self._la.get_tensor(values=theta)
+        if is_rounded:
+            A, b = self._to_fluxes_transform
+            fluxes = self._la.transax(A @ self._la.transax(theta) + b)
+        else:
+            # this means that we pass in transformed coordinates not rounded ones (useful for rref comparison)
+            fluxes = self._la.transax(self._T @ self._la.transax(theta) + self._tau)
+        if pandalize:
+            fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_ids)
+        return fluxes
 
     def get_initial_points(self, num_points: int):
         # UniformSamplingModel.get_initial_points(self, num_points)
@@ -756,7 +781,7 @@ class PolytopeSamplingModel(object):
             linalg.get_tensor(values=new._F_round.transformation.values),
             linalg.get_tensor(values=new._F_round.shift.values[:, np.newaxis]),
         )
-        for kwarg in ['_T_1', '_tau', '_E_1', '_epsilon']:
+        for kwarg in ['_T', '_T_1', '_tau', '_E', '_E_1', '_epsilon']:
             value = new.__dict__[kwarg]
             if isinstance(value, pd.DataFrame) or isinstance(value, pd.Series):
                 value = value.values
@@ -769,7 +794,7 @@ class FluxCoordinateMapper(object):
             self,
             model: 'LabellingModel',
             pr_verbose = False,
-            transform_type = 'svd',  # basis for null-space of simplified polytope
+            kernel_basis ='svd',  # basis for null-space of simplified polytope
             basis_coordinates = 'rounded',  # which variables will be considered free (basis or simplified)
             logit_xch_fluxes = True,  # whether to logit exchange fluxes
             free_reaction_id = None,
@@ -789,7 +814,7 @@ class FluxCoordinateMapper(object):
         self._n_lr = len(self.labelling_fluxes_id)
 
         self._sampler = PolytopeSamplingModel(
-            self._Fn, pr_verbose, transform_type, basis_coordinates, linalg, **kwargs
+            self._Fn, pr_verbose, kernel_basis, basis_coordinates, linalg, **kwargs
         )
 
         self._fwd_id = pd.Index(self._Ft.mapper.keys())
@@ -827,14 +852,6 @@ class FluxCoordinateMapper(object):
     def fwd_id(self):
         return self._fwd_id
 
-    # @property
-    # def basis_coordinates(self):
-    #     return self._sampler.basis_coordinates
-    #
-    # @property
-    # def transform_type(self):
-    #     return self._sampler.transform_type
-    #
     @property
     def logit_xch_fluxes(self):
         return self._logxch
@@ -842,7 +859,7 @@ class FluxCoordinateMapper(object):
     @property
     def fcm_kwargs(self):
         return {
-            'transform_type': self._sampler.transform_type,
+            'kernel_basis': self._sampler.kernel_basis,
             'basis_coordinates': self._sampler.basis_coordinates,
             'logit_xch_fluxes': self._logxch,
             'verbose': self._sampler._pr_settings.verbose,
@@ -1131,6 +1148,9 @@ class FluxCoordinateMapper(object):
             return thermo_fluxes
         return self.map_thermo_2_fluxes(thermo_fluxes, pandalize=pandalize)
 
+    def check_theta(self, theta):
+        pass
+
     def map_fluxes_2_thermo(self, fluxes: pd.DataFrame, pandalize=False):
         index = None
         if isinstance(fluxes, pd.DataFrame):
@@ -1199,14 +1219,14 @@ def coordinate_hit_and_run_cpp(  # this is a very fast sampler written in C++ an
         return_basis_samples=False,
         return_psm=False,
         linalg: LinAlg = None,
-        transform_type: str = 'svd',
+        kernel_basis: str = 'svd',
         basis_coordinates: str = 'rounded',
         pandalize=False,
 ):
     result = {}
     if isinstance(model, LabellingPolytope):
         model = PolytopeSamplingModel(
-            model, transform_type=transform_type, basis_coordinates=basis_coordinates,
+            model, kernel_basis=kernel_basis, basis_coordinates=basis_coordinates,
         )
         if return_psm:
             result['psm'] = model
@@ -1255,7 +1275,7 @@ def sample_polytope(
         return_psm = False,
         phi: float = None,
         linalg: LinAlg = None,
-        transform_type: str = 'svd',
+        kernel_basis: str = 'svd',
         basis_coordinates: str = 'rounded',
         pandalize=False,
 ):
@@ -1283,7 +1303,7 @@ def sample_polytope(
     result = {}
     if isinstance(model, LabellingPolytope):
         model = PolytopeSamplingModel(
-            model, transform_type=transform_type, basis_coordinates=basis_coordinates, linalg=linalg
+            model, kernel_basis=kernel_basis, basis_coordinates=basis_coordinates, linalg=linalg
         )
         if return_psm:
             result['psm'] = model
@@ -1412,11 +1432,11 @@ def compute_volume(
     )
 
     if enumerate_vertices:
-        if (psm.transform_type != 'rref') or (psm.basis_coordinates != 'transformed'):
+        if (psm.kernel_basis != 'rref') or (psm.basis_coordinates != 'transformed'):
             raise ValueError('only works with rref, pass polytope or rref volumemodel')
         F_trans = PolyRoundApi.simplify_polytope(psm.basis_polytope, normalize=False)
         if F_trans.S is not None:
-            F_trans, _, _ = transform_polytope_keep_transform(F_trans, transform_type='rref')
+            F_trans, _, _ = transform_polytope_keep_transform(F_trans, kernel_basis='rref')
         vertices = V_representation(F_trans)
         result['n_vertices'] = vertices.shape[0]
         print('vertices done')
@@ -1442,7 +1462,8 @@ if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
     from sbmfi.inference.priors import UniFluxPrior
-
+    # from PolyRound.api import PolyRoundApi
+    # PolyRoundApi.simplify_transform_and_round()
     # n = 5
     # m, k = spiro(build_simulator=False, v2_reversible=True, batch_size=n, backend='torch')
 
@@ -1452,10 +1473,28 @@ if __name__ == "__main__":
     # pickle.dump(fcm._Fn, open('ff.p', 'wb'))
 
     # m, k = spiro(build_simulator=True, backend='torch')
-    m, k = build_e_coli_anton_glc(build_simulator=True)
+    # m, k = build_e_coli_anton_glc(build_simulator=True)
 
+    m,k=spiro(v2_reversible=False, build_simulator=True)
+    # pickle.dump((m._fcm._Fn, k), open('fn.p', 'wb'))
+    fn, kwargs = pickle.load(open('fn.p', 'rb'))
+    fluxes = kwargs['fluxes']
+    thermo = fluxes.copy()
+    thermo['v5'] = -(thermo['v5_rev'] - thermo['v5'])
+    thermo = thermo.loc[fn.A.columns].to_frame().T
+    thermo = pd.concat([thermo, thermo])
+    psm = PolytopeSamplingModel(
+        fn,
+        kernel_basis='svd',
+        basis_coordinates='transformed',
+        pr_verbose=False,
+    )
+    print(thermo)
+    theta = psm.to_basis(thermo, pandalize=True)
+    print(theta)
+    fluxes = psm.to_fluxes(theta, is_rounded=False, pandalize=True)
+    print(fluxes.round(2))
 
-    a = V_representation(m._fcm._sampler._F_round, number_type='float')
     # samples = sample_polytope(m._fcm._sampler, n=50, new_basis_points=True)
     # print(samples['fluxes'].shape)
 

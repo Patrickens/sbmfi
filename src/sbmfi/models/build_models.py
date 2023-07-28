@@ -841,7 +841,6 @@ _anton_model_kwargs = {
             "anton_str": "Thr (abcd) --> Gly (ab) + AcCoA (cd) + NADH",
             "bigg_kwargs": {
                 "THRA": {
-
                     "atom_map_str": "thr__L_c/abcd --> gly_c/ab + acald_c/cd"
                 },
                 "ACALD": {
@@ -1180,7 +1179,7 @@ _anton_model_kwargs = {
             "fluxml_id": "TH1_v63___1",
             "anton_str": "NADH <=> NADPH",
             "bigg_kwargs": {
-                "NADTRHD": {"coeff": 1},
+                # "NADTRHD": {"coeff": -1},
                 "THD2": {"coeff": 1},
             }
         }
@@ -1217,7 +1216,8 @@ _anton_model_kwargs = {
                     "metabolite_dct": {
                         'co2_c': -1
                     },
-                    # 'coeff': -1,
+                    'coeff': -1,
+                    "upper_bound": 1500.0,
                     "atom_map_str": "co2_c/a --> ∅"
                 },
             },
@@ -1273,11 +1273,12 @@ _anton_model_kwargs = {
                 "CO2t": {
                     "coeff": 1,
                     "lower_bound": 0.0,
+                    "upper_bound": 1500.0,
                     "atom_map_str": "co2_e/a --> co2_c/a",
                 },
                 "EX_co2_e": {
                     'coeff': -1,
-                    'lower_bound': -1000.0,
+                    'lower_bound': -1500.0,
                     'upper_bound': 0.0,
                     "atom_map_str": "co2_e/a --> ∅"
                 },
@@ -1569,6 +1570,8 @@ def read_anton_substrates(which_labellings=None):
     return pd.read_csv(file, index_col=0).loc[which_labellings]
 
 
+from sbmfi.core.polytopia import transform_polytope_keep_transform, thermo_2_net_polytope
+from PolyRound.api import PolyRoundApi, PolyRoundSettings
 def _parse_anton_fluxes():
     v_map = {}
     for pway, vdct in _anton_model_kwargs.items():
@@ -1613,41 +1616,47 @@ def _parse_anton_fluxes():
     xch_fluxes = xch_fluxes.clip(lower=LabellingReaction._RHO_MIN, upper=LabellingReaction._RHO_MAX)
     xch_fluxes.index += '_xch'
 
-    # ptaf = pd.read_excel('pta_fluxes.xlsx', index_col=0)
-    # ptaf_odering = ptaf.columns.drop(['EX_pi_e', 'PIt2r', 'EX_h2o_e', 'H2Ot', 'EX_h_e', 'PPA'])
-
     net_fluxes = (net_fluxes / -net_fluxes.loc['EX_glc__D_e']) * 10.0  # NB scales input fluxes to 10
 
     model, kwargs = build_e_coli_anton_glc(build_simulator=False)
-
     free_id = ['ME1', 'PGK', 'ICL', 'PGI', 'EDA', 'PPC', 'biomass_rxn', 'EX_glc__D_e', 'EX_ac_e']
-    model.build_simulator(free_reaction_id=free_id)
-
+    model.reactions.get_by_id('EX_glc__D_e').bounds = (-10.0, -10.0)
+    model.build_simulator(free_reaction_id=free_id, kernel_basis='rref', basis_coordinates='rounded')
     thermo_pol = model._fcm._Ft
     net_pol = model._fcm._Fn
-    flux_pol = model._fcm._F
+    # pickle.dump(thermo_pol, open('tp.p', 'wb'))
 
-    NS, free_vars = rref_null_space(net_pol.S, tolerance=1e-13)
-    NS.to_excel('NS.xlsx')
-    full_net_fluxes = NS @ net_fluxes.loc[NS.columns]  # this is net fluxes with the cofactors balanced
+    # thermo_pol = pickle.load(open('tp.p', 'rb'))
+    # net_pol = thermo_2_net_polytope(thermo_pol, verbose=True)
+    simplified_net_pol = PolyRoundApi.simplify_polytope(
+        net_pol, settings=PolyRoundSettings(verbose=False), normalize=False
+    )
+    trans_pol, T, T_1, tau = transform_polytope_keep_transform(simplified_net_pol, kernel_basis='rref')
+    full_net_fluxes = T @ net_fluxes.loc[T.columns] + tau.values
 
-    # difff = net_fluxes - full_net_fluxes.loc[net_fluxes.index]
-    # diff = np.isclose(difff, 0.0, atol=1e-3).all(1)
-    # diff = pd.Series(diff, index=net_fluxes.index)
+    innnn = net_pol.A @ full_net_fluxes.loc[net_pol.A.columns]
+    TOLERANCE = 1e-5
+    in_pol = (innnn <= (net_pol.b.values[:, None] + TOLERANCE)).all(1)
+    violated_constraints_and_b = pd.concat([innnn.loc[~in_pol], net_pol.b.to_frame().loc[~in_pol]], axis=1)
 
+    # # difff = net_fluxes - full_net_fluxes.loc[net_fluxes.index]
+    # # diff = np.isclose(difff, 0.0, atol=1e-3).all(1)
+    # # diff = pd.Series(diff, index=net_fluxes.index)
     xch_fluxes.loc['HCO3E_xch'] = 0.3 #  only thing missing and not deducible from the input
     thermo_fluxes = pd.concat([full_net_fluxes, xch_fluxes]).T.loc[:, thermo_pol.A.columns]
-    fluxes = model._fcm.map_thermo_2_fluxes(thermo_fluxes, pandalize=True)
-
-
-    # innnn = thermo_pol.A @ thermo_fluxes.T.values
-    # in_pol = (innnn <= thermo_pol.b.values[:, None]).all(1)
+    # theta = model._fcm.map_fluxes_2_theta(thermo_fluxes, is_thermo=True, pandalize=True)
+    # thermo_fluxes_2 = model._fcm.map_theta_2_fluxes(theta, return_thermo=True, pandalize=True)
+    # thermo_fluxes_2.index = thermo_fluxes_2.index+ '_2'
+    # thermo_flux_compare = pd.concat([thermo_fluxes, thermo_fluxes_2])
+    # thermo_flux_compare = thermo_flux_compare.sort_index()
+    #
     # eqqi = thermo_pol.S @ thermo_fluxes.T.values
     # equality = (np.isclose((eqqi), 0.0, atol=1e-8)).all(1)
     # where_not = thermo_pol.A.loc[~in_pol]
     # where_not = where_not.loc[:, np.linalg.norm(where_not.values, axis=0) > 0.0]
 
     thermo_fluxes.to_csv(os.path.join(MODEL_DIR, 'parsed_anton_fluxes.csv'))
+    return thermo_fluxes
 
 
 def read_anton_fluxes(labelling_ids='COMPLETE-MFA'):
@@ -1899,6 +1908,7 @@ def _parse_anton_model():
     anton_model.objective = {anton_model.reactions.get_by_id('biomass_rxn'): 1}
     print(anton_model.optimize())
     cobra.io.write_sbml_model(anton_model, os.path.join(MODEL_DIR, 'sbml', 'e_coli_anton.xml'))
+    return anton_model
 
 
 def build_e_coli_anton_glc(
@@ -1907,8 +1917,7 @@ def build_e_coli_anton_glc(
         build_simulator=False,
         ratios=False,
         batch_size=1,
-        labelling_id='[1]Glc',
-        which_measurements=None,
+        which_measurements: str=None,
         which_labellings=['20% [U]Glc', '[1]Glc'],
         measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
         seed=1,
@@ -1916,7 +1925,8 @@ def build_e_coli_anton_glc(
     if (which_measurements is not None) and not build_simulator:
         raise ValueError
 
-    substrate_df = read_anton_substrates(which_labellings=which_labellings)
+    if which_labellings is not None:
+        substrate_df = read_anton_substrates(which_labellings=which_labellings)
     model = _read_model('anton')
 
     atom_mappings = {}
@@ -1943,7 +1953,7 @@ def build_e_coli_anton_glc(
         reaction_kwargs=atom_mappings,
         metabolite_kwargs=_metabolite_kwargs,
         measurements=measured_metabolites,
-        input_labelling=substrate_df.loc[labelling_id] if labelling_id else labelling_id,
+        input_labelling=substrate_df.iloc[0] if which_labellings is not None else None,
         ratio_repo=_gluc_ratio_repo,
         ratios=ratios,
         build_simulator=build_simulator,
@@ -2212,144 +2222,6 @@ if __name__ == "__main__":
     map_back = {}
     # from optlang.gurobi_interface import
     from cobra.flux_analysis import flux_variability_analysis
-    # m = _construct_e_coli_anton()
-    # ma, kwargs = build_e_coli_anton_glc()
-    # print('ATPM' in m.reactions)
-    # print('ATPM' in ma.reactions)
-    # ding = read_anton_fluxes()
 
-    # _construct_e_coli_core_tomek()
-
-    # _build_corrections_anton_measurements()
-
-    import pandas as pd
-    from sbmfi.models.small_models import spiro
-    # pd.set_option('display.max_rows', 500)
-    # pd.set_option('display.max_columns', 500)
-    # pd.set_option('display.width', 1000)
-
-    # _parse_anton_measurements(recompute=True, verbose=True)
-    # _parse_anton_model()
-    # _parse_anton_fluxes()
     model, kwargs = build_e_coli_anton_glc(build_simulator=True, which_measurements='anton')
-    # read_anton_measurements(measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'])
-    a = None
-    # model, kwargs = build_e_coli_anton_glc(build_simulator=True, which_measurements='tomek', batch_size=4)
-    #
-    # f = kwargs['fluxes']
-    #
-    # for rid, v in f.iloc[0].iteritems():
-    #     r = model.reactions.get_by_id(rid)
-    #     print(rid, r, v, r.bounds)
 
-    # m,k = build_e_coli_anton_glc()
-    # tot = pd.Series(_LCMS_total_intensity)
-    # ids = tot.index + '_c'
-    # in_model = []
-    # for bidd, bid in zip(ids, tot.index):
-    #     if bidd in m.metabolites:
-    #         in_model.append(bid)
-
-    # _parse_anton_model()
-    # m, k = spiro(build_simulator=True, v2_reversible=True)
-    # v5 = m.reactions.get_by_id('v5')
-    # print(v5, v5.bounds)
-    # model = build_e_coli_tomek()
-    # f = read_anton_fluxes()
-    # ff = m._fcm.map_thermo_2_fluxes(thermo_fluxes=f)
-
-    # sdf = read_anton_measurements(['[5]Glc', '[6]Glc'])
-    # read_anton_measurements(['G12', 'G4'])
-
-    # for key in _anton_labelling_map:
-    #     print(read_anton_measurements(key))
-    #     break
-
-
-
-    # m,k= build_e_coli_tomek()
-    # file = 'e_coli_core.xml'
-    # model = read_sbml_model(file)
-    # model.reactions.get_by_id('EX_glc__D_e').bounds = (-10.0, 0.0)
-    # for r in model.reactions:
-    #     print(r, r.bounds)
-    # fva = flux_variability_analysis(model=model, processes=1)
-
-    # m,k = build_e_coli_tomek(ratios=True)
-
-
-
-    # for pway, vdct in MODEL_MAP.items():
-    #     if pway == 'MODEL_SOURCE':
-    #         continue
-    #     for v_num, kwargs in vdct.items():
-    #         if kwargs['bigg_kwargs'] is None:
-    #             continue
-    #         if len(kwargs['bigg_kwargs']) == 1:
-    #             bigg_id = list(kwargs['bigg_kwargs'].keys())[0]
-    #             atom_map_str = _e_coli_reaction_kwargs.get(bigg_id)
-    #             if atom_map_str is None:
-    #                 atom_map_str = _antoniewicz_aas.get(bigg_id)
-    #         else:
-    #             atom_map_str = _antoniewicz_aas.get(kwargs.get('bigg_id'))
-    #         if atom_map_str is not None:
-    #             kwargs['atom_map_str'] = atom_map_str.get('atom_map_str')
-    #
-    # json_object = json.dumps(MODEL_MAP, indent=4)
-    # json_object.replace('None', 'None')
-    # with open("model_map.json", 'r+') as f:
-    #     f.write(json_object)
-    #     # a = f.read()
-    #     # print(type(a))
-    # a = json.load(open("model_map.json", 'r+'))
-    # print(a)
-
-
-
-
-
-    # from pta.sampling.uniform import UniformSamplingModel, sample_flux_space_uniform
-    # from sbmfi.core.util import extract_labelling_polytope, generate_cvxpy_LP, _excel_polytope
-    # from pta.sampling.tfs import sample_fluxes_from_drg, sample_drg
-    # from pta import prepare_for_pta, ThermodynamicSpace, ConcentrationsPrior
-    # from sbmfi.estimate.simulator import BoundaryObservationModel
-    # from sbmfi.estimate.pta_fix import prepare_for_pta
-    #
-    # tomm = read_sbml_model(os.path.join(MODEL_DIR, 'sbml', 'e_coli_core_tomek.xml'))
-    # prepare_for_pta(tomm)
-
-    # ex_id = 'EX_xyl__D_e'
-    # m, kwargs = ecoli_builder(substrate='xyl', backend='torch')
-    # m.reactions.get_by_id(ex_id).bounds = (-10.0, -8.0)
-    # bom = BoundaryObservationModel(m, measured_fluxes=[m.biomass_id, ex_id], check_noise=False)
-    # print(m.optimize())
-    #
-    # ex_id = 'EX_pyr_e'
-    # m, kwargs = ecoli_builder(substrate='pyr', backend='torch')
-    # m.reactions.get_by_id(ex_id).bounds = (-10.0, -8.0)
-    # bom = BoundaryObservationModel(m, measured_fluxes=[m.biomass_id, ex_id], check_noise=False)
-    # print(m.optimize())
-    #
-    # ex_id = 'EX_glc__D_e'
-    # m, kwargs = ecoli_builder(substrate='glc', backend='torch')
-    # m.reactions.get_by_id(ex_id).bounds = (-10.0, -8.0)
-    # bom = BoundaryObservationModel(m, measured_fluxes=[m.biomass_id, ex_id], check_noise=False)
-    # print(m.optimize())
-
-    # p = extract_labelling_polytope(model=m, coordinates='net', include_cofactors=True)
-    # _excel_polytope(p, file='ding.xlsx')
-    # usm = UniformSamplingModel(polytope=p, reaction_ids=p.S.columns.to_list())
-
-    # m = _read_model()
-    # ijo = _read_model('ijo')
-    # mszyp = ecoli_builder(ratios=False, amino_acids='szyp')
-    # toadd = []
-    # for met in mszyp.pseudo_metabolites:
-    #     toadd.append(ijo.metabolites.get_by_id(met.id))
-    # m.add_metabolites(toadd)
-    #
-    # cobra.io.write_sbml_model(cobra_model=m, filename=os.path.join(MODEL_DIR, 'sbml','e_coli_core_szyp.xml'))
-
-    # m = ecoli_builder(substrate='succ', build_simulator=True, ratios=False)
-    #
-    # res = generate_cvxpy_LP(model=m, net=False, solve=True)

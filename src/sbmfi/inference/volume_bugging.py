@@ -9,7 +9,7 @@ import numpy as np
 from string import ascii_lowercase
 import multiprocessing as mp
 
-def make_flux_pol_from_vertices(vertices: np.array, verbose=False, transform_type='svd', basis_coordinates='rounded'):
+def make_flux_pol_from_vertices(vertices: np.array, verbose=False, kernel_type='svd', basis_coordinates='rounded'):
     cols = pd.Index(list(ascii_lowercase[:vertices.shape[1]]))
 
     A, b = compute_polytope_halfspaces(vertices, number_type='float')
@@ -25,7 +25,7 @@ def make_flux_pol_from_vertices(vertices: np.array, verbose=False, transform_typ
     b_all.loc[A_lb.index] = -vertices.min(0)
 
     pol = LabellingPolytope(A=A_all, b=b_all)
-    vsm = PolytopeSamplingModel(pol, pr_verbose=verbose, transform_type=transform_type,
+    vsm = PolytopeSamplingModel(pol, pr_verbose=verbose, kernel_basis=kernel_type,
                                 basis_coordinates=basis_coordinates)
     return pol, vsm
 

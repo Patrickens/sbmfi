@@ -83,10 +83,7 @@ https://bayesiancomputationbook.com/markdown/chp_08.html
 """
 
 # necessary to be able to plot stuff in arviz
-
 bw = 'scott'
-bw = 'silverman'
-bw = 0.1
 from arviz.stats.density_utils import (
     _fast_kde_2d,
     kde,

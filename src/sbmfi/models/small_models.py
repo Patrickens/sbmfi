@@ -32,7 +32,7 @@ def spiro(
 
     reaction_kwargs = {
         'a_in': {
-            'lower_bound': 8.0, 'upper_bound': 10.0,
+            'lower_bound': 10.0, 'upper_bound': 10.0,
             'atom_map_str': '∅ --> A/ab'
         },
         # 'a_in': {

@@ -6224,47 +6224,6 @@
           </fbc:or>
         </fbc:geneProductAssociation>
       </reaction>
-      <reaction metaid="meta_R_NADTRHD" sboTerm="SBO:0000176" id="R_NADTRHD" name="NAD transhydrogenase" reversible="false" fast="false" fbc:lowerFluxBound="cobra_0_bound" fbc:upperFluxBound="cobra_default_ub">
-        <annotation>
-          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
-            <rdf:Description rdf:about="#meta_R_NADTRHD">
-              <bqbiol:is>
-                <rdf:Bag>
-                  <rdf:li rdf:resource="https://identifiers.org/bigg.reaction/NADTRHD"/>
-                  <rdf:li rdf:resource="https://identifiers.org/biocyc/META:PYRNUTRANSHYDROGEN-RXN"/>
-                  <rdf:li rdf:resource="https://identifiers.org/ec-code/1.6.1.3"/>
-                  <rdf:li rdf:resource="https://identifiers.org/ec-code/1.6.1.2"/>
-                  <rdf:li rdf:resource="https://identifiers.org/ec-code/1.6.1.1"/>
-                  <rdf:li rdf:resource="https://identifiers.org/kegg.reaction/R00112"/>
-                  <rdf:li rdf:resource="https://identifiers.org/metanetx.reaction/MNXR101898"/>
-                  <rdf:li rdf:resource="https://identifiers.org/rhea/11692"/>
-                  <rdf:li rdf:resource="https://identifiers.org/rhea/11695"/>
-                  <rdf:li rdf:resource="https://identifiers.org/rhea/11694"/>
-                  <rdf:li rdf:resource="https://identifiers.org/rhea/11693"/>
-                  <rdf:li rdf:resource="https://identifiers.org/seed.reaction/rxn00083"/>
-                </rdf:Bag>
-              </bqbiol:is>
-            </rdf:Description>
-          </rdf:RDF>
-        </annotation>
-        <listOfReactants>
-          <speciesReference species="M_nad_c" stoichiometry="1" constant="true"/>
-          <speciesReference species="M_nadph_c" stoichiometry="1" constant="true"/>
-        </listOfReactants>
-        <listOfProducts>
-          <speciesReference species="M_nadh_c" stoichiometry="1" constant="true"/>
-          <speciesReference species="M_nadp_c" stoichiometry="1" constant="true"/>
-        </listOfProducts>
-        <fbc:geneProductAssociation>
-          <fbc:or>
-            <fbc:geneProductRef fbc:geneProduct="G_b3962"/>
-            <fbc:and>
-              <fbc:geneProductRef fbc:geneProduct="G_b1602"/>
-              <fbc:geneProductRef fbc:geneProduct="G_b1603"/>
-            </fbc:and>
-          </fbc:or>
-        </fbc:geneProductAssociation>
-      </reaction>
       <reaction metaid="meta_R_THD2" sboTerm="SBO:0000185" id="R_THD2" name="NAD(P) transhydrogenase" reversible="false" fast="false" fbc:lowerFluxBound="cobra_0_bound" fbc:upperFluxBound="cobra_default_ub">
         <annotation>
           <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
@@ -7494,40 +7453,40 @@
       </fbc:objective>
     </fbc:listOfObjectives>
     <fbc:listOfGeneProducts>
-      <fbc:geneProduct fbc:id="G_b1819" fbc:name="G_b1819" fbc:label="G_b1819"/>
-      <fbc:geneProduct fbc:id="G_b1101" fbc:name="G_b1101" fbc:label="G_b1101"/>
-      <fbc:geneProduct fbc:id="G_b2417" fbc:name="G_b2417" fbc:label="G_b2417"/>
-      <fbc:geneProduct fbc:id="G_b1817" fbc:name="G_b1817" fbc:label="G_b1817"/>
-      <fbc:geneProduct fbc:id="G_b2416" fbc:name="G_b2416" fbc:label="G_b2416"/>
-      <fbc:geneProduct fbc:id="G_b2415" fbc:name="G_b2415" fbc:label="G_b2415"/>
-      <fbc:geneProduct fbc:id="G_b1818" fbc:name="G_b1818" fbc:label="G_b1818"/>
       <fbc:geneProduct fbc:id="G_b1621" fbc:name="G_b1621" fbc:label="G_b1621"/>
+      <fbc:geneProduct fbc:id="G_b1818" fbc:name="G_b1818" fbc:label="G_b1818"/>
+      <fbc:geneProduct fbc:id="G_b2416" fbc:name="G_b2416" fbc:label="G_b2416"/>
+      <fbc:geneProduct fbc:id="G_b2417" fbc:name="G_b2417" fbc:label="G_b2417"/>
+      <fbc:geneProduct fbc:id="G_b1101" fbc:name="G_b1101" fbc:label="G_b1101"/>
+      <fbc:geneProduct fbc:id="G_b1819" fbc:name="G_b1819" fbc:label="G_b1819"/>
+      <fbc:geneProduct fbc:id="G_b1817" fbc:name="G_b1817" fbc:label="G_b1817"/>
+      <fbc:geneProduct fbc:id="G_b2415" fbc:name="G_b2415" fbc:label="G_b2415"/>
       <fbc:geneProduct fbc:id="G_b4025" fbc:name="G_b4025" fbc:label="G_b4025"/>
-      <fbc:geneProduct fbc:id="G_b1723" fbc:name="G_b1723" fbc:label="G_b1723"/>
       <fbc:geneProduct fbc:id="G_b3916" fbc:name="G_b3916" fbc:label="G_b3916"/>
+      <fbc:geneProduct fbc:id="G_b1723" fbc:name="G_b1723" fbc:label="G_b1723"/>
+      <fbc:geneProduct fbc:id="G_b2925" fbc:name="G_b2925" fbc:label="G_b2925"/>
       <fbc:geneProduct fbc:id="G_b2097" fbc:name="G_b2097" fbc:label="G_b2097"/>
       <fbc:geneProduct fbc:id="G_b1773" fbc:name="G_b1773" fbc:label="G_b1773"/>
-      <fbc:geneProduct fbc:id="G_b2925" fbc:name="G_b2925" fbc:label="G_b2925"/>
       <fbc:geneProduct fbc:id="G_b3919" fbc:name="G_b3919" fbc:label="G_b3919"/>
       <fbc:geneProduct fbc:id="G_b1779" fbc:name="G_b1779" fbc:label="G_b1779"/>
       <fbc:geneProduct fbc:id="G_b2926" fbc:name="G_b2926" fbc:label="G_b2926"/>
       <fbc:geneProduct fbc:id="G_b3612" fbc:name="G_b3612" fbc:label="G_b3612"/>
-      <fbc:geneProduct fbc:id="G_b4395" fbc:name="G_b4395" fbc:label="G_b4395"/>
       <fbc:geneProduct fbc:id="G_b0755" fbc:name="G_b0755" fbc:label="G_b0755"/>
+      <fbc:geneProduct fbc:id="G_b4395" fbc:name="G_b4395" fbc:label="G_b4395"/>
       <fbc:geneProduct fbc:id="G_b2779" fbc:name="G_b2779" fbc:label="G_b2779"/>
-      <fbc:geneProduct fbc:id="G_b1854" fbc:name="G_b1854" fbc:label="G_b1854"/>
       <fbc:geneProduct fbc:id="G_b1676" fbc:name="G_b1676" fbc:label="G_b1676"/>
+      <fbc:geneProduct fbc:id="G_b1854" fbc:name="G_b1854" fbc:label="G_b1854"/>
       <fbc:geneProduct fbc:id="G_b1852" fbc:name="G_b1852" fbc:label="G_b1852"/>
       <fbc:geneProduct fbc:id="G_b0767" fbc:name="G_b0767" fbc:label="G_b0767"/>
       <fbc:geneProduct fbc:id="G_b2029" fbc:name="G_b2029" fbc:label="G_b2029"/>
-      <fbc:geneProduct fbc:id="G_b4301" fbc:name="G_b4301" fbc:label="G_b4301"/>
       <fbc:geneProduct fbc:id="G_b3386" fbc:name="G_b3386" fbc:label="G_b3386"/>
+      <fbc:geneProduct fbc:id="G_b4301" fbc:name="G_b4301" fbc:label="G_b4301"/>
       <fbc:geneProduct fbc:id="G_b2914" fbc:name="G_b2914" fbc:label="G_b2914"/>
       <fbc:geneProduct fbc:id="G_b4090" fbc:name="G_b4090" fbc:label="G_b4090"/>
       <fbc:geneProduct fbc:id="G_b1851" fbc:name="G_b1851" fbc:label="G_b1851"/>
       <fbc:geneProduct fbc:id="G_b1850" fbc:name="G_b1850" fbc:label="G_b1850"/>
-      <fbc:geneProduct fbc:id="G_b0114" fbc:name="G_b0114" fbc:label="G_b0114"/>
       <fbc:geneProduct fbc:id="G_b0115" fbc:name="G_b0115" fbc:label="G_b0115"/>
+      <fbc:geneProduct fbc:id="G_b0114" fbc:name="G_b0114" fbc:label="G_b0114"/>
       <fbc:geneProduct fbc:id="G_b0116" fbc:name="G_b0116" fbc:label="G_b0116"/>
       <fbc:geneProduct fbc:id="G_b0720" fbc:name="G_b0720" fbc:label="G_b0720"/>
       <fbc:geneProduct fbc:id="G_b1276" fbc:name="G_b1276" fbc:label="G_b1276"/>
@@ -7535,14 +7494,14 @@
       <fbc:geneProduct fbc:id="G_b1136" fbc:name="G_b1136" fbc:label="G_b1136"/>
       <fbc:geneProduct fbc:id="G_b0726" fbc:name="G_b0726" fbc:label="G_b0726"/>
       <fbc:geneProduct fbc:id="G_b0727" fbc:name="G_b0727" fbc:label="G_b0727"/>
-      <fbc:geneProduct fbc:id="G_b0729" fbc:name="G_b0729" fbc:label="G_b0729"/>
       <fbc:geneProduct fbc:id="G_b0728" fbc:name="G_b0728" fbc:label="G_b0728"/>
+      <fbc:geneProduct fbc:id="G_b0729" fbc:name="G_b0729" fbc:label="G_b0729"/>
+      <fbc:geneProduct fbc:id="G_b0724" fbc:name="G_b0724" fbc:label="G_b0724"/>
       <fbc:geneProduct fbc:id="G_b0722" fbc:name="G_b0722" fbc:label="G_b0722"/>
       <fbc:geneProduct fbc:id="G_b0721" fbc:name="G_b0721" fbc:label="G_b0721"/>
-      <fbc:geneProduct fbc:id="G_b0724" fbc:name="G_b0724" fbc:label="G_b0724"/>
       <fbc:geneProduct fbc:id="G_b0723" fbc:name="G_b0723" fbc:label="G_b0723"/>
-      <fbc:geneProduct fbc:id="G_b4122" fbc:name="G_b4122" fbc:label="G_b4122"/>
       <fbc:geneProduct fbc:id="G_b1611" fbc:name="G_b1611" fbc:label="G_b1611"/>
+      <fbc:geneProduct fbc:id="G_b4122" fbc:name="G_b4122" fbc:label="G_b4122"/>
       <fbc:geneProduct fbc:id="G_b1612" fbc:name="G_b1612" fbc:label="G_b1612"/>
       <fbc:geneProduct fbc:id="G_b3236" fbc:name="G_b3236" fbc:label="G_b3236"/>
       <fbc:geneProduct fbc:id="G_b4015" fbc:name="G_b4015" fbc:label="G_b4015"/>
@@ -7552,166 +7511,165 @@
       <fbc:geneProduct fbc:id="G_b2463" fbc:name="G_b2463" fbc:label="G_b2463"/>
       <fbc:geneProduct fbc:id="G_b3956" fbc:name="G_b3956" fbc:label="G_b3956"/>
       <fbc:geneProduct fbc:id="G_b3403" fbc:name="G_b3403" fbc:label="G_b3403"/>
-      <fbc:geneProduct fbc:id="G_b2458" fbc:name="G_b2458" fbc:label="G_b2458"/>
       <fbc:geneProduct fbc:id="G_b2297" fbc:name="G_b2297" fbc:label="G_b2297"/>
-      <fbc:geneProduct fbc:id="G_b1849" fbc:name="G_b1849" fbc:label="G_b1849"/>
+      <fbc:geneProduct fbc:id="G_b2458" fbc:name="G_b2458" fbc:label="G_b2458"/>
       <fbc:geneProduct fbc:id="G_b2296" fbc:name="G_b2296" fbc:label="G_b2296"/>
+      <fbc:geneProduct fbc:id="G_b1849" fbc:name="G_b1849" fbc:label="G_b1849"/>
       <fbc:geneProduct fbc:id="G_b3115" fbc:name="G_b3115" fbc:label="G_b3115"/>
       <fbc:geneProduct fbc:id="G_b1761" fbc:name="G_b1761" fbc:label="G_b1761"/>
       <fbc:geneProduct fbc:id="G_b3870" fbc:name="G_b3870" fbc:label="G_b3870"/>
       <fbc:geneProduct fbc:id="G_b1297" fbc:name="G_b1297" fbc:label="G_b1297"/>
       <fbc:geneProduct fbc:id="G_s0001" fbc:name="G_s0001" fbc:label="G_s0001"/>
+      <fbc:geneProduct fbc:id="G_b0243" fbc:name="G_b0243" fbc:label="G_b0243"/>
       <fbc:geneProduct fbc:id="G_b0386" fbc:name="G_b0386" fbc:label="G_b0386"/>
       <fbc:geneProduct fbc:id="G_b0242" fbc:name="G_b0242" fbc:label="G_b0242"/>
-      <fbc:geneProduct fbc:id="G_b0243" fbc:name="G_b0243" fbc:label="G_b0243"/>
-      <fbc:geneProduct fbc:id="G_b0273" fbc:name="G_b0273" fbc:label="G_b0273"/>
+      <fbc:geneProduct fbc:id="G_b0033" fbc:name="G_b0033" fbc:label="G_b0033"/>
+      <fbc:geneProduct fbc:id="G_b3960" fbc:name="G_b3960" fbc:label="G_b3960"/>
+      <fbc:geneProduct fbc:id="G_b3957" fbc:name="G_b3957" fbc:label="G_b3957"/>
+      <fbc:geneProduct fbc:id="G_b3359" fbc:name="G_b3359" fbc:label="G_b3359"/>
+      <fbc:geneProduct fbc:id="G_b3172" fbc:name="G_b3172" fbc:label="G_b3172"/>
+      <fbc:geneProduct fbc:id="G_b2818" fbc:name="G_b2818" fbc:label="G_b2818"/>
+      <fbc:geneProduct fbc:id="G_b3959" fbc:name="G_b3959" fbc:label="G_b3959"/>
       <fbc:geneProduct fbc:id="G_b3958" fbc:name="G_b3958" fbc:label="G_b3958"/>
       <fbc:geneProduct fbc:id="G_b1748" fbc:name="G_b1748" fbc:label="G_b1748"/>
-      <fbc:geneProduct fbc:id="G_b2818" fbc:name="G_b2818" fbc:label="G_b2818"/>
-      <fbc:geneProduct fbc:id="G_b3957" fbc:name="G_b3957" fbc:label="G_b3957"/>
-      <fbc:geneProduct fbc:id="G_b4254" fbc:name="G_b4254" fbc:label="G_b4254"/>
-      <fbc:geneProduct fbc:id="G_b3959" fbc:name="G_b3959" fbc:label="G_b3959"/>
-      <fbc:geneProduct fbc:id="G_b3359" fbc:name="G_b3359" fbc:label="G_b3359"/>
-      <fbc:geneProduct fbc:id="G_b3960" fbc:name="G_b3960" fbc:label="G_b3960"/>
       <fbc:geneProduct fbc:id="G_b0032" fbc:name="G_b0032" fbc:label="G_b0032"/>
-      <fbc:geneProduct fbc:id="G_b0033" fbc:name="G_b0033" fbc:label="G_b0033"/>
-      <fbc:geneProduct fbc:id="G_b3172" fbc:name="G_b3172" fbc:label="G_b3172"/>
+      <fbc:geneProduct fbc:id="G_b4254" fbc:name="G_b4254" fbc:label="G_b4254"/>
+      <fbc:geneProduct fbc:id="G_b0273" fbc:name="G_b0273" fbc:label="G_b0273"/>
       <fbc:geneProduct fbc:id="G_b0928" fbc:name="G_b0928" fbc:label="G_b0928"/>
       <fbc:geneProduct fbc:id="G_b3744" fbc:name="G_b3744" fbc:label="G_b3744"/>
-      <fbc:geneProduct fbc:id="G_b2290" fbc:name="G_b2290" fbc:label="G_b2290"/>
       <fbc:geneProduct fbc:id="G_b2379" fbc:name="G_b2379" fbc:label="G_b2379"/>
+      <fbc:geneProduct fbc:id="G_b2290" fbc:name="G_b2290" fbc:label="G_b2290"/>
       <fbc:geneProduct fbc:id="G_b4388" fbc:name="G_b4388" fbc:label="G_b4388"/>
-      <fbc:geneProduct fbc:id="G_b0907" fbc:name="G_b0907" fbc:label="G_b0907"/>
       <fbc:geneProduct fbc:id="G_b2913" fbc:name="G_b2913" fbc:label="G_b2913"/>
+      <fbc:geneProduct fbc:id="G_b0907" fbc:name="G_b0907" fbc:label="G_b0907"/>
       <fbc:geneProduct fbc:id="G_b2551" fbc:name="G_b2551" fbc:label="G_b2551"/>
-      <fbc:geneProduct fbc:id="G_b2903" fbc:name="G_b2903" fbc:label="G_b2903"/>
       <fbc:geneProduct fbc:id="G_b2905" fbc:name="G_b2905" fbc:label="G_b2905"/>
+      <fbc:geneProduct fbc:id="G_b2903" fbc:name="G_b2903" fbc:label="G_b2903"/>
       <fbc:geneProduct fbc:id="G_b2904" fbc:name="G_b2904" fbc:label="G_b2904"/>
       <fbc:geneProduct fbc:id="G_b0870" fbc:name="G_b0870" fbc:label="G_b0870"/>
-      <fbc:geneProduct fbc:id="G_b0351" fbc:name="G_b0351" fbc:label="G_b0351"/>
       <fbc:geneProduct fbc:id="G_b1241" fbc:name="G_b1241" fbc:label="G_b1241"/>
-      <fbc:geneProduct fbc:id="G_b3781" fbc:name="G_b3781" fbc:label="G_b3781"/>
-      <fbc:geneProduct fbc:id="G_b2582" fbc:name="G_b2582" fbc:label="G_b2582"/>
-      <fbc:geneProduct fbc:id="G_b2762" fbc:name="G_b2762" fbc:label="G_b2762"/>
-      <fbc:geneProduct fbc:id="G_b2752" fbc:name="G_b2752" fbc:label="G_b2752"/>
+      <fbc:geneProduct fbc:id="G_b0351" fbc:name="G_b0351" fbc:label="G_b0351"/>
       <fbc:geneProduct fbc:id="G_b2750" fbc:name="G_b2750" fbc:label="G_b2750"/>
+      <fbc:geneProduct fbc:id="G_b0888" fbc:name="G_b0888" fbc:label="G_b0888"/>
+      <fbc:geneProduct fbc:id="G_b2751" fbc:name="G_b2751" fbc:label="G_b2751"/>
       <fbc:geneProduct fbc:id="G_b4214" fbc:name="G_b4214" fbc:label="G_b4214"/>
-      <fbc:geneProduct fbc:id="G_b2763" fbc:name="G_b2763" fbc:label="G_b2763"/>
+      <fbc:geneProduct fbc:id="G_b2764" fbc:name="G_b2764" fbc:label="G_b2764"/>
       <fbc:geneProduct fbc:id="G_b3607" fbc:name="G_b3607" fbc:label="G_b3607"/>
+      <fbc:geneProduct fbc:id="G_b2752" fbc:name="G_b2752" fbc:label="G_b2752"/>
+      <fbc:geneProduct fbc:id="G_b3781" fbc:name="G_b3781" fbc:label="G_b3781"/>
+      <fbc:geneProduct fbc:id="G_b2762" fbc:name="G_b2762" fbc:label="G_b2762"/>
+      <fbc:geneProduct fbc:id="G_b2582" fbc:name="G_b2582" fbc:label="G_b2582"/>
+      <fbc:geneProduct fbc:id="G_b2763" fbc:name="G_b2763" fbc:label="G_b2763"/>
       <fbc:geneProduct fbc:id="G_b2414" fbc:name="G_b2414" fbc:label="G_b2414"/>
       <fbc:geneProduct fbc:id="G_b2421" fbc:name="G_b2421" fbc:label="G_b2421"/>
-      <fbc:geneProduct fbc:id="G_b2751" fbc:name="G_b2751" fbc:label="G_b2751"/>
-      <fbc:geneProduct fbc:id="G_b0888" fbc:name="G_b0888" fbc:label="G_b0888"/>
-      <fbc:geneProduct fbc:id="G_b2764" fbc:name="G_b2764" fbc:label="G_b2764"/>
       <fbc:geneProduct fbc:id="G_b0031" fbc:name="G_b0031" fbc:label="G_b0031"/>
-      <fbc:geneProduct fbc:id="G_b0002" fbc:name="G_b0002" fbc:label="G_b0002"/>
-      <fbc:geneProduct fbc:id="G_b2478" fbc:name="G_b2478" fbc:label="G_b2478"/>
       <fbc:geneProduct fbc:id="G_b3433" fbc:name="G_b3433" fbc:label="G_b3433"/>
-      <fbc:geneProduct fbc:id="G_b3940" fbc:name="G_b3940" fbc:label="G_b3940"/>
-      <fbc:geneProduct fbc:id="G_b2472" fbc:name="G_b2472" fbc:label="G_b2472"/>
-      <fbc:geneProduct fbc:id="G_b4024" fbc:name="G_b4024" fbc:label="G_b4024"/>
+      <fbc:geneProduct fbc:id="G_b2478" fbc:name="G_b2478" fbc:label="G_b2478"/>
       <fbc:geneProduct fbc:id="G_b0166" fbc:name="G_b0166" fbc:label="G_b0166"/>
+      <fbc:geneProduct fbc:id="G_b2472" fbc:name="G_b2472" fbc:label="G_b2472"/>
+      <fbc:geneProduct fbc:id="G_b3940" fbc:name="G_b3940" fbc:label="G_b3940"/>
+      <fbc:geneProduct fbc:id="G_b0002" fbc:name="G_b0002" fbc:label="G_b0002"/>
+      <fbc:geneProduct fbc:id="G_b4024" fbc:name="G_b4024" fbc:label="G_b4024"/>
       <fbc:geneProduct fbc:id="G_b2838" fbc:name="G_b2838" fbc:label="G_b2838"/>
       <fbc:geneProduct fbc:id="G_b3809" fbc:name="G_b3809" fbc:label="G_b3809"/>
       <fbc:geneProduct fbc:id="G_b0003" fbc:name="G_b0003" fbc:label="G_b0003"/>
       <fbc:geneProduct fbc:id="G_b0004" fbc:name="G_b0004" fbc:label="G_b0004"/>
-      <fbc:geneProduct fbc:id="G_b3939" fbc:name="G_b3939" fbc:label="G_b3939"/>
-      <fbc:geneProduct fbc:id="G_b4019" fbc:name="G_b4019" fbc:label="G_b4019"/>
       <fbc:geneProduct fbc:id="G_b3008" fbc:name="G_b3008" fbc:label="G_b3008"/>
-      <fbc:geneProduct fbc:id="G_b3829" fbc:name="G_b3829" fbc:label="G_b3829"/>
-      <fbc:geneProduct fbc:id="G_b1622" fbc:name="G_b1622" fbc:label="G_b1622"/>
+      <fbc:geneProduct fbc:id="G_b4019" fbc:name="G_b4019" fbc:label="G_b4019"/>
       <fbc:geneProduct fbc:id="G_b4013" fbc:name="G_b4013" fbc:label="G_b4013"/>
-      <fbc:geneProduct fbc:id="G_b0078" fbc:name="G_b0078" fbc:label="G_b0078"/>
-      <fbc:geneProduct fbc:id="G_b3671" fbc:name="G_b3671" fbc:label="G_b3671"/>
-      <fbc:geneProduct fbc:id="G_b3774" fbc:name="G_b3774" fbc:label="G_b3774"/>
+      <fbc:geneProduct fbc:id="G_b1622" fbc:name="G_b1622" fbc:label="G_b1622"/>
+      <fbc:geneProduct fbc:id="G_b3939" fbc:name="G_b3939" fbc:label="G_b3939"/>
+      <fbc:geneProduct fbc:id="G_b3829" fbc:name="G_b3829" fbc:label="G_b3829"/>
       <fbc:geneProduct fbc:id="G_b3771" fbc:name="G_b3771" fbc:label="G_b3771"/>
-      <fbc:geneProduct fbc:id="G_b3670" fbc:name="G_b3670" fbc:label="G_b3670"/>
-      <fbc:geneProduct fbc:id="G_b3770" fbc:name="G_b3770" fbc:label="G_b3770"/>
       <fbc:geneProduct fbc:id="G_b0077" fbc:name="G_b0077" fbc:label="G_b0077"/>
-      <fbc:geneProduct fbc:id="G_b0074" fbc:name="G_b0074" fbc:label="G_b0074"/>
+      <fbc:geneProduct fbc:id="G_b3670" fbc:name="G_b3670" fbc:label="G_b3670"/>
+      <fbc:geneProduct fbc:id="G_b3671" fbc:name="G_b3671" fbc:label="G_b3671"/>
+      <fbc:geneProduct fbc:id="G_b3770" fbc:name="G_b3770" fbc:label="G_b3770"/>
+      <fbc:geneProduct fbc:id="G_b3774" fbc:name="G_b3774" fbc:label="G_b3774"/>
+      <fbc:geneProduct fbc:id="G_b0078" fbc:name="G_b0078" fbc:label="G_b0078"/>
+      <fbc:geneProduct fbc:id="G_b0071" fbc:name="G_b0071" fbc:label="G_b0071"/>
       <fbc:geneProduct fbc:id="G_b0072" fbc:name="G_b0072" fbc:label="G_b0072"/>
       <fbc:geneProduct fbc:id="G_b4054" fbc:name="G_b4054" fbc:label="G_b4054"/>
-      <fbc:geneProduct fbc:id="G_b0071" fbc:name="G_b0071" fbc:label="G_b0071"/>
       <fbc:geneProduct fbc:id="G_b0073" fbc:name="G_b0073" fbc:label="G_b0073"/>
-      <fbc:geneProduct fbc:id="G_b3117" fbc:name="G_b3117" fbc:label="G_b3117"/>
+      <fbc:geneProduct fbc:id="G_b0074" fbc:name="G_b0074" fbc:label="G_b0074"/>
       <fbc:geneProduct fbc:id="G_b3772" fbc:name="G_b3772" fbc:label="G_b3772"/>
-      <fbc:geneProduct fbc:id="G_b1692" fbc:name="G_b1692" fbc:label="G_b1692"/>
-      <fbc:geneProduct fbc:id="G_b1704" fbc:name="G_b1704" fbc:label="G_b1704"/>
-      <fbc:geneProduct fbc:id="G_b2599" fbc:name="G_b2599" fbc:label="G_b2599"/>
-      <fbc:geneProduct fbc:id="G_b1693" fbc:name="G_b1693" fbc:label="G_b1693"/>
+      <fbc:geneProduct fbc:id="G_b3117" fbc:name="G_b3117" fbc:label="G_b3117"/>
+      <fbc:geneProduct fbc:id="G_b2601" fbc:name="G_b2601" fbc:label="G_b2601"/>
+      <fbc:geneProduct fbc:id="G_b2329" fbc:name="G_b2329" fbc:label="G_b2329"/>
       <fbc:geneProduct fbc:id="G_b0754" fbc:name="G_b0754" fbc:label="G_b0754"/>
       <fbc:geneProduct fbc:id="G_b3281" fbc:name="G_b3281" fbc:label="G_b3281"/>
-      <fbc:geneProduct fbc:id="G_b2329" fbc:name="G_b2329" fbc:label="G_b2329"/>
-      <fbc:geneProduct fbc:id="G_b3390" fbc:name="G_b3390" fbc:label="G_b3390"/>
-      <fbc:geneProduct fbc:id="G_b0908" fbc:name="G_b0908" fbc:label="G_b0908"/>
-      <fbc:geneProduct fbc:id="G_b3389" fbc:name="G_b3389" fbc:label="G_b3389"/>
       <fbc:geneProduct fbc:id="G_b0388" fbc:name="G_b0388" fbc:label="G_b0388"/>
-      <fbc:geneProduct fbc:id="G_b2601" fbc:name="G_b2601" fbc:label="G_b2601"/>
+      <fbc:geneProduct fbc:id="G_b3389" fbc:name="G_b3389" fbc:label="G_b3389"/>
+      <fbc:geneProduct fbc:id="G_b2599" fbc:name="G_b2599" fbc:label="G_b2599"/>
+      <fbc:geneProduct fbc:id="G_b1693" fbc:name="G_b1693" fbc:label="G_b1693"/>
+      <fbc:geneProduct fbc:id="G_b3390" fbc:name="G_b3390" fbc:label="G_b3390"/>
+      <fbc:geneProduct fbc:id="G_b1704" fbc:name="G_b1704" fbc:label="G_b1704"/>
       <fbc:geneProduct fbc:id="G_b2600" fbc:name="G_b2600" fbc:label="G_b2600"/>
+      <fbc:geneProduct fbc:id="G_b1692" fbc:name="G_b1692" fbc:label="G_b1692"/>
+      <fbc:geneProduct fbc:id="G_b0908" fbc:name="G_b0908" fbc:label="G_b0908"/>
       <fbc:geneProduct fbc:id="G_b1207" fbc:name="G_b1207" fbc:label="G_b1207"/>
       <fbc:geneProduct fbc:id="G_b1262" fbc:name="G_b1262" fbc:label="G_b1262"/>
-      <fbc:geneProduct fbc:id="G_b1261" fbc:name="G_b1261" fbc:label="G_b1261"/>
       <fbc:geneProduct fbc:id="G_b1263" fbc:name="G_b1263" fbc:label="G_b1263"/>
       <fbc:geneProduct fbc:id="G_b1260" fbc:name="G_b1260" fbc:label="G_b1260"/>
       <fbc:geneProduct fbc:id="G_b1264" fbc:name="G_b1264" fbc:label="G_b1264"/>
+      <fbc:geneProduct fbc:id="G_b1261" fbc:name="G_b1261" fbc:label="G_b1261"/>
+      <fbc:geneProduct fbc:id="G_b2025" fbc:name="G_b2025" fbc:label="G_b2025"/>
+      <fbc:geneProduct fbc:id="G_b4177" fbc:name="G_b4177" fbc:label="G_b4177"/>
       <fbc:geneProduct fbc:id="G_b0529" fbc:name="G_b0529" fbc:label="G_b0529"/>
       <fbc:geneProduct fbc:id="G_b1131" fbc:name="G_b1131" fbc:label="G_b1131"/>
-      <fbc:geneProduct fbc:id="G_b2024" fbc:name="G_b2024" fbc:label="G_b2024"/>
-      <fbc:geneProduct fbc:id="G_b2023" fbc:name="G_b2023" fbc:label="G_b2023"/>
-      <fbc:geneProduct fbc:id="G_b2020" fbc:name="G_b2020" fbc:label="G_b2020"/>
-      <fbc:geneProduct fbc:id="G_b2019" fbc:name="G_b2019" fbc:label="G_b2019"/>
-      <fbc:geneProduct fbc:id="G_b4177" fbc:name="G_b4177" fbc:label="G_b4177"/>
       <fbc:geneProduct fbc:id="G_b4006" fbc:name="G_b4006" fbc:label="G_b4006"/>
+      <fbc:geneProduct fbc:id="G_b2019" fbc:name="G_b2019" fbc:label="G_b2019"/>
       <fbc:geneProduct fbc:id="G_b2026" fbc:name="G_b2026" fbc:label="G_b2026"/>
-      <fbc:geneProduct fbc:id="G_b2025" fbc:name="G_b2025" fbc:label="G_b2025"/>
-      <fbc:geneProduct fbc:id="G_b2021" fbc:name="G_b2021" fbc:label="G_b2021"/>
+      <fbc:geneProduct fbc:id="G_b2024" fbc:name="G_b2024" fbc:label="G_b2024"/>
       <fbc:geneProduct fbc:id="G_b2022" fbc:name="G_b2022" fbc:label="G_b2022"/>
+      <fbc:geneProduct fbc:id="G_b2021" fbc:name="G_b2021" fbc:label="G_b2021"/>
+      <fbc:geneProduct fbc:id="G_b2020" fbc:name="G_b2020" fbc:label="G_b2020"/>
+      <fbc:geneProduct fbc:id="G_b2023" fbc:name="G_b2023" fbc:label="G_b2023"/>
       <fbc:geneProduct fbc:id="G_b3941" fbc:name="G_b3941" fbc:label="G_b3941"/>
+      <fbc:geneProduct fbc:id="G_b2276" fbc:name="G_b2276" fbc:label="G_b2276"/>
+      <fbc:geneProduct fbc:id="G_b2277" fbc:name="G_b2277" fbc:label="G_b2277"/>
+      <fbc:geneProduct fbc:id="G_b2288" fbc:name="G_b2288" fbc:label="G_b2288"/>
+      <fbc:geneProduct fbc:id="G_b2285" fbc:name="G_b2285" fbc:label="G_b2285"/>
       <fbc:geneProduct fbc:id="G_b2278" fbc:name="G_b2278" fbc:label="G_b2278"/>
       <fbc:geneProduct fbc:id="G_b2286" fbc:name="G_b2286" fbc:label="G_b2286"/>
-      <fbc:geneProduct fbc:id="G_b2280" fbc:name="G_b2280" fbc:label="G_b2280"/>
-      <fbc:geneProduct fbc:id="G_b2277" fbc:name="G_b2277" fbc:label="G_b2277"/>
-      <fbc:geneProduct fbc:id="G_b2276" fbc:name="G_b2276" fbc:label="G_b2276"/>
       <fbc:geneProduct fbc:id="G_b2279" fbc:name="G_b2279" fbc:label="G_b2279"/>
-      <fbc:geneProduct fbc:id="G_b2281" fbc:name="G_b2281" fbc:label="G_b2281"/>
-      <fbc:geneProduct fbc:id="G_b2283" fbc:name="G_b2283" fbc:label="G_b2283"/>
-      <fbc:geneProduct fbc:id="G_b2288" fbc:name="G_b2288" fbc:label="G_b2288"/>
       <fbc:geneProduct fbc:id="G_b2284" fbc:name="G_b2284" fbc:label="G_b2284"/>
-      <fbc:geneProduct fbc:id="G_b2287" fbc:name="G_b2287" fbc:label="G_b2287"/>
-      <fbc:geneProduct fbc:id="G_b2285" fbc:name="G_b2285" fbc:label="G_b2285"/>
+      <fbc:geneProduct fbc:id="G_b2281" fbc:name="G_b2281" fbc:label="G_b2281"/>
       <fbc:geneProduct fbc:id="G_b2282" fbc:name="G_b2282" fbc:label="G_b2282"/>
-      <fbc:geneProduct fbc:id="G_b0978" fbc:name="G_b0978" fbc:label="G_b0978"/>
-      <fbc:geneProduct fbc:id="G_b0979" fbc:name="G_b0979" fbc:label="G_b0979"/>
-      <fbc:geneProduct fbc:id="G_b0734" fbc:name="G_b0734" fbc:label="G_b0734"/>
+      <fbc:geneProduct fbc:id="G_b2283" fbc:name="G_b2283" fbc:label="G_b2283"/>
+      <fbc:geneProduct fbc:id="G_b2287" fbc:name="G_b2287" fbc:label="G_b2287"/>
+      <fbc:geneProduct fbc:id="G_b2280" fbc:name="G_b2280" fbc:label="G_b2280"/>
       <fbc:geneProduct fbc:id="G_b0733" fbc:name="G_b0733" fbc:label="G_b0733"/>
-      <fbc:geneProduct fbc:id="G_b3737" fbc:name="G_b3737" fbc:label="G_b3737"/>
-      <fbc:geneProduct fbc:id="G_b3735" fbc:name="G_b3735" fbc:label="G_b3735"/>
-      <fbc:geneProduct fbc:id="G_b3738" fbc:name="G_b3738" fbc:label="G_b3738"/>
-      <fbc:geneProduct fbc:id="G_b3732" fbc:name="G_b3732" fbc:label="G_b3732"/>
-      <fbc:geneProduct fbc:id="G_b3739" fbc:name="G_b3739" fbc:label="G_b3739"/>
-      <fbc:geneProduct fbc:id="G_b3734" fbc:name="G_b3734" fbc:label="G_b3734"/>
+      <fbc:geneProduct fbc:id="G_b0979" fbc:name="G_b0979" fbc:label="G_b0979"/>
+      <fbc:geneProduct fbc:id="G_b0978" fbc:name="G_b0978" fbc:label="G_b0978"/>
+      <fbc:geneProduct fbc:id="G_b0734" fbc:name="G_b0734" fbc:label="G_b0734"/>
       <fbc:geneProduct fbc:id="G_b3731" fbc:name="G_b3731" fbc:label="G_b3731"/>
+      <fbc:geneProduct fbc:id="G_b3734" fbc:name="G_b3734" fbc:label="G_b3734"/>
+      <fbc:geneProduct fbc:id="G_b3732" fbc:name="G_b3732" fbc:label="G_b3732"/>
       <fbc:geneProduct fbc:id="G_b3733" fbc:name="G_b3733" fbc:label="G_b3733"/>
       <fbc:geneProduct fbc:id="G_b3736" fbc:name="G_b3736" fbc:label="G_b3736"/>
-      <fbc:geneProduct fbc:id="G_b3962" fbc:name="G_b3962" fbc:label="G_b3962"/>
-      <fbc:geneProduct fbc:id="G_b1603" fbc:name="G_b1603" fbc:label="G_b1603"/>
+      <fbc:geneProduct fbc:id="G_b3737" fbc:name="G_b3737" fbc:label="G_b3737"/>
+      <fbc:geneProduct fbc:id="G_b3735" fbc:name="G_b3735" fbc:label="G_b3735"/>
+      <fbc:geneProduct fbc:id="G_b3739" fbc:name="G_b3739" fbc:label="G_b3739"/>
+      <fbc:geneProduct fbc:id="G_b3738" fbc:name="G_b3738" fbc:label="G_b3738"/>
       <fbc:geneProduct fbc:id="G_b1602" fbc:name="G_b1602" fbc:label="G_b1602"/>
+      <fbc:geneProduct fbc:id="G_b1603" fbc:name="G_b1603" fbc:label="G_b1603"/>
       <fbc:geneProduct fbc:id="G_b0474" fbc:name="G_b0474" fbc:label="G_b0474"/>
       <fbc:geneProduct fbc:id="G_b0451" fbc:name="G_b0451" fbc:label="G_b0451"/>
-      <fbc:geneProduct fbc:id="G_b3917" fbc:name="G_b3917" fbc:label="G_b3917"/>
-      <fbc:geneProduct fbc:id="G_b2425" fbc:name="G_b2425" fbc:label="G_b2425"/>
-      <fbc:geneProduct fbc:id="G_b2423" fbc:name="G_b2423" fbc:label="G_b2423"/>
-      <fbc:geneProduct fbc:id="G_b0765" fbc:name="G_b0765" fbc:label="G_b0765"/>
       <fbc:geneProduct fbc:id="G_b2422" fbc:name="G_b2422" fbc:label="G_b2422"/>
       <fbc:geneProduct fbc:id="G_b0764" fbc:name="G_b0764" fbc:label="G_b0764"/>
+      <fbc:geneProduct fbc:id="G_b2425" fbc:name="G_b2425" fbc:label="G_b2425"/>
       <fbc:geneProduct fbc:id="G_b2424" fbc:name="G_b2424" fbc:label="G_b2424"/>
+      <fbc:geneProduct fbc:id="G_b2423" fbc:name="G_b2423" fbc:label="G_b2423"/>
+      <fbc:geneProduct fbc:id="G_b3917" fbc:name="G_b3917" fbc:label="G_b3917"/>
+      <fbc:geneProduct fbc:id="G_b0765" fbc:name="G_b0765" fbc:label="G_b0765"/>
       <fbc:geneProduct fbc:id="G_b0763" fbc:name="G_b0763" fbc:label="G_b0763"/>
-      <fbc:geneProduct fbc:id="G_b3493" fbc:name="G_b3493" fbc:label="G_b3493"/>
       <fbc:geneProduct fbc:id="G_b2987" fbc:name="G_b2987" fbc:label="G_b2987"/>
+      <fbc:geneProduct fbc:id="G_b3493" fbc:name="G_b3493" fbc:label="G_b3493"/>
       <fbc:geneProduct fbc:id="G_b0875" fbc:name="G_b0875" fbc:label="G_b0875"/>
+      <fbc:geneProduct fbc:id="G_b4226" fbc:name="G_b4226" fbc:label="G_b4226"/>
       <fbc:geneProduct fbc:id="G_b2502" fbc:name="G_b2502" fbc:label="G_b2502"/>
       <fbc:geneProduct fbc:id="G_b2744" fbc:name="G_b2744" fbc:label="G_b2744"/>
-      <fbc:geneProduct fbc:id="G_b4226" fbc:name="G_b4226" fbc:label="G_b4226"/>
     </fbc:listOfGeneProducts>
   </model>
 </sbml>
