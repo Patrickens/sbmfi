@@ -245,8 +245,8 @@ class LabellingModel(Model):
         if self._la._auto_diff:
             fluxes.requires_grad_(True)
         if fluxes.shape[0] != self._la._batch_size:
-            raise NotImplementedError('we now require that passed fluxes have batch_size rows; '
-                                      'we could reinitialize everything if the need is really there.')
+            raise ValueError(f'batch_size = {self._la._batch_size}; '
+                                      f'fluxes.shape[0] = {fluxes.shape[0]}')
         self._fluxes = fluxes
 
     def set_input_labelling(self, input_labelling: pd.Series):
@@ -710,7 +710,7 @@ class LabellingModel(Model):
         self._set_state()
 
     @abstractmethod
-    def cascade(self): raise NotImplementedError
+    def cascade(self, pandalize=False): raise NotImplementedError
 
     @abstractmethod
     def pretty_cascade(self, weight: int): raise NotImplementedError
@@ -974,7 +974,7 @@ class EMU_Model(LabellingModel):
             if (len(Y) == 0):
                 raise ValueError
             self._Y = Y
-            for weight, Y in Y.items():
+            for weight, yek in Y.items():
                 yemus = self._yemus[weight]
                 for yemu in yemus:
                     # this is when a built model gets new input labelling
@@ -982,7 +982,7 @@ class EMU_Model(LabellingModel):
                         continue
                     if yemu in self._emu_indices:
                         matrix, dmdv, row = self._emu_indices[yemu]
-                        self._emu_indices[yemu] = Y, dmdv, row
+                        self._emu_indices[yemu] = yek, dmdv, row
 
     def _parse_measurement(self, all_metabolites:DictList, measurement_id:str):
         if '|[' in measurement_id: # this indicates its an EMU
@@ -1022,6 +1022,8 @@ class EMU_Model(LabellingModel):
         self._yemus = OrderedDict([(weight, self._yemus[weight]) for weight in both])
 
     def _initialize_Y(self):
+        # deepcopy is necessary, otherwise the previous labelling state is modified in place!
+        self._Y = deepcopy(self._Y)
         for weight, yemus in self._yemus.items():
             Y_values, Y_indices = [], []
             for i, yemu in enumerate(yemus):
@@ -1048,9 +1050,10 @@ class EMU_Model(LabellingModel):
                 if yemu in self._emu_indices:
                     matrix, dmdv, row = self._emu_indices[yemu]
                     self._emu_indices[yemu] = Y, dmdv, row
+
         res = self._labelling_repo[self._labelling_id]
         if '_Y' not in res:
-            res['_Y'] = deepcopy(self._Y)
+            res['_Y'] = self._Y
 
     def _initialize_tensors(self):
         for (weight, xemus), yemus in zip(self._xemus.items(), self._yemus.values()):

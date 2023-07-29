@@ -424,16 +424,24 @@ class _BlockDiagGaussian(object):
         self._chol = self._la.cholesky(self._sigma)  # NB fails if not invertible!
         self._sigma_1 = None
 
-    def compute_observations(self, s, select=True):
+    def compute_observations(self, s: pd.DataFrame, select=True, pandalize=False):
         # can take both simulations (full MDVs) or observation that need to be renormalized
         # s.shape = (n_simulations, n_mdv | n_observation)
         # select = True is used when passing MDVs, select = False is used when passing intensities
+        index = None
+        if isinstance(s, pd.DataFrame):
+            index = s.index
+            s = s.values
+        s = self._la.get_tensor(values=s)
         observations_num = s
         if select:
             observations_num = s[..., self._numi]
         observations_denom = self._denom_sum @ self._la.transax(observations_num)
         observations_denom[observations_denom == 0.0] = 1.0
-        return observations_num / self._la.transax(observations_denom)[..., self._denomi]
+        observations = observations_num / self._la.transax(observations_denom)[..., self._denomi]
+        if pandalize:
+            observations = pd.DataFrame(self._la.tonp(observations), index=index, columns=self._observation_df.index)
+        return observations
 
     def sample_sigma(self, shape=(1, )):
         noise = self._la.randn((*shape, self._no,1))
@@ -471,7 +479,7 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
     def build_models(
             model,
             annotation_dfs: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]],
-            normalize=False,
+            normalize=True,
             transformation=None,
             clip_min=0.0,
             clip_max=None,

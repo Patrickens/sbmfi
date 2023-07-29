@@ -212,7 +212,6 @@ def plot_kde(
     return_glyph=False,
     **kwargs
 ):
-    print(bw)
     if isinstance(values, xr.Dataset):
         raise ValueError(
             "Xarray dataset object detected. Use plot_posterior, plot_density "
@@ -432,6 +431,7 @@ class _BaseSimulator(object):
         self._x_meas = None
         self._x_meas_id = None
         self._true_theta = None
+        self._true_theta_id = None
 
     @property
     def data_id(self):
@@ -447,6 +447,10 @@ class _BaseSimulator(object):
             self._did.name = 'data_id'
         return self._did.copy()
 
+    @property
+    def theta_id(self):
+        return self._model._fcm.theta_id
+
     def simulate(
             self,
             fluxes,
@@ -460,6 +464,7 @@ class _BaseSimulator(object):
             fluxes = self._la.get_tensor(values=fluxes.loc[:, self._model._fcm.fluxes_id].values)
 
         n_obshape = max(1, n_obs)
+        slicer = 0 if n_obs == 0 else slice(None)
         n_f = fluxes.shape[0]
         self._model.set_fluxes(fluxes, index, trim=True)
 
@@ -477,10 +482,13 @@ class _BaseSimulator(object):
         for j, (labelling_id, obmod) in enumerate(self._obmods.items()):
             self._model.set_input_labelling(input_labelling=self._substrate_df.loc[labelling_id])
             mdv = self._model.cascade()
+            # print(self._model.labelling_id)
+            # print(self._model.input_labelling)
+            # print(self._model.cascade(pandalize=True))
             if return_mdvs:
                 result[:, j*n_state : (j+1) * n_state] = mdv
             else:
-                result[:, :, i:i+obmod._n_d] = obmod(mdv, n_obs=n_obs)
+                result[:, slicer, i:i+obmod._n_d] = obmod(mdv, n_obs=n_obs)
                 i += obmod._n_d
 
         if pandalize:
@@ -515,7 +523,12 @@ class _BaseSimulator(object):
                 raise ValueError('boundary measurements are outside polytope')
 
     def set_true_theta(self, theta: pd.Series):
+        if isinstance(theta, pd.DataFrame):
+            if theta.shape[0] > 1:
+                raise ValueError
+            theta = theta.iloc[0]
         self._true_theta = self._la.atleast_2d(self._la.get_tensor(values=theta.loc[self._model._fcm.theta_id].values))
+        self._true_theta_id = theta.name
 
     def simulate_true_data(self, n_obs=0, pandalize=True):
         if self._true_theta is None:
@@ -537,7 +550,7 @@ class _BaseSimulator(object):
     def true_theta(self):
         if self._true_theta is None:
             return
-        return pd.Series(self._la.tonp(self._true_theta), index=self._model._fcm.theta_id, name='true_theta')
+        return pd.Series(self._la.tonp(self._true_theta[0]), index=self.theta_id, name=self._true_theta_id)
 
 
 class DataSetSim(_BaseSimulator):
@@ -784,7 +797,7 @@ class DataSetSim(_BaseSimulator):
 def simulate_prior_predictive(
         simulator: _BaseSimulator,
         inference_data: az.InferenceData,
-        n=30000,
+        n=20000,
         include_prior_predictive=True,
         num_processes=2,
         n_obs=0,
@@ -885,6 +898,12 @@ class MCMC(_BaseSimulator):
             x_meas_o = self._x_meas[..., j:k]
             ll = obmod.log_lik(x_meas_o, mdv, return_posterior_predictive)
 
+            # print(labelling_id)
+            # print(self.measurements.iloc[..., j:k])
+            # print(self._model.cascade(pandalize=True))
+            # print(obmod.compute_observations(mdv, pandalize=True))
+            # print()
+
             if return_posterior_predictive:
                 ll, mo = ll
                 mu_o[..., j:k] = mo
@@ -895,6 +914,8 @@ class MCMC(_BaseSimulator):
             log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
 
         if return_posterior_predictive:
+            # print(pd.DataFrame(self._la.tonp(mu_o), columns=self.data_id))
+            # print(log_lik)
             return log_lik, mu_o
         return log_lik
 
@@ -940,9 +961,10 @@ class MCMC(_BaseSimulator):
             n: int = 2000,
             n_burn = 0,
             thinning_factor=3,
-            n_chains: int = 7,
+            n_chains: int = 4,
             kernel=None,
             n_cdf=5,
+            algorithm='cdf',
             line_how='uniform',
             line_proposal_std=2.0,
             xch_how='gauss',
@@ -954,6 +976,18 @@ class MCMC(_BaseSimulator):
         # TODO: this publication talks about this algo, but has a different acceptance procedure:
         #  doi:10.1080/01621459.2000.10473908
         #  doi:10.1007/BF02591694  Rinooy Kan article
+
+        if self._fcm._sampler.basis_coordinates == 'transformed':
+            raise NotImplementedError('transform the chains to transformed')
+
+        if algorithm == 'mh':
+            # TODO modify acceptance step!
+            n_cdf = 1
+            mh_min = self._la.get_tensor(shape=(n_chains, 1))
+            accept_idx = self._la.get_tensor(shape=(n_chains, 1), dtype=np.int64)
+        elif algorithm != 'cdf':
+            raise ValueError
+
         batch_size = n_chains * n_cdf
         if (self._la._batch_size != batch_size) or not self._model._is_built:
             # this way the batch processing is corrected
@@ -971,11 +1005,11 @@ class MCMC(_BaseSimulator):
 
         if initial_points is None:
             net_basis_points = self._sampler.get_initial_points(num_points=n_chains)
-            x = self._fcm.append_xch_flux_samples(net_basis_samples=net_basis_points, return_type='theta')
+            theta = self._fcm.append_xch_flux_samples(net_basis_samples=net_basis_points, return_type='theta')
         else:
-            x = initial_points
+            theta = initial_points
 
-        x = self._la.tile(x, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
+        theta = self._la.tile(theta, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
 
         ker_kwargs = {'return_posterior_predictive': return_post_pred, 'evaluate_prior': evaluate_prior}
         if kernel is None:
@@ -983,22 +1017,21 @@ class MCMC(_BaseSimulator):
             if kernel_kwargs is not None:
                 ker_kwargs = {**ker_kwargs, **kernel_kwargs}
 
-        line_xs = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self._fcm.theta_id)))
+        line_thetas = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self._fcm.theta_id)))
         line_kernel_dist = self._la.get_tensor(shape=(1 + n_cdf, n_chains, 1))
-        dist = kernel(x, **ker_kwargs)
+        dist = kernel(theta, **ker_kwargs)
         if return_post_pred:
             line_data = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)))
             dist, data = dist
-
         line_kernel_dist[0] = dist[:n_chains]  # ordering of the samples from the PDF does not matter for inverse sampling
-        x = x[: n_chains, :]
         log_probs_selecta = self._la.arange(n_chains)
 
+        theta = theta[: n_chains, :]
         n_rev = len(self._model._fcm._fwd_id)
 
         n_tot = n_burn + n * thinning_factor
         biatch = min(2500, n_tot)
-        for i in tqdm.trange(n_tot):  # for i, (ar, r, rnd) in enumerate(zip(ARs, Rs, rands)) is reaaaally fucking slow
+        for i in tqdm.trange(n_tot, ncols=100):
             if i % biatch == 0:
                 # pre-sample samples from hypersphere
                 # uniform samples from unit ball in d dims
@@ -1017,7 +1050,7 @@ class MCMC(_BaseSimulator):
             sphere_sample = sphere_samples[i % biatch]
             rnd = rands[i % biatch]
 
-            pol_dist = self._sampler._h - self._sampler._G @ x[..., :K].T
+            pol_dist = self._sampler._h - self._sampler._G @ theta[..., :K].T
             pol_dist[pol_dist < 0.0] = 0.0
             alpha_min = pol_dist / ar
             alpha_max = self._la.vecopy(alpha_min)
@@ -1036,11 +1069,12 @@ class MCMC(_BaseSimulator):
             line_alphas = self._la.sample_bounded_distribution(
                 shape=(n_cdf, ), lo=alpha_min, hi=alpha_max, which=line_how, std=line_proposal_std
             )
-            net_basis_points = x[..., :K] + line_alphas[..., None] * sphere_sample
+            net_basis_points = theta[..., :K] + line_alphas[..., None] * sphere_sample
 
             xch_fluxes = None
             if n_rev > 0:
-                current_xch = x[..., -n_rev:]
+                # in case there are exchange fluxes, construct them here
+                current_xch = theta[..., -n_rev:]
                 if self._fcm.logit_xch_fluxes:
                     current_xch = self._fcm._sigmoid_xch(current_xch)
                 xch_fluxes = self._la.sample_bounded_distribution(
@@ -1048,10 +1082,11 @@ class MCMC(_BaseSimulator):
                     mu=current_xch, which=xch_how, std=xch_proposal_std
                 )
 
-            line_xs[1:] = self._fcm.append_xch_flux_samples(
+            line_thetas[1:] = self._fcm.append_xch_flux_samples(
                 net_basis_samples=net_basis_points, xch_fluxes=xch_fluxes, return_type='theta'
             )
-            dist = self.log_prob(line_xs[1:], return_post_pred)
+            dist = kernel(line_thetas[1:], **ker_kwargs)
+
             if return_post_pred:
                 dist, data = dist
                 line_data[1:] = data
@@ -1061,33 +1096,55 @@ class MCMC(_BaseSimulator):
             if isinstance(max_line_probs, tuple):
                 max_line_probs = max_line_probs[0]
 
-            normalized = line_kernel_dist - max_line_probs[None, :]
-            probs = self._la.exp(normalized)  # TODO make sure this does not underflow!
-            cdf = self._la.cumsum(probs, 0)  # empirical CDF
-            cdf = cdf / cdf[-1, :]  # numbers between 0 and 1, now find the one closest to rnd to determine which sample is accepted
+            if algorithm =='cdf':
+                normalized = line_kernel_dist - max_line_probs[None, :]
+                probs = self._la.exp(normalized)  # TODO make sure this does not underflow!
+                cdf = self._la.cumsum(probs, 0)  # empirical CDF
+                cdf = cdf / cdf[-1, :]  # numbers between 0 and 1, now find the one closest to rnd to determine which sample is accepted
+                number_picker = cdf - rnd[None, :, None]
+                selector = cdf
+                # make sure that we select the 'next point' instead of the closest one!
+                number_picker[number_picker < 0.0] = float('inf')
+                accept_idx = self._la.argmin(number_picker, 0, keepdims=False)  # indices of accepted samples
+            else:
+                mh_ratio = self._la.exp(self._la.minimum(mh_min, line_kernel_dist[1, ...] - line_kernel_dist[0, ...]))
+                selector = mh_ratio - rnd[:, None]
+                accept_idx[selector < 0] = 0
+                accept_idx[selector > 0] = 1
 
-            # make sure that we select the 'next point' instead of the closest one!
-            number_picker = cdf - rnd[None, :, None]
-            number_picker[number_picker < 0.0] = float('inf')
-            accept_idx = self._la.argmin(number_picker, 0, keepdims=False)  # indices of accepted samples
             accepted_probs = line_kernel_dist[accept_idx[:, 0], log_probs_selecta]
             line_kernel_dist[0] = accepted_probs # set the log-probs of the current sample
-            x = line_xs[accept_idx[:, 0], log_probs_selecta]
-            line_xs[0, :] = x  # set the log-probs of the current sample
+            theta = line_thetas[accept_idx[:, 0], log_probs_selecta]
+            line_thetas[0, ...] = theta  # set the log-probs of the current sample
+            if return_post_pred:
+                data = line_data[accept_idx[:, 0], log_probs_selecta]
+                line_data[0, ...] = data
             j = i - n_burn
-            if (j % thinning_factor == 0) and (j > 0):
+            if (j % thinning_factor == 0) and (j > -1):
                 k = j // thinning_factor
                 kernel_dist[k] = accepted_probs
-                chains[k] = x
+                chains[k] = theta
                 if return_post_pred:
-                    sim_data[k] = line_data[accept_idx[:, 0], log_probs_selecta]
+                    sim_data[k] = data
 
         if return_post_pred:
             sim_data = {
                 'simulated_data': self._la.transax(sim_data, dim0=1, dim1=0)
             }
-        if self._fcm._sampler.basis_coordinates == 'transformed':
-            raise NotImplementedError('transform the chains to transformed')
+
+        attrs = {
+                'n_burn': n_burn,
+                'thinning_factor': thinning_factor,
+                'n_cdf': n_cdf,
+                'line_how': line_how,
+                'line_proposal_std': line_proposal_std,
+                'xch_how': xch_how,
+                'xch_proposal_std': xch_proposal_std,
+            }
+        if self.true_theta is not None:
+            attrs['true_theta'] = self._la.tonp(self._true_theta)
+            attrs['true_theta_id'] = self._true_theta_id
+
         return az.from_dict(
             posterior={
                 'theta': self._la.transax(chains, dim0=1, dim1=0)  # chains x draws x param
@@ -1109,15 +1166,7 @@ class MCMC(_BaseSimulator):
                 'lp': kernel_dist.squeeze(-1).T
             },
             posterior_predictive=sim_data,
-            attrs={
-                'n_burn': n_burn,
-                'thinning_factor': thinning_factor,
-                'n_cdf': n_cdf,
-                'line_how': line_how,
-                'line_proposal_std': line_proposal_std,
-                'xch_how': xch_how,
-                'xch_proposal_std': xch_proposal_std,
-            }
+            attrs=attrs
         )
 
     # @staticmethod
@@ -1215,7 +1264,7 @@ import holoviews as hv
 class PlotMonster(object):
     def __init__(
             self,
-            polytope: LabellingPolytope,
+            polytope: LabellingPolytope,  # this should be in the sampled basis!
             inference_data: az.InferenceData,
             v_rep: pd.DataFrame = None
     ):
@@ -1261,7 +1310,7 @@ class PlotMonster(object):
         verts = np.concatenate([verts, [verts[0]]])
         return hull.points[verts]
 
-    def _plot_density(
+    def plot_density(
             self,
             var_id,
             num_samples=30000,
@@ -1277,8 +1326,11 @@ class PlotMonster(object):
             combined=True,
             num_samples=num_samples,
             rng=True,
-        ).loc[var_id].values[1:].T
-        xax = self._axes_range(var_id)
+        ).loc[var_id].values.T
+        if group in ['posterior', 'prior']:
+            xax = self._axes_range(var_id)
+        else:
+            xax = hv.Dimension(var_id)
         plots = [
             hv.Distribution(sampled_points, kdims=[xax], label=group).opts(bandwidth=bw)
         ]
@@ -1288,7 +1340,7 @@ class PlotMonster(object):
             plots.extend([
                 hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
             ])
-        return hv.Overlay(plots)
+        return hv.Overlay(plots).opts(xrotation=90)
 
     def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None):
         xax = self._axes_range(var1_id)
@@ -1344,8 +1396,50 @@ class PlotMonster(object):
             bandwidth=bandwidth, filled=True, alpha=1.0, cmap='Blues'
         )
 
+    def _load_observed_data(self):
+        measurement_id = self._data.observed_data['measurement_id']
+        data_id = self._data.observed_data['data_id'].values
+        return pd.DataFrame(
+            self._data.observed_data['observed_data'].values, index=measurement_id, columns=data_id
+        )
 
+    def get_MAP(self):
+        lp = self._data.sample_stats.lp.values
+        chain_idx, draw_idx = np.argwhere(lp == lp.max()).T
+        max_lp = lp[chain_idx[0], draw_idx[0]]
 
+        theta_id = self._data['posterior']['theta_id'].values
+        theta = pd.DataFrame(
+            self._data['posterior']['theta'].values[chain_idx, draw_idx, :], columns=theta_id
+        )
+
+        result = {'lp': max_lp, 'theta': theta}
+
+        if 'posterior_predictive' in self._data:
+            data_id = self._data['posterior_predictive']['data_id'].values
+            data = pd.DataFrame(
+                self._data['posterior_predictive']['simulated_data'].values[chain_idx, draw_idx, :], columns=data_id
+            )
+            result['data']=data
+        return result
+
+    def point_plot(self, var1_id, var2_id=None, what='map'):
+        xax = self._axes_range(var1_id)
+        yax = self._axes_range(var2_id)
+
+        if what == 'map':
+            color = '#1ed64f'
+            to_plot = self.get_MAP()['theta']
+        elif what == 'true_theta':
+            color = '#c21924'
+            theta_id = self._data.posterior['theta_id'].values
+            true_theta = post.attrs.get('true_theta')
+            if true_theta is None:
+                raise ValueError('no true theta in this inference data')
+            to_plot = pd.DataFrame(true_theta, index=theta_id).T
+
+        if var2_id is not None:
+            return hv.Points(to_plot.loc[:, [var1_id, var2_id]], kdims=[xax, yax], label=what).opts(color=color, size=7)
 
 
 if __name__ == "__main__":
@@ -1365,108 +1459,67 @@ if __name__ == "__main__":
     from holoviews.operation.stats import univariate_kde
     hv.extension('bokeh')
 
-    bs = 10
-    # model, kwargs = spiro(
-    #     backend='torch',
-    #     batch_size=3, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
-    #     v2_reversible=True, logit_xch_fluxes=True, include_bom=False, seed=None
-    # )
-    # TODO TORCH IS MUUUUUUUUUCH FASTER THAN NUMPY FOR PARALLEL RUNNING
-    # model, kwargs = build_e_coli_anton_glc(
-    #     backend='numpy', build_simulator=True, batch_size=bs, which_measurements='anton', seed=None
-    # )
-    # pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
-    pol = pickle.load(open('pol.p', 'rb'))
-    # nc_file = "C:\python_projects\sbmfi\src\sbmfi\inference\e_coli_anton_glc7_prior.nc"
-    nc_file = "C:\python_projects\sbmfi\spiro.nc"
-    post = az.from_netcdf(nc_file).sel()
-    post = post.sel(draw=slice(3, None))
-    # az.plot_trace(post)
-    # print(123123123)
-    coord = post.posterior_predictive.coords['data_id'].values[7]
-    az.plot_ppc(
-        post,
-        data_pairs={'observed_data': 'simulated_data'},
-        observed=False,
-        coords={'data_id': [coord]},
+    pd.set_option('display.max_rows', 500)
+    pd.set_option('display.max_columns', 500)
+    pd.set_option('display.width', 1000)
+
+    model, kwargs = spiro(
+        backend='torch',
+        batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
+        v2_reversible=True, logit_xch_fluxes=False, include_bom=False, seed=None
     )
+    sdf = kwargs['substrate_df']
+    datasetsim = kwargs['datasetsim']
+    simm = datasetsim._obmods
+    bom = datasetsim._bom
+    up = UniFluxPrior(model, cache_size=25000)
+    # from botorch.utils.sampling import sample_polytope
+    mcmc = MCMC(
+        model=model,
+        substrate_df=sdf,
+        mdv_observation_models=simm,
+        boundary_observation_model=bom,
+        prior=up,
+    )
+    algo = 'mh'
+    mcmc.set_measurement(x_meas=kwargs['measurements'])
+    mcmc.set_true_theta(theta=kwargs['theta'])
+    run_kwargs = dict(
+        n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_post_pred=True, line_proposal_std=5.0,
+        evaluate_prior=False, algorithm=algo
+    )
+    # #
+    post = mcmc.run(**run_kwargs)
+    # az.to_netcdf(post, filename=f'spiro_{algo}.nc')
 
-    # az.plot_trace(post)
-    #
-    # post = post.rename({'param': 'theta'})
-    # v_rep = pd.read_excel('v_rep.xlsx')
-    # pm = PlotMonster(pol, post, v_rep=v_rep)
-    # var1_id = 'B_svd0'
-    # var2_id = 'B_svd1'
-    # group = 'prior'
-    #
-    # a = pm._plot_polytope_area(var1_id, var2_id)
-    # b = pm._data_hull(var1_id=var1_id, var2_id=var2_id, group=group)
-    # # c = pm._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group)
-    # d = pm._plot_density(var1_id)
-    # e = pm._plot_density(var1_id, group=group)
-    # output_file('test.html')
-    #
-    # show(hv.render(d * e))
+    plot = False
+    if plot:
+        # pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
+        pol = pickle.load(open('pol.p', 'rb'))
+        # nc_file = "C:\python_projects\sbmfi\src\sbmfi\inference\e_coli_anton_glc7_prior.nc"
+        nc_file = "C:\python_projects\sbmfi\spiro_cdf.nc"
+        post = az.from_netcdf(nc_file)
 
-    # sdf = kwargs['substrate_df']
-    # datasetsim = kwargs['datasetsim']
-    # simm = datasetsim._obmods
-    # bom = datasetsim._bom
-    #
-    # up = UniFluxPrior(model, cache_size=25000)
-    #
-    # mcmc = MCMC(
-    #     model=model,
-    #     substrate_df=sdf,
-    #     mdv_observation_models=simm,
-    #     boundary_observation_model=bom,
-    #     prior=up,
-    # )
-    # mcmc.set_measurement(x_meas=kwargs['measurements'])
-    #
-    # # pickle.dump(mcmc, open('mcmc.p', 'wb'))
-    # # mcmc = pickle.load(open('mcmc.p', 'rb'))
-    #
-    # run_kwargs = dict(
-    #     n=5, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=5, return_post_pred=True, line_proposal_std=5.0,
-    #     evaluate_prior=True,
-    # )
-    #
-    # parallel = False
-    # num_processes = 3
-    #
-    # if parallel:
-    #     post = mcmc.run_parallel(num_processes=num_processes, **run_kwargs)
-    # else:
-    #     run_kwargs['n_chains'] *= num_processes
-    #     post = mcmc.run(**run_kwargs)
+        v_rep = pd.read_excel('v_rep.xlsx', index_col=0)
+        pm = PlotMonster(pol, post, v_rep=v_rep)
+        # pm._v_rep.to_excel('v_rep.xlsx')
 
+        var1_id = 'B_svd1'
+        var2_id = 'B_svd3'
+        group = 'posterior'
 
-    # az.to_netcdf(post, filename='e_coli_anton_glc9.nc')
+        map = pm.get_MAP()
+        measurements = pm._load_observed_data()
 
-    # model, kwargs = spiro(batch_size=3, which_measurements='lcms', build_simulator=True,
-    #                       which_labellings=list('CD'), v2_reversible=True, logit_xch_fluxes=True)
-    # sdf = kwargs['substrate_df']
-    # simm = kwargs['datasetsim']._obmods
-    # bom = kwargs['datasetsim']._bom
-    #
-    # abc = MCMC_ABC(
-    #     model=model,
-    #     substrate_df=sdf,
-    #     mdv_observation_models=simm,
-    #     boundary_observation_model=bom
-    # )
-    # measurements = kwargs['measurements'].iloc[[0]]
-    # abc.set_measurement(x_meas=measurements)
-    #
-    # fluxes = kwargs['fluxes'].loc[model._fcm.fluxes_id].to_frame().values
-    # # fluxes = model._la.get_tensor(values=fluxes.values)[None, :]
-    # fluxes = abc._la.tile(fluxes, (abc._la._batch_size, )).T
-    # abc.euclidian(fluxes, n_obs=5)
-
-
-
-    # az.plot_trace(
-    #     post,
-    # )
+        # aa = pm.plot_density('D: C+0', group='posterior_predictive', var_names='simulated_data')
+        #
+        a = pm._plot_polytope_area(var1_id, var2_id)
+        b = pm._data_hull(var1_id=var1_id, var2_id=var2_id, group=group)
+        c = pm._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group)
+        d = pm.point_plot(var1_id=var1_id, var2_id=var2_id, what='map')
+        e = pm.point_plot(var1_id=var1_id, var2_id=var2_id, what='true_theta')
+        # # d = pm._plot_density(var1_id)
+        # # e = pm._plot_density(var1_id, group=group)
+        output_file('test.html')
+        show(hv.render(a * b * c * d * e))
+        # show(hv.render(d))

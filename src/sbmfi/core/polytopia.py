@@ -575,13 +575,6 @@ def transform_polytope_keep_transform(
     settings: PolyRoundSettings = PolyRoundSettings(),
     kernel_basis ='svd',
 ) -> Polytope:
-    """
-    Express polytope in a (shifted) orthogonal basis in the null space of the equality constraints to remove all
-    equality constraints
-    @param polytope:
-    @param settings:
-    @return:
-    """
     if polytope.inequality_only:
         raise ValueError("Polytope already transformed (only contains inequality constraints)")
 
@@ -739,7 +732,7 @@ class PolytopeSamplingModel(object):
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
         return result
 
-    def to_fluxes(self, theta: pd.DataFrame, is_rounded=True, pandalize=True):
+    def to_fluxes(self, theta: pd.DataFrame, is_rounded=True, pandalize=False):
         index = None
         if isinstance(theta, pd.DataFrame):
             index = theta.index
@@ -796,7 +789,7 @@ class FluxCoordinateMapper(object):
             pr_verbose = False,
             kernel_basis ='svd',  # basis for null-space of simplified polytope
             basis_coordinates = 'rounded',  # which variables will be considered free (basis or simplified)
-            logit_xch_fluxes = True,  # whether to logit exchange fluxes
+            logit_xch_fluxes = False,  # whether to logit exchange fluxes
             free_reaction_id = None,
             linalg: LinAlg = None,
             **kwargs
@@ -1041,7 +1034,7 @@ class FluxCoordinateMapper(object):
         if isinstance(thermo_fluxes, pd.DataFrame):
             index = thermo_fluxes.index
             thermo_fluxes = thermo_fluxes.loc[:, self.thermo_fluxes_id].values
-
+        thermo_fluxes = self._la.get_tensor(values=thermo_fluxes)
         fluxes = self._la.vecopy(thermo_fluxes)
         if len(self._fwd_id) > 0:
             xch = fluxes[..., self._rev_idx]
@@ -1462,6 +1455,11 @@ if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
     from sbmfi.inference.priors import UniFluxPrior
+    import pandas as pd
+
+    pd.set_option('display.max_rows', 500)
+    pd.set_option('display.max_columns', 500)
+    pd.set_option('display.width', 1000)
     # from PolyRound.api import PolyRoundApi
     # PolyRoundApi.simplify_transform_and_round()
     # n = 5
@@ -1475,24 +1473,22 @@ if __name__ == "__main__":
     # m, k = spiro(build_simulator=True, backend='torch')
     # m, k = build_e_coli_anton_glc(build_simulator=True)
 
-    m,k=spiro(v2_reversible=False, build_simulator=True)
-    # pickle.dump((m._fcm._Fn, k), open('fn.p', 'wb'))
-    fn, kwargs = pickle.load(open('fn.p', 'rb'))
-    fluxes = kwargs['fluxes']
-    thermo = fluxes.copy()
-    thermo['v5'] = -(thermo['v5_rev'] - thermo['v5'])
-    thermo = thermo.loc[fn.A.columns].to_frame().T
-    thermo = pd.concat([thermo, thermo])
-    psm = PolytopeSamplingModel(
-        fn,
-        kernel_basis='svd',
+    model,kwargs=spiro(v2_reversible=True, v5_reversible=True, build_simulator=True)
+    fluxes = kwargs['fluxes'].to_frame().T
+    fcm = FluxCoordinateMapper(
+        model,
+        kernel_basis='rref',
+        logit_xch_fluxes=True,
         basis_coordinates='transformed',
         pr_verbose=False,
     )
+
+    psm = fcm._sampler
+    thermo = fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
     print(thermo)
     theta = psm.to_basis(thermo, pandalize=True)
     print(theta)
-    fluxes = psm.to_fluxes(theta, is_rounded=False, pandalize=True)
+    fluxes = psm.to_fluxes(theta, is_rounded=psm.basis_coordinates == 'rounded', pandalize=True)
     print(fluxes.round(2))
 
     # samples = sample_polytope(m._fcm._sampler, n=50, new_basis_points=True)

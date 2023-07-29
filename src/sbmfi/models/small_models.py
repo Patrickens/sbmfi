@@ -16,7 +16,8 @@ from cobra import Reaction, Metabolite, DictList, Model
 def spiro(
         backend='numpy', auto_diff=False, batch_size=1, add_biomass=True, v2_reversible=False,
         ratios=True, build_simulator=False, add_cofactors=True, which_measurements=None, seed=2,
-        which_labellings=None, logit_xch_fluxes=False, include_bom=True,
+        which_labellings=None, include_bom=True, v5_reversible=False, n_obs=0,
+        kernel_basis='svd', basis_coordinates='rounded', logit_xch_fluxes=False,
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -29,6 +30,11 @@ def spiro(
     # cobra.io.save_json_model(model=M, filename=json_file)
     if (which_measurements is not None) and not build_simulator:
         raise ValueError
+
+    if v5_reversible:
+        v5_atom_map_str = 'F/a + D/bcd  <== C/abcd'
+    else:
+        v5_atom_map_str = 'F/a + D/bcd  <-- C/abcd'
 
     reaction_kwargs = {
         'a_in': {
@@ -74,7 +80,7 @@ def spiro(
         # },
         'v5': {  # NB this is an always reverse reaction!
             'lower_bound': -100.0, # 'upper_bound': 100.0
-            'atom_map_str': 'F/a + D/bcd  <-- C/abcd',  # <--  ==>
+            'atom_map_str': v5_atom_map_str,  # <--  ==>
             # 'atom_map_str': 'F/a + D/bcd  <=> C/abcd',  # <--  ==>
         },
         'v6': {
@@ -183,6 +189,8 @@ def spiro(
         ratios=ratios,
         build_simulator=build_simulator,
         seed=seed,
+        kernel_basis=kernel_basis,
+        basis_coordinates=basis_coordinates,
         logit_xch_fluxes=logit_xch_fluxes,
     )
 
@@ -195,24 +203,6 @@ def spiro(
             model.metabolites.get_by_id('C'): -0.1,
         })
         model.add_reactions(reaction_list=[bm], reaction_kwargs={bm.id: {'atom_map_str': 'biomass --> ∅'}})
-
-    fluxes = {
-        'a_in':     1.0,
-        'd_out':    0.1,
-        'f_out':    0.1,
-        'h_out':    0.8,
-        'v1':       1.0,
-        'v2':       0.7,
-        'v2_rev':   0.35,
-        'v3':       0.7,
-        'v4':       0.2,
-        'v5':       0.3,
-        'v5_rev':   1.0,
-        # 'v5_rev':   0.7,
-        'v6':       0.6,
-        'v7':       0.6,
-    }
-    if add_biomass:
         fluxes = {
             'a_in':   10.00,
             # 'a_in_rev':   10.00,
@@ -226,7 +216,6 @@ def spiro(
             'v4':     0.00,
             'v5':     0.05,
             'v5_rev': 8.10,
-            # 'v5_rev': 8.05,
             'v6':     8.05,
             'v7':     8.05,
             'bm':     1.50,
@@ -234,10 +223,28 @@ def spiro(
         bm = model.reactions.get_by_id('bm')
         model.objective = {bm: 1}
     else:
-        model.objective = {bm: 1}
+        fluxes = {
+            'a_in': 1.0,
+            'd_out': 0.1,
+            'f_out': 0.1,
+            'h_out': 0.8,
+            'v1': 1.0,
+            'v2': 0.7,
+            'v2_rev': 0.35,
+            'v3': 0.7,
+            'v4': 0.2,
+            'v5': 0.3,
+            'v5_rev': 1.0,
+            'v6': 0.6,
+            'v7': 0.6,
+        }
+        model.objective = {model.reactions.get_by_id('h_out'): 1}
 
     if not v2_reversible:
         fluxes['v2'] = fluxes['v2'] - fluxes.pop('v2_rev')
+
+    if not v5_reversible:
+        fluxes['v5_rev'] = fluxes['v5_rev'] - fluxes.pop('v5')
 
     if add_cofactors:
         cof = Metabolite('cof', formula='H2O')
@@ -287,10 +294,10 @@ def spiro(
         bom = None
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
-        datasetsim = DataSetSim(model, substrate_df, obsmods, bom)
+        datasetsim = DataSetSim(model, substrate_df, obsmods, None, bom)
         theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
         datasetsim.set_true_theta(theta.iloc[0])
-        measurements = datasetsim.simulate_true_data(n_obs=1)
+        measurements = datasetsim.simulate_true_data(n_obs=n_obs).iloc[[0]]
 
     kwargs = {
         'annotation_df': annotation_df,
@@ -619,6 +626,23 @@ if __name__ == "__main__":
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
-    m, k = spiro(backend='torch', add_biomass=False,
-        batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'), v2_reversible=True
+
+    model, kwargs = spiro(backend='torch', add_biomass=True, v2_reversible=True,
+        batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
+        kernel_basis='rref',
     )
+    model.set_input_labelling(kwargs['substrate_df'].loc['C'])
+    model.set_input_labelling(kwargs['substrate_df'].loc['D'])
+
+    # datasetsim = kwargs['datasetsim']
+    # fluxes = kwargs['fluxes'].to_frame().T
+    # thermo = model._fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
+    # theta = model._fcm.map_fluxes_2_theta(fluxes, pandalize=True)
+    # ttheta = model._fcm.map_fluxes_2_theta(thermo, is_thermo=True, pandalize=True)
+    # measurements = datasetsim.simulate(fluxes, n_obs=0, pandalize=True)
+    # print(fluxes)
+    # print(thermo)
+    # print(kwargs['theta'])
+    # print(theta)
+    # print(ttheta)
+    # print(measurements)

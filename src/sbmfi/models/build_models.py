@@ -2174,6 +2174,8 @@ def simulator_factory(
         device='cpu',
         ratios=True,
         seed=None,
+        kernel_basis='svd',
+        basis_coordinates='rounded',
         logit_xch_fluxes=False,
 ) -> LabellingModel:
     if id_or_file_or_model is not None:
@@ -2213,7 +2215,11 @@ def simulator_factory(
     if measurements is not None:
         model.set_measurements(measurement_list=measurements)
     if build_simulator:
-        model.build_simulator(logit_xch_fluxes=logit_xch_fluxes)
+        model.build_simulator(
+            kernel_basis=kernel_basis,
+            basis_coordinates=basis_coordinates,
+            logit_xch_fluxes=logit_xch_fluxes
+        )
     return model
 
 
