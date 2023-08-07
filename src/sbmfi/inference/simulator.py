@@ -3,8 +3,6 @@ from multiprocessing import Pool
 import tables as pt
 import warnings
 import torch
-import time
-import logging
 import psutil
 import os, pickle, io
 import math
@@ -25,23 +23,11 @@ from sbmfi.core.simulfuncs import (
     init_observer,
     obervervator_worker,
     observator_tasks,
-    designer_worker,
-    designer_tasks,
 )
 from sbmfi.core.observation import (
-    LCMS_ObservationModel,
     BoundaryObservationModel,
-    exclude_low_massiso,
-    ClassicalObservationModel,
-    TOF6546Alaa5minParameters,
     MDV_ObservationModel,
-    _BlockDiagGaussian,
-    MDV_LogRatioTransform,
-
 )
-# from pta.sampling.commons import (
-#     SamplingResult, split_chains, apply_to_chains, fill_common_sampling_settings, sample_from_chains
-# )
 from sbmfi.inference.priors import (
     _BasePrior,
     _FluxPrior,
@@ -50,10 +36,6 @@ from sbmfi.inference.priors import (
     RatioPrior,
     _CannonicalPolytopeSupport,
 )
-# from pta.constants import (
-#     default_min_chains,
-#     us_steps_multiplier,
-# )
 from sbmfi.core.util import (
     _excel_polytope,
     hdf_opener_and_closer,
@@ -82,293 +64,6 @@ https://distribution-explorer.github.io/multivariate_continuous/lkj.html
 https://bayesiancomputationbook.com/markdown/chp_08.html
 """
 
-# necessary to be able to plot stuff in arviz
-bw = 'scott'
-from arviz.stats.density_utils import (
-    _fast_kde_2d,
-    kde,
-    _find_hdi_contours,
-    _get_bw,
-    _get_grid,
-    _kde_adaptive,
-    _kde_convolution,
-    histogram,
-)
-
-import xarray as xr
-from arviz.rcparams import rcParams
-from arviz.plots.plot_utils import default_grid, get_plotting_function
-from arviz.stats.density_utils import _fast_kde_2d, kde, _find_hdi_contours
-from arviz.plots.plot_utils import get_plotting_function, _init_kwargs_dict
-def plot_dist(
-    values,
-    values2=None,
-    color="C0",
-    kind="auto",
-    cumulative=False,
-    label=None,
-    rotated=False,
-    rug=False,
-    bw=bw,
-    quantiles=None,
-    contour=True,
-    fill_last=True,
-    figsize=None,
-    textsize=None,
-    plot_kwargs=None,
-    fill_kwargs=None,
-    rug_kwargs=None,
-    contour_kwargs=None,
-    contourf_kwargs=None,
-    pcolormesh_kwargs=None,
-    hist_kwargs=None,
-    is_circular=False,
-    ax=None,
-    backend=None,
-    backend_kwargs=None,
-    show=None,
-    **kwargs,
-):
-    values = np.asarray(values)
-
-    if isinstance(values, (InferenceData, xr.Dataset)):
-        raise ValueError(
-            "InferenceData or xarray.Dataset object detected,"
-            " use plot_posterior, plot_density or plot_pair"
-            " instead of plot_dist"
-        )
-
-    if kind not in ["auto", "kde", "hist"]:
-        raise TypeError(f'Invalid "kind":{kind}. Select from {{"auto","kde","hist"}}')
-
-    if kind == "auto":
-        kind = "hist" if values.dtype.kind == "i" else rcParams["plot.density_kind"]
-
-    dist_plot_args = dict(
-        # User Facing API that can be simplified
-        values=values,
-        values2=values2,
-        color=color,
-        kind=kind,
-        cumulative=cumulative,
-        label=label,
-        rotated=rotated,
-        rug=rug,
-        bw=bw,
-        quantiles=quantiles,
-        contour=contour,
-        fill_last=fill_last,
-        figsize=figsize,
-        textsize=textsize,
-        plot_kwargs=plot_kwargs,
-        fill_kwargs=fill_kwargs,
-        rug_kwargs=rug_kwargs,
-        contour_kwargs=contour_kwargs,
-        contourf_kwargs=contourf_kwargs,
-        pcolormesh_kwargs=pcolormesh_kwargs,
-        hist_kwargs=hist_kwargs,
-        ax=ax,
-        backend_kwargs=backend_kwargs,
-        is_circular=is_circular,
-        show=show,
-        **kwargs,
-    )
-
-    if backend is None:
-        backend = rcParams["plot.backend"]
-    backend = backend.lower()
-
-    plot = get_plotting_function("plot_dist", "distplot", backend)
-    ax = plot(**dist_plot_args)
-    return ax
-
-def plot_kde(
-    values,
-    values2=None,
-    cumulative=False,
-    rug=False,
-    label=None,
-    bw=bw,
-    adaptive=False,
-    quantiles=None,
-    rotated=False,
-    contour=True,
-    hdi_probs=None,
-    fill_last=False,
-    figsize=None,
-    textsize=None,
-    plot_kwargs=None,
-    fill_kwargs=None,
-    rug_kwargs=None,
-    contour_kwargs=None,
-    contourf_kwargs=None,
-    pcolormesh_kwargs=None,
-    is_circular=False,
-    ax=None,
-    legend=True,
-    backend=None,
-    backend_kwargs=None,
-    show=None,
-    return_glyph=False,
-    **kwargs
-):
-    if isinstance(values, xr.Dataset):
-        raise ValueError(
-            "Xarray dataset object detected. Use plot_posterior, plot_density "
-            "or plot_pair instead of plot_kde"
-        )
-    if isinstance(values, InferenceData):
-        raise ValueError(
-            " Inference Data object detected. Use plot_posterior "
-            "or plot_pair instead of plot_kde"
-        )
-
-    if values2 is None:
-
-        if bw == "default":
-            bw = "taylor" if is_circular else "experimental"
-
-        grid, density = kde(values, is_circular, bw=bw, adaptive=adaptive, cumulative=cumulative)
-        lower, upper = grid[0], grid[-1]
-
-        density_q = density if cumulative else density.cumsum() / density.sum()
-
-        # This is just a hack placeholder for now
-        xmin, xmax, ymin, ymax, gridsize = [None] * 5
-    else:
-        gridsize = (128, 128) if contour else (256, 256)
-        density, xmin, xmax, ymin, ymax = _fast_kde_2d(values, values2, gridsize=gridsize)
-
-        if hdi_probs is not None:
-            # Check hdi probs are within bounds (0, 1)
-            if min(hdi_probs) <= 0 or max(hdi_probs) >= 1:
-                raise ValueError("Highest density interval probabilities must be between 0 and 1")
-
-            # Calculate contour levels and sort for matplotlib
-            contour_levels = _find_hdi_contours(density, hdi_probs)
-            contour_levels.sort()
-
-            contour_level_list = [0] + list(contour_levels) + [density.max()]
-
-            # Add keyword arguments to contour, contourf
-            contour_kwargs = _init_kwargs_dict(contour_kwargs)
-            if "levels" in contour_kwargs:
-                warnings.warn(
-                    "Both 'levels' in contour_kwargs and 'hdi_probs' have been specified."
-                    "Using 'hdi_probs' in favor of 'levels'.",
-                    UserWarning,
-                )
-            contour_kwargs["levels"] = contour_level_list
-
-            contourf_kwargs = _init_kwargs_dict(contourf_kwargs)
-            if "levels" in contourf_kwargs:
-                warnings.warn(
-                    "Both 'levels' in contourf_kwargs and 'hdi_probs' have been specified."
-                    "Using 'hdi_probs' in favor of 'levels'.",
-                    UserWarning,
-                )
-            contourf_kwargs["levels"] = contour_level_list
-
-        lower, upper, density_q = [None] * 3
-
-    kde_plot_args = dict(
-        # Internal API
-        density=density,
-        lower=lower,
-        upper=upper,
-        density_q=density_q,
-        xmin=xmin,
-        xmax=xmax,
-        ymin=ymin,
-        ymax=ymax,
-        gridsize=gridsize,
-        # User Facing API that can be simplified
-        values=values,
-        values2=values2,
-        rug=rug,
-        label=label,
-        quantiles=quantiles,
-        rotated=rotated,
-        contour=contour,
-        fill_last=fill_last,
-        figsize=figsize,
-        textsize=textsize,
-        plot_kwargs=plot_kwargs,
-        fill_kwargs=fill_kwargs,
-        rug_kwargs=rug_kwargs,
-        contour_kwargs=contour_kwargs,
-        contourf_kwargs=contourf_kwargs,
-        pcolormesh_kwargs=pcolormesh_kwargs,
-        is_circular=is_circular,
-        ax=ax,
-        legend=legend,
-        backend_kwargs=backend_kwargs,
-        show=show,
-        return_glyph=return_glyph,
-        **kwargs,
-    )
-
-    if backend is None:
-        backend = rcParams["plot.backend"]
-    backend = backend.lower()
-
-    # TODO: Add backend kwargs
-    plot = get_plotting_function("plot_kde", "kdeplot", backend)
-    ax = plot(**kde_plot_args)
-
-    return ax
-az.plots.distplot.plot_dist = plot_dist
-def _kde_linear(
-    x,
-    bw=bw,
-    adaptive=False,
-    extend=False,
-    bound_correction=True,
-    extend_fct=0,
-    bw_fct=1,
-    bw_return=False,
-    custom_lims=None,
-    cumulative=False,
-    grid_len=512,
-    **kwargs,  # pylint: disable=unused-argument
-):
-    # Check `bw_fct` is numeric and positive
-    if not isinstance(bw_fct, (int, float, np.integer, np.floating)):
-        raise TypeError(f"`bw_fct` must be a positive number, not an object of {type(bw_fct)}.")
-
-    if bw_fct <= 0:
-        raise ValueError(f"`bw_fct` must be a positive number, not {bw_fct}.")
-
-    # Preliminary calculations
-    x_min = x.min()
-    x_max = x.max()
-    x_std = np.std(x)
-    x_range = x_max - x_min
-
-    # Determine grid
-    grid_min, grid_max, grid_len = _get_grid(
-        x_min, x_max, x_std, extend_fct, grid_len, custom_lims, extend, bound_correction
-    )
-    grid_counts, _, grid_edges = histogram(x, grid_len, (grid_min, grid_max))
-
-    # Bandwidth estimation
-    bw = bw_fct * _get_bw(x, bw, grid_counts, x_std, x_range)
-
-    # Density estimation
-    if adaptive:
-        grid, pdf = _kde_adaptive(x, bw, grid_edges, grid_counts, grid_len, bound_correction)
-    else:
-        grid, pdf = _kde_convolution(x, bw, grid_edges, grid_counts, grid_len, bound_correction)
-
-    if cumulative:
-        pdf = pdf.cumsum() / pdf.sum()
-
-    if bw_return:
-        return grid, pdf, bw
-    else:
-        return grid, pdf
-az.plots.kdeplot.plot_kde = plot_kde
-az.stats.density_utils._kde_linear = _kde_linear
 
 # prof2 = line_profiler.LineProfiler()
 class _BaseSimulator(object):
@@ -1261,7 +956,32 @@ class MCMC_ABC(MCMC):
 
 
 import holoviews as hv
+hv.extension('bokeh')
 class PlotMonster(object):
+    _ALLFONTSIZES = {
+        'xlabel': 12,
+        'ylabel': 12,
+        'zlabel': 12,
+        'labels': 12,
+        'xticks': 10,
+        'yticks': 10,
+        'zticks': 10,
+        'ticks': 10,
+        'minor_xticks': 8,
+        'minor_yticks': 8,
+        'minor_ticks': 8,
+        'title': 14,
+        'legend': 12,
+        'legend_title': 12,
+    }
+    _FONTSIZES = {
+        'labels': 14,
+        'ticks': 12,
+        'minor_ticks': 8,
+        'title': 16,
+        'legend': 12,
+        'legend_title': 14,
+    }
     def __init__(
             self,
             polytope: LabellingPolytope,  # this should be in the sampled basis!
@@ -1270,6 +990,17 @@ class PlotMonster(object):
     ):
         self._pol = polytope
         self._data = inference_data
+
+        prior_color = '#2855de'
+        post_color = '#e02450'
+        self._colors = {
+            'true': '#ff0000',
+            'map': '#13f269',
+            'prior': prior_color,
+            'prior_predictive': prior_color,
+            'posterior': post_color,
+            'posterior_predictive': post_color,
+        }
 
         if not all(polytope.A.columns.isin(inference_data.posterior.theta_id.values)):
             raise ValueError
@@ -1282,6 +1013,13 @@ class PlotMonster(object):
 
         self._v_rep = v_rep
         self._fva = fast_FVA(polytope)
+        self._odf = self._load_observed_data()
+        self._map = self._load_MAP()
+        self._ttdf = self._load_true_theta()
+
+    @property
+    def obsdat_df(self):
+        return self._odf
 
     def _axes_range(
             self,
@@ -1294,7 +1032,7 @@ class PlotMonster(object):
         fva_max = self._fva.loc[var_id, 'max']
 
         if tol > 0:
-            tol = abs(fva_min - fva_max) / 12
+            tol = abs(fva_min - fva_max) / 10
 
         range = (fva_min - tol, fva_max + tol)
         if return_dimension:
@@ -1310,29 +1048,37 @@ class PlotMonster(object):
         verts = np.concatenate([verts, [verts[0]]])
         return hull.points[verts]
 
-    def plot_density(
+    def _get_samples(self, group='posterior', num_samples=None, *args):
+        group_var_map = {
+            'posterior': 'theta',
+            'prior': 'theta',
+            'posterior_predictive': 'simulated_data',
+            'prior_predictive': 'simulated_data',
+        }
+        return az.extract(
+            self._data,
+            group=group,
+            var_names=group_var_map[group],
+            combined=True,
+            num_samples=num_samples,
+            rng=True,
+        ).loc[list(args)].values.T
+
+    def density_plot(
             self,
             var_id,
             num_samples=30000,
             group='posterior',
-            var_names='theta',
             bw=None,
             include_fva = True,
     ):
-        sampled_points = az.extract(
-            self._data,
-            group=group,
-            var_names=var_names,
-            combined=True,
-            num_samples=num_samples,
-            rng=True,
-        ).loc[var_id].values.T
+        sampled_points = self._get_samples(group, num_samples, var_id)
         if group in ['posterior', 'prior']:
             xax = self._axes_range(var_id)
         else:
             xax = hv.Dimension(var_id)
         plots = [
-            hv.Distribution(sampled_points, kdims=[xax], label=group).opts(bandwidth=bw)
+            hv.Distribution(sampled_points, kdims=[xax], label=group).opts(bandwidth=bw, color=self._colors[group])
         ]
         if include_fva and (group in ['posterior', 'prior']):
             fva_min, fva_max = self._axes_range(var_id, return_dimension=False, tol=0)
@@ -1340,16 +1086,18 @@ class PlotMonster(object):
             plots.extend([
                 hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
             ])
-        return hv.Overlay(plots).opts(xrotation=90)
+        return hv.Overlay(plots).opts(xrotation=90, height=400, width=400, show_grid=True, fontsize=self._FONTSIZES)
 
-    def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None):
+    def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None, color='#ebb821'):
         xax = self._axes_range(var1_id)
         yax = self._axes_range(var2_id)
-        area = hv.Area(vertices, kdims=[xax], vdims=[yax], label=label).opts(
-            alpha=0.2, show_grid=True, width=600, height=600,
-        )
-        curve = hv.Curve(vertices, kdims=[xax], vdims=[yax])
-        return area * curve
+        plots = [
+            hv.Area(vertices, kdims=[xax], vdims=[yax], label=label).opts(
+                alpha=0.2, show_grid=True, width=800, height=600, color=color
+            ),
+            hv.Curve(vertices, kdims=[xax], vdims=[yax]).opts(color=color)
+        ]
+        return hv.Overlay(plots).opts(fontsize=self._FONTSIZES)
 
     def _plot_polytope_area(self, var1_id, var2_id):
         pol_verts = self._v_rep.loc[:, [var1_id, var2_id]].drop_duplicates()
@@ -1363,16 +1111,9 @@ class PlotMonster(object):
             group='posterior',
             num_samples=None
     ):
-        sampled_points = az.extract(
-            self._data,
-            group=group,
-            var_names='theta',
-            combined=True,
-            num_samples=num_samples,
-            rng=True,
-        ).loc[[var1_id, var2_id]].values[:, 1:].T
+        sampled_points = self._get_samples(group, num_samples, var1_id, var2_id)
         vertices = self._process_points(sampled_points)
-        return self._plot_area(vertices, var1_id, var2_id, label='sampled support')
+        return self._plot_area(vertices, var1_id, var2_id, label=f'{group} sampled support', color=self._colors[group])
 
     def _bivariate_plot(
             self,
@@ -1382,18 +1123,11 @@ class PlotMonster(object):
             num_samples=30000,
             bandwidth=None,
     ):
-        sampled_points = az.extract(
-            self._data,
-            group=group,
-            var_names='theta',
-            combined=True,
-            num_samples=num_samples,
-            rng=True,
-        ).loc[[var1_id, var2_id]].values[:, 1:].T
+        sampled_points = self._get_samples(group, num_samples, var1_id, var2_id)
         xax = self._axes_range(var1_id)
         yax = self._axes_range(var2_id)
         return hv.Bivariate(sampled_points, kdims=[xax, yax], label='density').opts(
-            bandwidth=bandwidth, filled=True, alpha=1.0, cmap='Blues'
+            bandwidth=bandwidth, filled=True, alpha=1.0, cmap='Blues', fontsize=self._FONTSIZES
         )
 
     def _load_observed_data(self):
@@ -1403,43 +1137,103 @@ class PlotMonster(object):
             self._data.observed_data['observed_data'].values, index=measurement_id, columns=data_id
         )
 
-    def get_MAP(self):
+    def _load_MAP(self):
         lp = self._data.sample_stats.lp.values
         chain_idx, draw_idx = np.argwhere(lp == lp.max()).T
-        max_lp = lp[chain_idx[0], draw_idx[0]]
+        row, col = chain_idx[0], draw_idx[0]
+        max_lp = lp[row, col]
 
         theta_id = self._data['posterior']['theta_id'].values
         theta = pd.DataFrame(
-            self._data['posterior']['theta'].values[chain_idx, draw_idx, :], columns=theta_id
-        )
+            self._data['posterior']['theta'].values[row, col, :], index=theta_id
+        ).T
 
         result = {'lp': max_lp, 'theta': theta}
 
         if 'posterior_predictive' in self._data:
             data_id = self._data['posterior_predictive']['data_id'].values
             data = pd.DataFrame(
-                self._data['posterior_predictive']['simulated_data'].values[chain_idx, draw_idx, :], columns=data_id
-            )
+                self._data['posterior_predictive']['simulated_data'].values[row, col, :], index=data_id
+            ).T
             result['data']=data
         return result
 
-    def point_plot(self, var1_id, var2_id=None, what='map'):
-        xax = self._axes_range(var1_id)
-        yax = self._axes_range(var2_id)
+    def _load_true_theta(self):
+        theta_id = self._data.posterior['theta_id'].values
+        true_theta = post.attrs.get('true_theta')
+        if true_theta is None:
+            return
+        return pd.DataFrame(true_theta, index=theta_id).T
 
-        if what == 'map':
-            color = '#1ed64f'
-            to_plot = self.get_MAP()['theta']
-        elif what == 'true_theta':
-            color = '#c21924'
-            theta_id = self._data.posterior['theta_id'].values
-            true_theta = post.attrs.get('true_theta')
-            if true_theta is None:
-                raise ValueError('no true theta in this inference data')
-            to_plot = pd.DataFrame(true_theta, index=theta_id).T
+    def point_plot(self, var1_id, var2_id=None, what_var='theta', what_point='true'):
+        if what_var == 'theta':
+            xax = self._axes_range(var1_id)
+            if var2_id is not None:
+                yax = self._axes_range(var2_id)
+        elif what_var == 'data':
+            xax = hv.Dimension(var1_id)
+            yax = hv.Dimension(var1_id)
+        else:
+            raise ValueError
 
-        if var2_id is not None:
-            return hv.Points(to_plot.loc[:, [var1_id, var2_id]], kdims=[xax, yax], label=what).opts(color=color, size=7)
+        if what_point == 'map':
+            if what_var not in self._map:
+                raise ValueError(f'{what_var} not in InferenceData')
+            to_plot = self._map[what_var]
+        elif what_point == 'true':
+            if self._ttdf is None:
+                raise ValueError('no true theta in this InferenceData')
+            if what_var == 'theta':
+                to_plot = self._ttdf
+            else:
+                to_plot = self._odf
+        if var2_id is None:
+            return hv.VLine(to_plot.loc[:, var1_id].values).opts(
+                color=self._colors[what_point], line_dash='dashed', xrotation=90
+            )
+        return hv.Points(to_plot.loc[:, [var1_id, var2_id]], kdims=[xax, yax], label=what_point).opts(
+            color=self._colors[what_point], size=7, fontsize=self._FONTSIZES
+        )
+
+    # def observed_data_plot(self, var1_id, var2_id=None, what='map'):
+    #     if var2_id is None:
+    #         return hv.VLine(self.obsdat_df.loc[:, var1_id].values).opts(
+    #             color=self._colors['true_theta'], line_dash='dashed', xrotation=90
+    #         )
+    #     return hv.Points(self.obsdat_df.loc[:, [var1_id, var2_id]], kdims=[var1_id, var2_id]).opts(
+    #         color=self._colors['true_theta'], size=7, fontsize=self._FONTSIZES
+    #     )
+
+    def grand_data_plot(self, var_names: Iterable):
+        plots = []
+        cols = 3
+        for i, var_id in enumerate(var_names):
+            show_legend = True if i == cols - 1 else False
+            postpred = pm.density_plot(var_id, group='posterior_predictive')
+            priopred = pm.density_plot(var_id, group='prior_predictive')
+            true = pm.point_plot(var_id, what_var='data', what_point='true')
+            map = pm.point_plot(var_id, what_var='data', what_point='map')
+            width = 600 if i % cols == cols - 1 else 400
+            panel = (postpred * priopred * true * map).opts(
+                legend_position='right', show_legend=show_legend, width=width, show_grid=True, fontsize=self._FONTSIZES,
+                ylabel='',
+            )
+            plots.append(panel)
+
+        return hv.Layout(plots).cols(cols)
+
+    def grand_theta_plot(self, var1_id, var2_id, group='posterior'):
+        plots = [
+            pm._plot_polytope_area(var1_id, var2_id),
+            pm._data_hull(var1_id=var1_id, var2_id=var2_id, group=group),
+            pm._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group),
+        ]
+        if group == 'posterior':
+            plots.extend([
+                pm.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='map'),
+                pm.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='true')
+            ])
+        return hv.Overlay(plots).opts(legend_position='right', show_legend=True, fontsize=self._FONTSIZES)
 
 
 if __name__ == "__main__":
@@ -1457,42 +1251,42 @@ if __name__ == "__main__":
     from bokeh.plotting import show, output_file
     from arviz import plot_density
     from holoviews.operation.stats import univariate_kde
-    hv.extension('bokeh')
+    # hv.extension('bokeh')
 
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    model, kwargs = spiro(
-        backend='torch',
-        batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
-        v2_reversible=True, logit_xch_fluxes=False, include_bom=False, seed=None
-    )
-    sdf = kwargs['substrate_df']
-    datasetsim = kwargs['datasetsim']
-    simm = datasetsim._obmods
-    bom = datasetsim._bom
-    up = UniFluxPrior(model, cache_size=25000)
-    # from botorch.utils.sampling import sample_polytope
-    mcmc = MCMC(
-        model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom,
-        prior=up,
-    )
-    algo = 'mh'
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    mcmc.set_true_theta(theta=kwargs['theta'])
-    run_kwargs = dict(
-        n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_post_pred=True, line_proposal_std=5.0,
-        evaluate_prior=False, algorithm=algo
-    )
-    # #
-    post = mcmc.run(**run_kwargs)
+    # model, kwargs = spiro(
+    #     backend='torch',
+    #     batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
+    #     v2_reversible=True, logit_xch_fluxes=False, include_bom=False, seed=None
+    # )
+    # sdf = kwargs['substrate_df']
+    # datasetsim = kwargs['datasetsim']
+    # simm = datasetsim._obmods
+    # bom = datasetsim._bom
+    # up = UniFluxPrior(model, cache_size=25000)
+    # # from botorch.utils.sampling import sample_polytope
+    # mcmc = MCMC(
+    #     model=model,
+    #     substrate_df=sdf,
+    #     mdv_observation_models=simm,
+    #     boundary_observation_model=bom,
+    #     prior=up,
+    # )
+    # algo = 'mh'
+    # mcmc.set_measurement(x_meas=kwargs['measurements'])
+    # mcmc.set_true_theta(theta=kwargs['theta'])
+    # run_kwargs = dict(
+    #     n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_post_pred=True, line_proposal_std=5.0,
+    #     evaluate_prior=False, algorithm=algo
+    # )
+    # # #
+    # post = mcmc.run(**run_kwargs)
     # az.to_netcdf(post, filename=f'spiro_{algo}.nc')
 
-    plot = False
+    plot = True
     if plot:
         # pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
         pol = pickle.load(open('pol.p', 'rb'))
@@ -1504,22 +1298,32 @@ if __name__ == "__main__":
         pm = PlotMonster(pol, post, v_rep=v_rep)
         # pm._v_rep.to_excel('v_rep.xlsx')
 
-        var1_id = 'B_svd1'
+        var1_id = 'B_svd2'
         var2_id = 'B_svd3'
         group = 'posterior'
 
-        map = pm.get_MAP()
+        map = pm._load_MAP()
         measurements = pm._load_observed_data()
+        boli = measurements.columns.str.contains('[CD]\+', regex=True)
+        plot = pm.grand_data_plot(measurements.columns[boli])
+        # hv.save(plot, 'pltts.png')
+
+        # plot = pm.grand_theta_plot(var1_id, var2_id, group='prior')
+
 
         # aa = pm.plot_density('D: C+0', group='posterior_predictive', var_names='simulated_data')
         #
-        a = pm._plot_polytope_area(var1_id, var2_id)
-        b = pm._data_hull(var1_id=var1_id, var2_id=var2_id, group=group)
-        c = pm._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group)
-        d = pm.point_plot(var1_id=var1_id, var2_id=var2_id, what='map')
-        e = pm.point_plot(var1_id=var1_id, var2_id=var2_id, what='true_theta')
-        # # d = pm._plot_density(var1_id)
-        # # e = pm._plot_density(var1_id, group=group)
+        # a = pm._plot_polytope_area(var1_id, var2_id)
+        # b = pm._data_hull(var1_id=var1_id, var2_id=var2_id, group=group)
+        # c = pm._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group)
+        # plot = a * b * c
+        # if group == 'posterior':
+        #     d = pm.point_plot(var1_id=var1_id, var2_id=var2_id, what='map')
+        #     e = pm.point_plot(var1_id=var1_id, var2_id=var2_id, what='true_theta')
+        #     plot = plot * d * e
+        # plot = plot.opts(legend_position='right', show_legend=True)
+        # d = pm.density_plot(var1_id)
+        # e = pm.density_plot(var1_id, group=group)
         output_file('test.html')
-        show(hv.render(a * b * c * d * e))
+        show(hv.render(plot))
         # show(hv.render(d))
