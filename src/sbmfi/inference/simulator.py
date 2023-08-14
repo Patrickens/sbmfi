@@ -62,6 +62,7 @@ https://python.arviz.org/en/stable/
 https://pymcmc.readthedocs.io/en/latest/modelchecking.html
 https://distribution-explorer.github.io/multivariate_continuous/lkj.html
 https://bayesiancomputationbook.com/markdown/chp_08.html
+https://michael-franke.github.io/intro-data-analysis/bayesian-p-values-model-checking.html
 """
 
 
@@ -164,12 +165,11 @@ class _BaseSimulator(object):
         self._model.set_fluxes(fluxes, index, trim=True)
 
         if return_mdvs:
-            n_state = len(self._model.state_id)
-            result = self._la.get_tensor(shape=(n_f, n_state * len(self._obmods)))
+            result = self._la.get_tensor(shape=(n_f, self._model._ns * len(self._obmods)))
         else:
             result = self._la.get_tensor(shape=(n_f, n_obshape, len(self.data_id)))
             if self._bomsize > 0:
-                result[:, :, -self._bomsize:] = self._bom.sample_observation(
+                result[:, slicer, -self._bomsize:] = self._bom.sample_observation(
                     self._model._fluxes[:, self._bo_idx], n_obs=n_obs
                 )
 
@@ -177,9 +177,6 @@ class _BaseSimulator(object):
         for j, (labelling_id, obmod) in enumerate(self._obmods.items()):
             self._model.set_input_labelling(input_labelling=self._substrate_df.loc[labelling_id])
             mdv = self._model.cascade()
-            # print(self._model.labelling_id)
-            # print(self._model.input_labelling)
-            # print(self._model.cascade(pandalize=True))
             if return_mdvs:
                 result[:, j*n_state : (j+1) * n_state] = mdv
             else:
@@ -194,8 +191,9 @@ class _BaseSimulator(object):
                 result = self._la.tonp(result).transpose(1, 0, 2).reshape((n_f * n_obshape, len(self.data_id)))
                 if index is None:
                     index = pd.RangeIndex(n_f)
-                obs_index = pd.RangeIndex(n_obshape)
-                index = make_multidex({k: obs_index for k in index}, 'samples_id', 'obs_i')
+                if n_obs > 0:
+                    obs_index = pd.RangeIndex(n_obshape)
+                    index = make_multidex({k: obs_index for k in index}, 'samples_id', 'obs_i')
                 result = pd.DataFrame(result, index=index, columns=self.data_id)
         return result
 
@@ -491,7 +489,7 @@ class DataSetSim(_BaseSimulator):
 
 def simulate_prior_predictive(
         simulator: _BaseSimulator,
-        inference_data: az.InferenceData,
+        inference_data: az.InferenceData = None,
         n=20000,
         include_prior_predictive=True,
         num_processes=2,
@@ -499,14 +497,18 @@ def simulate_prior_predictive(
 ):
     model = simulator._model
     prior_theta = simulator._prior.sample(sample_shape=(n, ))
-    prior_dataset = az.convert_to_dataset(
-        {'theta': prior_theta[None, :, :]},
-        dims={'theta': ['theta_id']},
-        coords={'theta_id': model._fcm.theta_id.tolist()},
-    )
-    inference_data.add_groups(
-        group_dict={'prior': prior_dataset},
-    )
+
+    if inference_data is None:
+        result = dict(theta=prior_theta[None, :, :])
+    else:
+        prior_dataset = az.convert_to_dataset(
+            {'theta': prior_theta[None, :, :]},
+            dims={'theta': ['theta_id']},
+            coords={'theta_id': model._fcm.theta_id.tolist()},
+        )
+        inference_data.add_groups(
+            group_dict={'prior': prior_dataset},
+        )
 
     if include_prior_predictive:
         dsim = DataSetSim(
@@ -525,14 +527,21 @@ def simulate_prior_predictive(
         else:
             dims['simulated_data'] = ['obs_idx', 'data_id']
             prior_data = prior_data[None, :, :, :]
-        prior_dataset = az.convert_to_dataset(
-            {'simulated_data': prior_data},
-            dims=dims,
-            coords=coords,
-        )
-        inference_data.add_groups(
-            group_dict={'prior_predictive': prior_dataset},
-        )
+
+        if inference_data is None:
+            result['simulated_data'] = prior_data
+        else:
+            prior_dataset = az.convert_to_dataset(
+                {'simulated_data': prior_data},
+                dims=dims,
+                coords=coords,
+            )
+            inference_data.add_groups(
+                group_dict={'prior_predictive': prior_dataset},
+            )
+
+    if inference_data is None:
+        return result
 
 
 class MCMC(_BaseSimulator):
@@ -564,53 +573,30 @@ class MCMC(_BaseSimulator):
         if self._x_meas is None:
             raise ValueError('set measurement')
 
-        index = None
-        if isinstance(fluxes, pd.DataFrame):
-            index = fluxes.index
-            fluxes = self._la.get_tensor(values=fluxes.loc[:, self._model._fcm.fluxes_id].values)
-
-        self._model.set_fluxes(fluxes, index)
+        mu_o = self.simulate(fluxes, n_obs=0, return_mdvs=False, pandalize=False)
 
         n_f = fluxes.shape[0]
         n_meas = self._x_meas.shape[0]
         n_bom = 1 if self._bomsize > 0 else 0
 
         log_lik = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
-        if return_posterior_predictive:
-            mu_o = self._la.get_tensor(shape=(n_f, len(self.data_id)))
 
         if self._bomsize > 0:
             bo_meas = self._x_meas[:, -self._bomsize:]
-            mu_bo = self._model._fluxes[:, self._bo_idx]
+            mu_bo = mu_o[:, 0, -self._bomsize:]
             log_lik[..., -1] = self._bom.log_lik(bo_meas=bo_meas, mu_bo=mu_bo)
-            if return_posterior_predictive:
-                mu_o[..., -self._bomsize:] = mu_bo
 
         for i, (labelling_id, obmod) in enumerate(self._obmods.items()):
-            self._model.set_input_labelling(input_labelling=self._substrate_df.loc[labelling_id])
-            mdv = self._model.cascade()
             j, k = self._obsize[labelling_id]
             x_meas_o = self._x_meas[..., j:k]
-            ll = obmod.log_lik(x_meas_o, mdv, return_posterior_predictive)
-
-            # print(labelling_id)
-            # print(self.measurements.iloc[..., j:k])
-            # print(self._model.cascade(pandalize=True))
-            # print(obmod.compute_observations(mdv, pandalize=True))
-            # print()
-
-            if return_posterior_predictive:
-                ll, mo = ll
-                mu_o[..., j:k] = mo
-
+            mu_o_i = mu_o[:, 0, j:k]
+            ll = obmod.log_lik(x_meas_o, mu_o_i)
             log_lik[..., i] = ll
 
         if sum:
             log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
 
         if return_posterior_predictive:
-            # print(pd.DataFrame(self._la.tonp(mu_o), columns=self.data_id))
-            # print(log_lik)
             return log_lik, mu_o
         return log_lik
 
@@ -713,13 +699,13 @@ class MCMC(_BaseSimulator):
                 ker_kwargs = {**ker_kwargs, **kernel_kwargs}
 
         line_thetas = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self._fcm.theta_id)))
-        line_kernel_dist = self._la.get_tensor(shape=(1 + n_cdf, n_chains, 1))
+        line_kernel_dist = self._la.get_tensor(shape=(1 + n_cdf, n_chains, 2)) # last dimension is prior probabilities and distances
         dist = kernel(theta, **ker_kwargs)
         if return_post_pred:
             line_data = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)))
             dist, data = dist
         line_kernel_dist[0] = dist[:n_chains]  # ordering of the samples from the PDF does not matter for inverse sampling
-        log_probs_selecta = self._la.arange(n_chains)
+        selector = self._la.arange(n_chains)
 
         theta = theta[: n_chains, :]
         n_rev = len(self._model._fcm._fwd_id)
@@ -807,12 +793,12 @@ class MCMC(_BaseSimulator):
                 accept_idx[selector < 0] = 0
                 accept_idx[selector > 0] = 1
 
-            accepted_probs = line_kernel_dist[accept_idx[:, 0], log_probs_selecta]
+            accepted_probs = line_kernel_dist[accept_idx[:, 0], selector]
             line_kernel_dist[0] = accepted_probs # set the log-probs of the current sample
-            theta = line_thetas[accept_idx[:, 0], log_probs_selecta]
+            theta = line_thetas[accept_idx[:, 0], selector]
             line_thetas[0, ...] = theta  # set the log-probs of the current sample
             if return_post_pred:
-                data = line_data[accept_idx[:, 0], log_probs_selecta]
+                data = line_data[accept_idx[:, 0], selector]
                 line_data[0, ...] = data
             j = i - n_burn
             if (j % thinning_factor == 0) and (j > -1):
@@ -912,7 +898,7 @@ class MCMC(_BaseSimulator):
             return az.concat(res, dim='chain')
 
 
-class MCMC_ABC(MCMC):
+class SMC_ABC(MCMC):
     # https://www.annualreviews.org/doi/pdf/10.1146/annurev-ecolsys-102209-144621
     #
     def __init__(
@@ -927,9 +913,22 @@ class MCMC_ABC(MCMC):
             if obsmod.transformation_id is None:
                 raise ValueError(f'Observationmodel {obsmod} does not have a transformation and therefore '
                                  f'euclidian distance is not defined (data lies on simplices)')
-        super(MCMC_ABC, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
+        super(SMC_ABC, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
 
-    def euclidian(
+    def _sum_square_diff(self, data):
+        # data = n_chains x n_samples x n_obs x n_data
+        if len(data.shape) < 4:
+            data = self._la.unsqueeze(data, -2)  # adds the n_obs dimension for simulations with n_obs=0 in the previous step
+        return self._la.sum((data - self._x_meas) ** 2, -1, keepdims=False) # sum over n_data
+
+    def _euclidean(self, data):
+        diff_2 = self._sum_square_diff()
+
+    def _rmse(self, data):
+        diff_2 = self._sum_square_diff(data)
+        return self._la.sqrt(self._la.sum(diff_2, -1, keepdims=True) / diff_2.shape[-1]) # sum over n_obs
+
+    def rmse(
             self,
             fluxes,
             n_obs: int = 5,
@@ -940,19 +939,48 @@ class MCMC_ABC(MCMC):
 
         sim_data = self.simulate(fluxes, n_obs)  # batch x n_obs x n_data
         # line below computes the root-mean-squared-error across simulated data and across measurements
-        rmse = self._la.sqrt(self._la.mean(((sim_data[:, :, None, :] - self._x_meas) **2), 1, keepdims=False))
-        distance = self._la.sum(rmse, (1, 2), keepdims=False)
+        # rmse = batch x n_obs x n_meas x n_data
+        distance = self._euclidean(sim_data)
+        rmse = 1 / math.sqrt(distance.shape[-1]) * self._la.sum(distance, -1, keepdims=True)
 
         if return_posterior_predictive:
-            return distance, sim_data
-        return distance
+            return rmse, sim_data
+        return rmse
 
-    def log_prob(
+
+    def epsilon_from_prior(
             self,
-            value,
-            return_posterior_predictive: bool = False,
+            simulated_data,
+            alpha=0.05, # means that 5% of data in simulated data has a low anough
     ):
+        rmse = self._rmse(simulated_data)
+
+        max = simulated_data.max(1)[0].max(1)[0]
+        min = simulated_data.min(1)[0].min(1)[0]
+        diff = max - min
+        print(torch.round(diff, decimals=3))
+        print(torch.round(max, decimals=3))
+        print(torch.round(min, decimals=3))
+        print(torch.round(self._x_meas, decimals=3))
+        print()
+
+        print(rmse.min())
+        print(rmse.max())
+        # print(rmse, rmse.shape)
+
+    def run(
+            self,
+            n_smc_steps=10,
+            n=1000,
+    ):
+        for i in range(n_smc_steps):
+            if i == 0:
+                theta = self._prior.sample((n, ))
+            else:
+                pass
+
         pass
+
 
 
 import holoviews as hv
@@ -1257,46 +1285,51 @@ if __name__ == "__main__":
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    # model, kwargs = spiro(
-    #     backend='torch',
-    #     batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
-    #     v2_reversible=True, logit_xch_fluxes=False, include_bom=False, seed=None
-    # )
-    # sdf = kwargs['substrate_df']
-    # datasetsim = kwargs['datasetsim']
-    # simm = datasetsim._obmods
-    # bom = datasetsim._bom
-    # up = UniFluxPrior(model, cache_size=25000)
-    # # from botorch.utils.sampling import sample_polytope
-    # mcmc = MCMC(
-    #     model=model,
-    #     substrate_df=sdf,
-    #     mdv_observation_models=simm,
-    #     boundary_observation_model=bom,
-    #     prior=up,
-    # )
-    # algo = 'mh'
-    # mcmc.set_measurement(x_meas=kwargs['measurements'])
-    # mcmc.set_true_theta(theta=kwargs['theta'])
-    # run_kwargs = dict(
-    #     n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_post_pred=True, line_proposal_std=5.0,
-    #     evaluate_prior=False, algorithm=algo
-    # )
-    # # #
+    model, kwargs = spiro(
+        backend='torch',
+        batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
+        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=None
+    )
+    sdf = kwargs['substrate_df']
+    datasetsim = kwargs['datasetsim']
+    simm = datasetsim._obmods
+    bom = datasetsim._bom
+    up = UniFluxPrior(model, cache_size=2000)
+    # from botorch.utils.sampling import sample_polytope
+    mcmc = SMC_ABC(
+        model=model,
+        substrate_df=sdf,
+        mdv_observation_models=simm,
+        boundary_observation_model=bom,
+        prior=up,
+    )
+    algo = 'rej'
+    mcmc.set_measurement(x_meas=kwargs['measurements'])
+    mcmc.set_true_theta(theta=kwargs['theta'])
+    run_kwargs = dict(
+        epsilon=5.0,
+        n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_post_pred=True, line_proposal_std=5.0,
+        evaluate_prior=False, algorithm=algo
+    )
+
+    result = simulate_prior_predictive(mcmc, num_processes=0, n_obs=5, n=100, include_prior_predictive=True)
+    mcmc.epsilon_from_prior(result['simulated_data'])
+
     # post = mcmc.run(**run_kwargs)
     # az.to_netcdf(post, filename=f'spiro_{algo}.nc')
 
-    plot = True
+    plot = False
     if plot:
-        # pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
+        pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
         pol = pickle.load(open('pol.p', 'rb'))
         # nc_file = "C:\python_projects\sbmfi\src\sbmfi\inference\e_coli_anton_glc7_prior.nc"
         nc_file = "C:\python_projects\sbmfi\spiro_cdf.nc"
         post = az.from_netcdf(nc_file)
 
-        v_rep = pd.read_excel('v_rep.xlsx', index_col=0)
+        v_rep = None
+        # v_rep = pd.read_excel('v_rep.xlsx', index_col=0)
         pm = PlotMonster(pol, post, v_rep=v_rep)
-        # pm._v_rep.to_excel('v_rep.xlsx')
+        pm._v_rep.to_excel('v_rep.xlsx')
 
         var1_id = 'B_svd2'
         var2_id = 'B_svd3'

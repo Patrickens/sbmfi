@@ -626,14 +626,11 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
         return noisy_observations
 
-    def log_lik(self, x_meas, mdv, return_observation=False):
+    def log_lik(self, x_meas, mu_o):
         x_meas = self._la.atleast_2d(x_meas)  # shape = n_obs x n_mdv
-        mdv = self._la.atleast_2d(mdv)  # shape = batch x n_mdv
-        mu_o = self.compute_observations(s=mdv, select=True)  # batch x n_d
+        mu_o = self._la.atleast_2d(mu_o)  # shape = batch x n_d
         diff = mu_o[:, None, :] - x_meas[:, None, :]  # shape = n_obs x batch x n_d
         log_lik = -0.5 * ((diff @ self.sigma_1) * diff).sum(-1)
-        if return_observation:
-            return log_lik, mu_o
         return log_lik
 
 
@@ -926,7 +923,7 @@ class MVN_BoundaryObservationModel(BoundaryObservationModel):
         bo_meas = self._la.atleast_2d(bo_meas)  # shape = n_obs x n_bo
         # diff = mu_bo[None, :, :] - bo_meas[:, None, :]  # shape = n_obs x batch x n_bo
         diff = mu_bo[:, None, :] - bo_meas[:, None, :]  # shape = batch x n_obs x n_bo
-        return - ((diff @ self._sigma_o_1) * diff).sum(-1)
+        return - 0.5 * ((diff @ self._sigma_o_1) * diff).sum(-1)
 
 
 def _process_flat_frame(mdvdff, total_intensities=None, min_signal=0.05, min_frac=0.33):
