@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
-
+import math
 from typing import Iterable, Union, Dict, Tuple
 from itertools import product, cycle
 from collections import OrderedDict
+
+import scipy.linalg
 from cobra import Metabolite
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.model import LabellingModel, RatioMixin
@@ -26,24 +28,38 @@ from PolyRound.api import PolyRoundApi
 
 
 class MDV_ObservationModel(object):
-    """    """
     def __init__(
             self,
             model: LabellingModel,
             annotation_df: pd.DataFrame,
             transformation=None,
+            correct_natab=False,
+            clip_min=750.0,
+            clip_max=None,
             **kwargs,
     ):
         self._la = model._la
         self._annotation_df = annotation_df
         self._observation_df = self.generate_observation_df(model=model, annotation_df=annotation_df)
         self._n_o = self._observation_df.shape[0]
-        # self._natab = self._set_natural_abundance_correction() # TODO
-        self._call_kwargs = kwargs
+        self._natcorr = correct_natab
+        if correct_natab:
+            self._natab = self._set_natural_abundance_correction() # TODO this currently sucks
         self._state_id = model.state_id
 
+        self._scaling = self._la.get_tensor(shape=(self._n_o,))
+        self._log_scaling = self._la.get_tensor(shape=(self._n_o,))
+
+        self._cmin = clip_min
+        self._lcmin = math.log10(clip_min) if (clip_min is not None) and (clip_min > 0.0) else None
+
+        self._cmax = clip_max
+        self._lcmax = None if clip_max is None else math.log10(clip_max)
+
         if transformation is not None:
-            ilr_basis = kwargs.pop('ilr_basis', 'gram')
+            if (clip_min is None) or (clip_min <= 0.0):
+                raise ValueError(f'For log-ratio transforms to work, set a positive clip_min, not: {clip_min}')
+            ilr_basis = kwargs.pop('ilr_basis', 'helmert')
             transformation = MDV_LogRatioTransform(
                 observation_df=self._observation_df,
                 linalg=self._la,
@@ -52,12 +68,6 @@ class MDV_ObservationModel(object):
             )
         self._transformation = transformation
         self._n_d = len(self.observation_id)
-
-    @property
-    def transformation_id(self):
-        if self._transformation is None:
-            return None
-        return self._transformation.transformation_id
 
     @property
     def observation_id(self) -> pd.Index:
@@ -76,6 +86,13 @@ class MDV_ObservationModel(object):
     @property
     def observation_df(self):
         return self._observation_df.copy()
+
+    @property
+    def scaling(self):
+        scaling = OrderedDict()
+        for ion_id, indices in self._ionindices.items():
+            scaling[ion_id] = self._la.tonp(self._scaling[indices][0])
+        return pd.Series(scaling, name='scaling')
 
     @staticmethod
     def generate_observation_df(model: LabellingModel, annotation_df: pd.DataFrame, verbose=False):
@@ -116,12 +133,82 @@ class MDV_ObservationModel(object):
             cols.append((i, met_id, oid, formula, adduct_name, nC13, isotope_decomposition, state_idx))
 
         obs_df = pd.DataFrame(cols, columns=[
-            'index', 'met_id', 'ion_id', 'formula', 'adduct_name', 'nC13', 'isotope_decomposition', 'state_idx'
-        ]).set_index(keys='index')
+            'annot_df_idx', 'met_id', 'ion_id', 'formula', 'adduct_name', 'nC13', 'isotope_decomposition', 'state_idx'
+        ])
         obs_df.index = obs_df['ion_id'] + '+' + obs_df['nC13'].astype(str)
         obs_df.index.name = 'observation_id'
         obs_df = obs_df.drop_duplicates()  # TODO figure out a bug that replicates rows a bunch of times
-        return obs_df.sort_values(by=['met_id', 'adduct_name', 'nC13'])  # sorting is essential for block-diagonal structure!
+        obs_df = obs_df.sort_values(by=['met_id', 'adduct_name', 'nC13'])  # sorting is essential for block-diagonal structure!
+
+        if 'sigma' in annotation_df.columns:
+            # sigma is defined per measurement
+            obs_df['sigma'] = annotation_df.loc[obs_df['annot_df_idx'].values, 'sigma'].values
+
+        def check_ion_equality(df, column_id, tol=1e-5):
+            vals = df[column_id].values
+            return (abs(vals - vals[0]) < tol).all()
+
+        if 'omega' in annotation_df.columns:
+            # omega is defined per ion
+            obs_df['omega'] = annotation_df.loc[obs_df['annot_df_idx'], 'omega'].values
+            obs_df['omega'] = obs_df['omega'].fillna(1.0)
+            all_ion = obs_df.groupby('ion_id').apply(check_ion_equality, column_id='omega')
+            if not all_ion.all():
+                raise ValueError(
+                    f'omega incorrectly set: {all_ion}, '
+                    f'they should be equal across ions (metabolite + ionization)'
+                )
+
+        if 'total_I' in annotation_df.columns:
+            # total_I is defined per ion
+            obs_df['total_I'] = annotation_df.loc[obs_df['annot_df_idx'], 'total_I'].values
+            all_ion = obs_df.groupby('ion_id').apply(check_ion_equality, column_id='total_I')
+            if not all_ion.all():
+                raise ValueError(
+                    f'total_I incorrectly set: {all_ion}, '
+                    f'they should be equal across ions (metabolite + ionization)'
+                )
+        return obs_df
+
+    def _set_scaling(self, scaling: pd.Series):
+        if scaling.index.duplicated().any():
+            raise ValueError('double ions')
+        for ion_id, value in scaling.items():
+            indices = self._ionindices.get(ion_id)
+            if indices is not None:
+                self._scaling[indices] = value
+        if (self._scaling <= 0.0).any():
+            raise ValueError(f'a total intensity is not set: {self.scaling}')
+        self._log_scaling = self._la.log10(self._scaling)  # will fail if there are any 0s left
+        if self._transformation is not None:
+            self._transformation.set_scaling(self._scaling)
+
+    def _check_x_meas(self, x_meas: pd.Series, compare_scaling=True, atol=1e-3):
+        # check whether the scaling makes sense and whether the clips are respected
+        if isinstance(x_meas, pd.Series):
+            x_meas = x_meas.to_frame().T
+        if isinstance(x_meas, pd.DataFrame):
+            x_meas = x_meas.values
+        x_meas = self._la.atleast_2d(self._la.get_tensor(values=x_meas))
+        if self._transformation is not None:
+            x_meas = self._transformation.inv(x_meas)
+        totals = (self._denom_sum @ x_meas.T)[self._denomi].T
+        if compare_scaling:
+            compare = self._scaling
+            clip_compare = totals
+        else:
+            compare = 1.0
+            clip_compare = totals * self._scaling
+        correct_scaling = (abs(totals - compare) <= atol).all()
+        over_cmin = True if self._cmin is None else (clip_compare >= self._cmin).all()
+        undr_cmax = True if self._cmax is None else (clip_compare <= self._cmax).all()
+
+        if not all((correct_scaling, over_cmin, undr_cmax)):
+            raise ValueError(
+                f'the measurement cannot be produced by the observation model. '
+                f'Correct scaling: {correct_scaling}, '
+                f'over clip_min: {over_cmin}, under clip_max: {undr_cmax}'
+            )
 
     def _set_natural_abundance_correction(self, isotope_threshold=1e-4, correction_threshold=0.001):
         if self._observation_df.empty:
@@ -152,13 +239,13 @@ class MDV_ObservationModel(object):
     def sample_observations(self, mdv, n_obs=3, **kwargs):
         raise NotImplementedError
 
-    def __call__(self, mdv, n_obs=3, return_obs=False, pandalize=False, clip_min=0, clip_max=None):
+    def __call__(self, mdv, n_obs=3, return_obs=False, pandalize=False, **kwargs):
         index = None
         if isinstance(mdv, pd.DataFrame):
             index = mdv.index
             mdv = self._la.get_tensor(values=mdv.loc[:, self.state_id].values)
 
-        observations = self.sample_observations(mdv, n_obs=n_obs, **self._call_kwargs)
+        observations = self.sample_observations(mdv, n_obs=n_obs, **kwargs)
         if self._transformation is not None:
             transformations = self._transformation(observations)
 
@@ -189,7 +276,7 @@ class MDV_LogRatioTransform():
             observation_df: pd.DataFrame,
             linalg: LinAlg,
             transformation: str = 'ilr',
-            ilr_basis: str = 'gram',
+            ilr_basis: str = 'helmert',
     ):
         # TODO come up with some reasonable transform_id!
         # self._obsmod = mdv_observation_model
@@ -203,17 +290,19 @@ class MDV_LogRatioTransform():
             self._n_t = n_o - observation_df['ion_id'].unique().shape[0]
 
         if transformation == 'ilr':
-            if ilr_basis == 'gram':
+            if ilr_basis == 'helmert':
                 self._ilr_basis = self._la.get_tensor(shape=(n_o, self._n_t))
                 self._sumatrix  = self._la.get_tensor(shape=(n_o, n_o))
                 i, j = 0, 0
                 for ion_id, df in observation_df.groupby('ion_id', sort=False):
-                    basis = self._gramm_schmidt_basis(df.shape[0])
+                    # basis = self._gramm_schmidt_basis(df.shape[0])
+                    basis = self._la.get_tensor(values=scipy.linalg.helmert(df.shape[0], full=False))
                     k, l = basis.shape
                     self._ilr_basis[j: j + l, i: i + k] = basis.T
                     self._sumatrix[j: j + l, j: j + l]  = 1.0
                     i += k
                     j += l
+                self._scaled_sumatrix = self._la.vecopy(self._sumatrix)
                 self._meantrix = self._sumatrix / self._la.sum(self._sumatrix, 0, keepdims=True)
             elif ilr_basis == 'random_sbp':
                 # TODO make a random sequental binary partition?
@@ -241,7 +330,8 @@ class MDV_LogRatioTransform():
     def transformation_id(self):
         if self._transformation == 'clr':
             return 'clr_' + self._observation_df.index
-        counts = self._observation_df['ion_id'].value_counts() - 1 # TODO this might not preserve ordering...
+        odf_ion = self._observation_df['ion_id']
+        counts = (odf_ion.value_counts() - 1)[odf_ion.unique()] # TODO this might not preserve ordering...
         return pd.Index(
             [f'{self._transformation}_{k}_{v}' for k in counts.index for v in range(counts.loc[k])],
             name='transformation_id'
@@ -249,8 +339,8 @@ class MDV_LogRatioTransform():
 
     def _closure(self, mat, sumatrix=None):
         if sumatrix is None:
-            # sum = self._la.sum(mat, dim=-1, keepdim=True)
-            sum = self._la.sum(mat, -1, True)
+            sum = self._la.sum(mat, dim=-1, keepdims=True)
+            # sum = self._la.sum(mat, -1, True)
         else:
             sum = mat @ sumatrix
         return mat / sum
@@ -268,7 +358,7 @@ class MDV_LogRatioTransform():
         return logobs - mean
 
     def _ilr_inv(self, ilrs):
-        return self._clr_inv(ilrs @ self._ilr_basis.T, sumatrix=self._sumatrix)
+        return self._clr_inv(ilrs @ self._ilr_basis.T, sumatrix=self._scaled_sumatrix)
 
     def _ilr(self, observations):
         return self._clr(observations, meantrix=self._meantrix) @ self._ilr_basis
@@ -298,6 +388,9 @@ class MDV_LogRatioTransform():
         for i in range(0, sbp.shape[0]):
             psi[i, :] = sbp[i, :] * np.sqrt((n_neg[i] / n_pos[i]) ** sbp[i, :] / np.sum(np.abs(sbp[i, :])))
         return self._clr_inv(psi)
+
+    def set_scaling(self, scaling):
+        self._scaled_sumatrix = self._sumatrix * (1.0 / scaling[None, :])
 
     def inv(self, transform):
         return self._inv_transfunc(transform)
@@ -457,15 +550,20 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             model: Union[LabellingModel, RatioMixin],
             annotation_df: pd.DataFrame,
             sigma_df: pd.DataFrame = None,
+            omega: pd.Series = None,
             transformation = None,
-            clip_min=750.0,
+            correct_natab=False,
+            clip_min=0.0,
             clip_max=None,
             normalize=True,
+            **kwargs,
     ):
-
-        kwargs = dict(clip_min=clip_min, clip_max=clip_max, normalize=normalize)
-        MDV_ObservationModel.__init__(self, model, annotation_df, transformation, **kwargs)
+        MDV_ObservationModel.__init__(
+            self, model, annotation_df, transformation, correct_natab, clip_min, clip_max, **kwargs
+        )
         _BlockDiagGaussian.__init__(self, linalg=self._la, observation_df=self._observation_df)
+        # TODO introduce scaling factor w as in Wiechert publications
+        self._normalize = normalize
         self._initialize_J_xs()
 
         # variables needed for dealing with a singular FIM
@@ -475,27 +573,35 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         if sigma_df is not None:
             self.set_sigma(sigma_df, verify=True)
 
+        # TODO complete omega (scaling factors) check whether in _x_meas the things sum to
+        if omega is None:
+            ion_ids = self._observation_df['ion_id'].unique()
+            omega = pd.Series(1.0, index=ion_ids)
+        omega = omega.fillna(1.0)
+        self._set_scaling(omega)
+
     @staticmethod
     def build_models(
             model,
-            annotation_dfs: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]],
+            annotation_dfs: Dict[str, Tuple[pd.DataFrame, pd.DataFrame, pd.Series]],
             normalize=True,
             transformation=None,
             clip_min=0.0,
             clip_max=None,
     ) -> OrderedDict:
         obsims = OrderedDict()
-        for labelling_id, (annotation_df, sigma_df) in annotation_dfs.items():
+        for labelling_id, (annotation_df, sigma_df, omega) in annotation_dfs.items():
             obsim = None
             if annotation_df is not None:
                 obsim = ClassicalObservationModel(
                     model,
                     annotation_df=annotation_df,
                     sigma_df=sigma_df,
-                    normalize=normalize,
+                    omega=omega,
                     transformation=transformation,
                     clip_min=clip_min,
                     clip_max=clip_max,
+                    normalize=normalize,
                 )
                 if sigma_df is None:
                     sigma = _BlockDiagGaussian.construct_sigma_x(obsim.observation_df)
@@ -505,6 +611,9 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
 
     def set_sigma_x(self, sigma_x: pd.DataFrame):
         self.set_sigma(sigma=sigma_x, verify=True)
+
+    def check_x_meas(self, x_meas: pd.Series, atol=1e-3):
+        self._check_x_meas(x_meas, True, atol)
 
     def _initialize_J_xs(self):
         num_sum_indices = []
@@ -603,26 +712,30 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
                 summary_v[i, 2] = 1.0 / self._la.prod(S)  # |sigma_v| = 1.0 / |FIM|
         return sigma_v, summary_v
 
-    def sample_observations(self, mdv, n_obs=3, clip_min=0.0, clip_max=None, normalize=True, **kwargs):
-
+    def sample_observations(self, mdv, n_obs=3, **kwargs):
         # truncate will restrict out to the domain [0, ∞)
         # normalize will make sure that the Σ out = 1
         if self._chol is None:
             raise ValueError('set sigma_x')
         mdv = self._la.atleast_2d(mdv)  # shape = batch x n_mdv
         observations = self.compute_observations(s=mdv, select=True)  # batch x n_observables
+
+        if self._natcorr:
+            observations = self._natab @ observations
+
+        observations *= self._scaling
         if n_obs == 0:  # this means we return the 'mean'
             return observations
 
         noise = self.sample_sigma(shape=(mdv.shape[0], n_obs))
         noisy_observations = observations[:, None, ...] + noise
 
-        if (clip_min is not None) or (clip_max is not None):
-            noisy_observations = self._la.clip(noisy_observations, clip_min, clip_max)
+        if (self._cmin is not None) or (self._cmax is not None):
+            noisy_observations = self._la.clip(noisy_observations, self._cmin, self._cmax)
 
-        if normalize:
-            if not clip_min >= 0.0:
-                raise ValueError('cannot normalize if we hav negative values')
+        if self._normalize:
+            if not self._cmax >= 0.0:
+                raise ValueError('cannot normalize if we have negative values')
             noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
         return noisy_observations
 
@@ -635,16 +748,14 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
 
 
 class TOF6546Alaa5minParameters(object):
-    # TODO fit 2 lines and sample uniformely between them!
-    def __init__(self, is_diagonal=False, has_bias=False, probabilistic=False):
+    def __init__(self, is_diagonal=False, has_bias=False):
         self._la = None
         self._is_diagonal = is_diagonal
         self._has_bias = has_bias
-        self._probabilistic = probabilistic
 
         self._popt_cvhi = [-1.15955235,  1.76738371]
-        self._popt_cvlo = [-1.69165038,  5.12481632]
         self._popt_corr = [-0.12690790,  0.00185103,  0.04830099,  0.92988777, -0.08980002, -1.63842671]
+
 
     def _exp_decay(self, I, lambada, y0):
         return self._la.exp(I * lambada) * y0
@@ -655,12 +766,9 @@ class TOF6546Alaa5minParameters(object):
         return  a * x ** 2 + b * y ** 2 + c * x * y + d * x + e * y + f
 
     def CV(self, I):
-        hi = self._exp_decay(I, *self._popt_cvhi)
-        if self._probabilistic:
-            randu = self._la.randu(shape=I.shape)
-            lo = self._exp_decay(I, *self._popt_cvlo)
-            return randu * (hi - lo) + lo  # randomly sampled CV
-        return hi  # deterministic CV
+        return self._la.clip(  # CLIP TO ONE ORDER OF MAGNITUDE!!
+            self._exp_decay(I, *self._popt_cvhi), None, 1.0
+        )
 
     def std(self, I):
         CV = self.CV(I=I)
@@ -676,13 +784,9 @@ class TOF6546Alaa5minParameters(object):
         memberberry = I_arr[..., 0][switch]
         I_arr[..., 0][switch] = I_arr[..., 1][switch]
         I_arr[..., 1][switch] = memberberry
-        # print((I_arr[:, :, 0] > I_arr[:, :, 1]).all())
 
         corr = self._quadratic_surface(I_arr, *self._popt_corr)
         corr[corr < 0.0] = 0.0
-        if self._probabilistic:
-            noise = (self._la.randu(corr.shape) - 0.5) * 0.1
-            corr += noise
         return corr
 
     def cov(self, I_arr, std):
@@ -701,18 +805,19 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             total_intensities: pd.Series,
             parameters = TOF6546Alaa5minParameters(),
             transformation = None,
+            correct_natab=False,
             clip_min=750.0,
             clip_max=None,
+            **kwargs
     ):
-        kwargs = dict(clip_min=clip_min, clip_max=clip_max)
-        MDV_ObservationModel.__init__(self, model, annotation_df, transformation, **kwargs)
+        MDV_ObservationModel.__init__(
+            self, model, annotation_df, transformation, correct_natab, clip_min, clip_max, **kwargs
+        )
         _BlockDiagGaussian.__init__(self, linalg=self._la, observation_df=self._observation_df)
         self._total_intensities = {}
-        self._totI = self._la.get_tensor(shape=(self._n_o,))
-        self._logtotI = self._la.get_tensor(shape=(self._n_o,))
         self._p = parameters
         self._p._la = self._la
-        self.set_total_intensities(total_intensities=total_intensities)
+        self._set_scaling(scaling=total_intensities)
 
     @staticmethod
     def build_models(
@@ -738,13 +843,6 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             obsims[labelling_id] = obsim
         return obsims
 
-    @property
-    def total_intensities(self):
-        toti = OrderedDict()
-        for ion_id, indices in self._ionindices.items():
-            toti[ion_id] = self._la.tonp(self._totI[indices][0])
-        return pd.Series(toti, name='total_intensities')
-
     def construct_sigma(self, logI):
         if self._p is None:
             raise ValueError('set parameters to compute sigma elements')
@@ -761,54 +859,59 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         sigma += self._la.vecopy(self._la.transax(sigma))  # easiest way to make it diagonal
         return sigma
 
-    def set_total_intensities(self, total_intensities: pd.Series):
-        if total_intensities.index.duplicated().any():
-            raise ValueError('double metabolites')
-        for ion_id, value in total_intensities.items():
-            indices = self._ionindices.get(ion_id)
-            if indices is not None:
-                self._totI[indices] = value
-        if (self._totI <= 0.0).any():
-            raise ValueError(f'a total intensity is not set: {self.total_intensities}')
-        self._logtotI = self._la.log10(self._totI)  # will fail if there are any 0s left
+    def check_x_meas(self, x_meas: pd.Series, atol=1e-3):
+        self._check_x_meas(x_meas, False, atol)
 
-    def sample_observations(self, mdv, n_obs=3, clip_min=750.0, clip_max=None, **kwargs):
+    def sample_observations(self, mdv, n_obs=3, **kwargs):
+        if self._cmin < 1.0:
+            raise ValueError('need to clip brohh')
         if self._total_intensities is None:
             raise ValueError(f'set total intensities')
 
         mdv = self._la.atleast_2d(mdv)  # shape = batch x n_mdv
         observations = self.compute_observations(s=mdv, select=True)  # batch x n_observables
-        if n_obs == 0:  # this means we return the 'mean'
-            return observations
+        if self._natcorr:
+            observations = (self._natab @ observations.T).T
 
-        # TODO multiply with natural abundance!
-        logobs = self._la.log10(observations + 1.0)
-        logI = logobs + self._logtotI[None, :]  # in log space, multiplication is addition
-        noisy_observations = self._la.tile(logI[:, None, :], (1, n_obs, 1))
-        sigma_x = self.construct_sigma(logI=logI)
+        logobs = self._la.log10(observations + 1e-12)
+        mu_logI = logobs + self._log_scaling[None, :]  # in log space, multiplication is addition
+        if (self._cmin is not None) or (self._cmax is not None):
+            clip_logI = self._la.clip(mu_logI, self._lcmin, self._lcmax)
+        else:
+            clip_logI = mu_logI
+
+        if n_obs == 0:  # this means we return the 'mean'
+            observations = 10 ** clip_logI
+            return self.compute_observations(observations, select=False)
+
+        noisy_observations = self._la.tile(mu_logI[:, None, :], (1, n_obs, 1))
+        sigma_x = self.construct_sigma(logI=clip_logI)
         self.set_sigma(sigma=sigma_x, verify=False)  # TODO deal with singular matrices here
         noisy_observations += self.sample_sigma(shape=(n_obs, ))
 
         if self._p._has_bias:
-            bias = self._p.bias(I=logI)
+            bias = self._p.bias(I=clip_logI)
             noisy_observations += bias
 
         noisy_observations = 10 ** noisy_observations
-        if (clip_min is not None) or (clip_max is not None):
-            # account for the fact that low intensity signals are set to `clip_min` in our emzed pipeline
-            noisy_observations = self._la.clip(noisy_observations, clip_min, clip_max)
+        noisy_observations = self._la.clip(noisy_observations, self._cmin, self._cmax)
 
         # recompute the partial MDVs (always on simplex!)
         noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
         return noisy_observations
 
-    # def distance(self, x_meas, mdv, n_obs=3, return_observation=False):
-    #     x_meas = self._la.atleast_2d(x_meas)  # shape = n_obs x n_mdv
-    #     mdv = self._la.atleast_2d(mdv)  # shape = batch x n_mdv
-    #     # mu_o = self.compute_observations(s=mdv, select=True)  # batch x n_d
-    #     sim_obs = self.sample_observations(mdv, n_obs)
-    #     print(sim_obs.shape, x_meas.shape)
-    #     diff = sim_obs[:, None, :] - x_meas[:, None, :]  # shape = n_obs x batch x n_d
+    def _sum_square_diff(self, data, x_meas):
+        # data = n_chains x n_samples x n_obs x n_data
+        if len(data.shape) < 4:
+            data = self._la.unsqueeze(data, -2)  # adds the n_obs dimension for simulations with n_obs=0 in the previous step
+        return self._la.sum((data - x_meas) ** 2, -1, keepdims=False) # sum over n_data
+
+    def euclidean(self):
+        raise NotImplementedError
+
+    def rmse(self, data, x_meas):
+        diff_2 = self._sum_square_diff(data, x_meas)
+        return self._la.sqrt(self._la.sum(diff_2, -1, keepdims=True) / diff_2.shape[-1]) # sum over n_obs
 
 
 class BoundaryObservationModel(object):
@@ -981,37 +1084,38 @@ if __name__ == "__main__":
     pd.set_option('display.width', 1000)
 
 
-    model, kwargs = spiro(which_measurements=None, build_simulator=True)
+    model, kwargs = spiro(which_measurements='com', build_simulator=True, L_12_omega=1.0)
     annotation_df = kwargs['annotation_df']
     fluxes = kwargs['fluxes']
     observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
-    total_intensities = {}
-    unique_ion_ids = observation_df.drop_duplicates(subset=['ion_id'])
-    for _, row in unique_ion_ids.iterrows():
-        total_intensities[row['ion_id']] = annotation_df.loc[
-            (annotation_df['met_id'] == row['met_id']) & (annotation_df['adduct_name'] == row['adduct_name']),
-            'total_I'
-        ].values[0]
-    total_intensities = pd.Series(total_intensities)
+    com = ClassicalObservationModel(model, kwargs['annotation_df'])
 
 
-    obsmod_a = LCMS_ObservationModel(model, annotation_df, total_intensities)
-
-    obsmod_b = ClassicalObservationModel(model, annotation_df)
-    sigma_x = obsmod_b.construct_sigma_x(observation_df)
-    obsmod_b.set_sigma(sigma_x)
-
-    model.set_fluxes(fluxes)
-    mdv = model.cascade()
-
-    mdv = model._la.tile(mdv.T, (4, )).T
-    print(123, mdv.shape)
-    x_meas = obsmod_a.sample_observations(mdv, n_obs=3)
-
-    print(x_meas)
-    # obsmod_a.distance()
-
-    # obsmod_b.sample_observations(mdv, n_obs=3)
+    # total_intensities = {}
+    # unique_ion_ids = observation_df.drop_duplicates(subset=['ion_id'])
+    # for _, row in unique_ion_ids.iterrows():
+    #     total_intensities[row['ion_id']] = annotation_df.loc[
+    #         (annotation_df['met_id'] == row['met_id']) & (annotation_df['adduct_name'] == row['adduct_name']),
+    #         'total_I'
+    #     ].values[0]
+    # total_intensities = pd.Series(total_intensities)
+    #
+    #
+    # obsmod_a = LCMS_ObservationModel(model, annotation_df, total_intensities)
+    #
+    # obsmod_b = ClassicalObservationModel(model, annotation_df)
+    # sigma_x = obsmod_b.construct_sigma_x(observation_df)
+    # obsmod_b.set_sigma(sigma_x)
+    #
+    # model.set_fluxes(fluxes)
+    # mdv = model.cascade()
+    #
+    # mdv = model._la.tile(mdv.T, (4, )).T
+    # x_meas = obsmod_a.sample_observations(mdv, n_obs=3)
+    #
+    # # obsmod_a.distance()
+    #
+    # # obsmod_b.sample_observations(mdv, n_obs=3)
 
 
     bs = 2

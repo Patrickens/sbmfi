@@ -94,12 +94,17 @@ class _BasePrior(Distribution):
     ):
         # prior sampling variables
         self._ic = cache_size  # current index in the cache
-
         if isinstance(model, LabellingModel):
-            if model._fcm is None:
-                model = FluxCoordinateMapper(model, linalg=LinAlg('torch'))
-            else:
-                model = model._fcm
+            kwargs = {}
+            linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
+            if model._fcm is not None:
+                kwargs = dict(
+                    kernel_basis=model._fcm._sampler.kernel_basis,
+                    basis_coordinates=model._fcm._sampler.basis_coordinates,
+                    logit_xch_fluxes=model._fcm.logit_xch_fluxes,
+                    free_reaction_id=model.labelling_reactions.list_attr('id'),
+                )
+            model = FluxCoordinateMapper(model, linalg=linalg, **kwargs)
 
         self._fcm = model
 

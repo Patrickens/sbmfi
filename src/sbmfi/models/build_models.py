@@ -1784,7 +1784,7 @@ def read_anton_measurements(
     annotation_df['met_id'] = annotation_df['met_id'].str.replace('_\{(.*)\}', '', regex=True)
     mapper = {v['bigg_id']: v['formula'] for k, v in _anton_measurements.items()}
     annotation_df['formula'] = annotation_df['met_id'].map(mapper)
-    annotation_df['sigma_x'] = std
+    annotation_df['sigma'] = std
 
     measurements = measurements.T.stack()
     if measured_boundary_fluxes is not None:
@@ -1985,7 +1985,7 @@ def build_e_coli_anton_glc(
         for mid, row in observation_df.iterrows():
             sigma_ii[mid] = annotation_df.loc[
                 (annotation_df['met_id'] == row['met_id']) & (annotation_df['adduct_name'] == row['adduct_name']),
-                'sigma_x'
+                'sigma'
             ].values[0]
         sigma_ii = pd.Series(sigma_ii)
         annotation_dfs = {labelling_id: (annotation_df, sigma_ii) for labelling_id in substrate_df.index}

@@ -18,6 +18,7 @@ def spiro(
         ratios=True, build_simulator=False, add_cofactors=True, which_measurements=None, seed=2,
         which_labellings=None, include_bom=True, v5_reversible=False, n_obs=0,
         kernel_basis='svd', basis_coordinates='rounded', logit_xch_fluxes=False,
+        L_12_omega = 20.0,
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -107,6 +108,7 @@ def spiro(
         'G': {'formula': 'CH2'},  # not used
         'H': {'formula': 'C2H2'},
         'L': {'formula': 'C5KNaSH'},  # pseudo-metabolite
+        'L|[1,2]': {'formula': 'C2H2O7'},  # pseudo-metabolite
         'P': {'formula': 'C2H'},
     }
 
@@ -142,37 +144,34 @@ def spiro(
         }
 
     annotation_df = pd.DataFrame([
-        ('H', 0, 'M-H', 2.0, 0.01, 3e3),
-        ('H', 1, 'M-H', 3.0, 0.01, 3e3),
+        ('H', 1, 'M-H', 3.0, 0.01, None, 3e3),
+        ('H', 0, 'M-H', 2.0, 0.01, None, 3e3),
 
-        ('H', 1, 'M+F', 5.0, 0.03, 2e3),
-        ('H', 1, 'M+Cl', 88.0, 0.03, 2e3),
-        ('H', 0, 'M+F', 4.0, 0.03, 2e3),  # NOTE: to indicate that da_df is not yet in any order!
-        ('H', 0, 'M+Cl', 89.0, 0.03, 2e3),
+        ('H', 1, 'M+F', 5.0, 0.03, None, 2e3),
+        ('H', 1, 'M+Cl', 88.0, 0.03, None, 2e3),
+        ('H', 0, 'M+F', 4.0, 0.03, None, 2e3),  # to indicate that da_df is not yet in any order!
+        ('H', 0, 'M+Cl', 89.0, 0.03, None, 2e3),
 
-        # ('B', 0, 'M-H', 6.0, 0.01),
-        # ('B', 1, 'M-H', 7.0, 0.01),
+        ('P', 1, 'M-H', 3.7, 0.02, None, 2e3),  # an annotated metabolite that is not in the model
+        ('P', 2, 'M-H', 4.7, 0.02, None, 2e3),
+        ('P', 3, 'M-H', 5.7, 0.02, None, 2e3),
 
-        ('P', 1, 'M-H', 3.7, 0.01),  # NOTE: an annotated metabolite that is not in the model
-        ('P', 2, 'M-H', 4.7, 0.01),
-        ('P', 3, 'M-H', 5.7, 0.01),
+        ('C', 0, 'M-H', 1.5, 0.02, None, 7e5),
+        ('C', 3, 'M-H', 4.5, 0.02, None, 7e5),
+        ('C', 4, 'M-H', 5.5, 0.02, None, 7e5),
 
-        ('C', 0, 'M-H', 1.5, 0.02, 7e3),
-        ('C', 3, 'M-H', 4.5, 0.02, 7e3),
-        ('C', 4, 'M-H', 5.5, 0.02, 7e3),
+        ('D', 2, 'M-H', 12.0, 0.01, None, 1e5),
+        ('D', 0, 'M-H', 9.0, 0.01, None, 1e5),
+        ('D', 3, 'M-H', 13.0, 0.01, None, 1e5),
 
-        ('D', 2, 'M-H', 12.0, 0.01, 1e5),
-        ('D', 0, 'M-H', 9.0, 0.01, 1e5),
-        ('D', 3, 'M-H', 13.0, 0.01, 1e5),
+        ('L|[1,2]', 0, 'M-H', 14.0, 0.1, L_12_omega, 4e4),  # a scaling factor other than 1.0
+        ('L|[1,2]', 1, 'M-H', 15.0, 0.1, L_12_omega, 4e4),
 
-        ('L|[1,2]', 0, 'M-H', 14.0, 0.01, 4e4),
-        ('L|[1,2]', 1, 'M-H', 15.0, 0.01, 4e4),
-
-        ('L', 0, 'M-H', 14.0, 0.01, 4e5),
-        ('L', 1, 'M-H', 15.0, 0.01, 4e5),
-        ('L', 2, 'M-H', 16.0, 0.01, 4e5),
-        ('L', 5, 'M-H', 19.0, 0.01, 4e5),
-    ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'sigma_x', 'total_I'])
+        ('L', 0, 'M-H', 14.0, 0.01, None, 4e5),
+        ('L', 1, 'M-H', 15.0, 0.01, None, 4e5),
+        ('L', 2, 'M-H', 16.0, 0.01, None, 4e5),
+        ('L', 5, 'M-H', 19.0, 0.01, None, 4e5),
+    ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'sigma', 'omega', 'total_I'])
     formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
     annotation_df['formula'] = annotation_df['met_id'].map(formap)
 
@@ -270,31 +269,22 @@ def spiro(
 
         if which_measurements == 'lcms':
             annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}
-            total_intensities = {}
-            unique_ion_ids = observation_df.drop_duplicates(subset=['ion_id'])
-            for _, row in unique_ion_ids.iterrows():
-                total_intensities[row['ion_id']] = annotation_df.loc[
-                    (annotation_df['met_id'] == row['met_id']) & (annotation_df['adduct_name'] == row['adduct_name']),
-                    'total_I'
-                ].values[0]
-            total_intensities = pd.Series(total_intensities)
+            total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
             obsmods = LCMS_ObservationModel.build_models(model, annotation_dfs, total_intensities=total_intensities)
         elif which_measurements == 'com':
-            sigma_ii = {}
-            for mid, row in observation_df.iterrows():
-                sigma_ii[mid] = annotation_df.loc[
-                    (annotation_df['met_id'] == row['met_id']) & (annotation_df['adduct_name'] == row['adduct_name']),
-                    'sigma_x'
-                ].values[0]
-            sigma_ii = pd.Series(sigma_ii)
-            annotation_dfs = {labelling_id: (annotation_df, sigma_ii) for labelling_id in substrate_df.index}
-            obsmods = ClassicalObservationModel.build_models(model, annotation_dfs)
+            sigma_ii = observation_df['sigma']
+            omegas = observation_df.drop_duplicates('ion_id').set_index('ion_id')['omega']
+            annotation_dfs = {labelling_id: (annotation_df, sigma_ii, omegas) for labelling_id in substrate_df.index}
+            obsmods = ClassicalObservationModel.build_models(model, annotation_dfs, transformation='ilr', clip_min=1e-12)
         else:
             raise ValueError
+
         bom = None
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
+
         datasetsim = DataSetSim(model, substrate_df, obsmods, None, bom)
+
         theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
         datasetsim.set_true_theta(theta.iloc[0])
         measurements = datasetsim.simulate_true_data(n_obs=n_obs).iloc[[0]]
@@ -627,12 +617,18 @@ if __name__ == "__main__":
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    model, kwargs = spiro(backend='torch', add_biomass=True, v2_reversible=True,
+    model, kwargs = spiro(
+        backend='torch', add_biomass=True, v2_reversible=True,
         batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
         kernel_basis='rref',
     )
-    model.set_input_labelling(kwargs['substrate_df'].loc['C'])
-    model.set_input_labelling(kwargs['substrate_df'].loc['D'])
+    dss = kwargs['datasetsim']
+    data = kwargs['measurements']
+    # inv = dss.to_partial_mdvs(data)
+
+
+    # model.set_input_labelling(kwargs['substrate_df'].loc['C'])
+    # model.set_input_labelling(kwargs['substrate_df'].loc['D'])
 
     # datasetsim = kwargs['datasetsim']
     # fluxes = kwargs['fluxes'].to_frame().T
