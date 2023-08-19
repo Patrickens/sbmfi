@@ -1,0 +1,1 @@
+from sbi.inference.snpe.snpe_c import SNPE_C

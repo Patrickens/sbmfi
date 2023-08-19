@@ -11,19 +11,16 @@ import pandas as pd
 import multiprocessing as mp
 import contextlib
 from typing import Iterable, Union, Dict, Tuple
-from torch.distributions import constraints
-from torch.utils.data import Dataset
 from collections import OrderedDict
 from scipy.spatial import ConvexHull
-from functools import lru_cache
-from PolyRound.api import PolyRoundApi
 # from torch.distributions import Distribution  # TODO perhaps make this the base class of _BaseSimulator
-from sbmfi.core.model import EMU_Model, LabellingModel, RatioMixin
+from sbmfi.core.model import LabellingModel
 from sbmfi.core.simulfuncs import (
     init_observer,
     obervervator_worker,
     observator_tasks,
 )
+import holoviews as hv
 from sbmfi.core.observation import (
     BoundaryObservationModel,
     MDV_ObservationModel,
@@ -45,12 +42,10 @@ from sbmfi.core.util import (
 )
 from line_profiler import line_profiler
 from sbmfi.core.polytopia import PolytopeSamplingModel, V_representation, fast_FVA, LabellingPolytope
-from arviz.data.io_dict import from_dict
-from arviz import InferenceData
 import arviz as az
 import tqdm
-# logger = logging.getLogger(__name__)
-# NOTE: pt.NaturalNameWarning are thrown for the column-names of the substrate_df which contain an illegal %
+
+
 warnings.simplefilter('ignore', pt.NaturalNameWarning)
 
 
@@ -109,6 +104,10 @@ class _BaseSimulator(object):
         self._model = model
         self._la = model._la
         self._substrate_df = substrate_df.loc[list(self._obmods.keys())]
+        self._fcm = model._fcm
+        self._sampler = self._fcm._sampler
+        self._K = self._sampler.dimensionality
+        self._n_rev = len(self._fcm._fwd_id)
 
         if boundary_observation_model is not None:
             bo_id = boundary_observation_model.boundary_id
@@ -145,7 +144,7 @@ class _BaseSimulator(object):
 
     @property
     def theta_id(self):
-        return self._model._fcm.theta_id
+        return self._fcm.theta_id
 
     def simulate(
             self,
@@ -157,7 +156,7 @@ class _BaseSimulator(object):
         index = None
         if isinstance(fluxes, pd.DataFrame):
             index = fluxes.index
-            fluxes = self._la.get_tensor(values=fluxes.loc[:, self._model._fcm.fluxes_id].values)
+            fluxes = self._la.get_tensor(values=fluxes.loc[:, self._fcm.fluxes_id].values)
 
         n_obshape = max(1, n_obs)
         slicer = 0 if n_obs == 0 else slice(None)
@@ -246,13 +245,13 @@ class _BaseSimulator(object):
             if theta.shape[0] > 1:
                 raise ValueError
             theta = theta.iloc[0]
-        self._true_theta = self._la.atleast_2d(self._la.get_tensor(values=theta.loc[self._model._fcm.theta_id].values))
+        self._true_theta = self._la.atleast_2d(self._la.get_tensor(values=theta.loc[self.theta_id].values))
         self._true_theta_id = theta.name
 
     def simulate_true_data(self, n_obs=0, pandalize=True):
         if self._true_theta is None:
             raise ValueError('set true_theta')
-        fluxes = self._model._fcm.map_theta_2_fluxes(self._true_theta)
+        fluxes = self._fcm.map_theta_2_fluxes(self._true_theta)
         vv = self._la.tile(fluxes.T, (self._la._batch_size, )).T
         true_data = self.simulate(vv, n_obs, pandalize=pandalize)
         if not pandalize:
@@ -270,6 +269,16 @@ class _BaseSimulator(object):
         if self._true_theta is None:
             return
         return pd.Series(self._la.tonp(self._true_theta[0]), index=self.theta_id, name=self._true_theta_id)
+
+    def population_variance(self):
+        # TODO compute the covariance matrix of a set of thetas (either from prior or in SMC or in SNPE)
+        #   use this variance to determine the variance along the directionof the line in the MCMC/SMC sampler
+        pass
+
+    def __call__(self, theta, n_obs=3):
+        fluxes = self._fcm.map_theta_2_fluxes(theta)
+        return self.simulate(fluxes, n_obs)
+
 
 
 class DataSetSim(_BaseSimulator):
@@ -327,7 +336,7 @@ class DataSetSim(_BaseSimulator):
             close_pool=True,
     ) -> OrderedDict:
         # TODO perhaps also parse samples_id
-        fluxes = self._model._fcm.frame_fluxes(fluxes, trim=True)
+        fluxes = self._fcm.frame_fluxes(fluxes, trim=True)
 
         result = {}
         result['validx'] = self._la.get_tensor(shape=(fluxes.shape[0], len(self._obmods)), dtype=np.bool_)
@@ -509,8 +518,18 @@ class DataSetSim(_BaseSimulator):
                 for i in labelling_idx], axis=1, keys=labelling_id
             ), validx
 
-    def create_inference_data(self):
+    def create_inference_data(self, hdf: str):
+        # TODO create arviz inference data from hdf
         pass
+
+    def set_call_kwargs(self, **kwargs):
+        pass
+
+    def __call__(self, theta, n_obs=5, close_pool=False):
+        fluxes = self._fcm.map_theta_2_fluxes(theta)
+        result = self.simulate_set(fluxes, n_obs, what='data', close_pool=close_pool)
+        return result['data']
+
 
 
 def simulate_prior_predictive(
@@ -573,420 +592,6 @@ def simulate_prior_predictive(
         return result
 
 
-class MCMC(_BaseSimulator):
-    # TODO think about implementing MALA, this only requires the computation of gradients of log_prob
-
-    def __init__(
-            self,
-            model: LabellingModel,
-            substrate_df: pd.DataFrame,
-            mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _BasePrior,
-            boundary_observation_model: BoundaryObservationModel = None,
-    ):
-        super(MCMC, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
-
-        self._fcm = model._fcm
-        self._sampler = self._fcm._sampler
-
-    def log_lik(
-            self,
-            fluxes,
-            return_posterior_predictive=False,
-            sum=True,
-    ):
-        if not self._is_exact:
-            raise ValueError(
-                'some observation models do not have a .log_prob, meaning that exact inference is impossible'
-            )
-        if self._x_meas is None:
-            raise ValueError('set measurement')
-
-        mu_o = self.simulate(fluxes, n_obs=0, return_mdvs=False, pandalize=False)
-
-        n_f = fluxes.shape[0]
-        n_meas = self._x_meas.shape[0]
-        n_bom = 1 if self._bomsize > 0 else 0
-
-        log_lik = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
-
-        if self._bomsize > 0:
-            bo_meas = self._x_meas[:, -self._bomsize:]
-            mu_bo = mu_o[:, 0, -self._bomsize:]
-            log_lik[..., -1] = self._bom.log_lik(bo_meas=bo_meas, mu_bo=mu_bo)
-
-        for i, (labelling_id, obmod) in enumerate(self._obmods.items()):
-            j, k = self._obsize[labelling_id]
-            x_meas_o = self._x_meas[..., j:k]
-            mu_o_i = mu_o[:, 0, j:k]
-            ll = obmod.log_lik(x_meas_o, mu_o_i)
-            log_lik[..., i] = ll
-
-        if sum:
-            log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
-
-        if return_posterior_predictive:
-            return log_lik, mu_o
-        return log_lik
-
-    def log_prob(
-            self,
-            value,
-            return_posterior_predictive=False,
-            evaluate_prior=False,
-    ):
-        if self._x_meas is None:
-            raise ValueError('set an observation first')
-        # NB we do not evaluate the log_prob of the measured boundary fluxes, since it is a constant for _x_meas
-
-        vape = value.shape
-        viewlue = self._la.view(value, shape=(math.prod(vape[:-1]), vape[-1]))
-
-        n_f = viewlue.shape[0]
-        k = len(self._obmods) + (1 if self._bom is None else 2) # the 2 is for a column of prior and boundary probabilities
-        n_meas = self._x_meas.shape[0]
-        log_prob = self._la.get_tensor(shape=(n_f, n_meas, k))
-        fluxes = self._fcm.map_theta_2_fluxes(viewlue)
-
-        if evaluate_prior:
-            # NB not necessary for uniform prior
-            # NB this also checks support! the hr is guaranteed to sample within the support
-            # NB since priors are currently torch objects, this will not work with numpy backend
-            #   which has proven the faster option for the hr-sampler
-            log_prob[..., -1] = self._prior.log_prob(viewlue)
-
-        log_lik = self.log_lik(fluxes, return_posterior_predictive, False)
-        if return_posterior_predictive:
-            log_lik, mu_o = log_lik
-
-        log_prob[..., :-1] = log_lik
-        log_prob = self._la.view(self._la.sum(log_prob, axis=(1, 2), keepdims=False), shape=(*vape[:-1], 1))
-        if return_posterior_predictive:
-            return log_prob, self._la.view(mu_o, shape=(*vape[:-1], len(self._did)))
-        return log_prob
-
-    def run(
-            self,
-            initial_points = None,
-            n: int = 2000,
-            n_burn = 0,
-            thinning_factor=3,
-            n_chains: int = 4,
-            kernel=None,
-            n_cdf=5,
-            algorithm='cdf',
-            line_how='uniform',
-            line_proposal_std=2.0,
-            xch_how='gauss',
-            xch_proposal_std=0.4,
-            return_post_pred=False,
-            evaluate_prior=False,
-            kernel_kwargs=None,
-    ) -> az.InferenceData:
-        # TODO: this publication talks about this algo, but has a different acceptance procedure:
-        #  doi:10.1080/01621459.2000.10473908
-        #  doi:10.1007/BF02591694  Rinooy Kan article
-
-        if self._fcm._sampler.basis_coordinates == 'transformed':
-            raise NotImplementedError('transform the chains to transformed')
-
-        if algorithm == 'mh':
-            # TODO modify acceptance step!
-            n_cdf = 1
-            mh_min = self._la.get_tensor(shape=(n_chains, 1))
-            accept_idx = self._la.get_tensor(shape=(n_chains, 1), dtype=np.int64)
-        elif algorithm != 'cdf':
-            raise ValueError
-
-        batch_size = n_chains * n_cdf
-        if (self._la._batch_size != batch_size) or not self._model._is_built:
-            # this way the batch processing is corrected
-            self._la._batch_size = batch_size
-            self._model.build_simulator(**self._fcm.fcm_kwargs)
-
-        K = self._sampler.dimensionality
-
-        chains = self._la.get_tensor(shape=(n, n_chains, len(self._fcm.theta_id)))
-        kernel_dist = self._la.get_tensor(shape=(n, n_chains, 1))
-
-        sim_data = None
-        if return_post_pred:
-            sim_data = self._la.get_tensor(shape=(n, n_chains, len(self.data_id)))
-
-        if initial_points is None:
-            net_basis_points = self._sampler.get_initial_points(num_points=n_chains)
-            theta = self._fcm.append_xch_flux_samples(net_basis_samples=net_basis_points, return_type='theta')
-        else:
-            theta = initial_points
-
-        theta = self._la.tile(theta, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
-
-        ker_kwargs = {'return_posterior_predictive': return_post_pred, 'evaluate_prior': evaluate_prior}
-        if kernel is None:
-            kernel = self.log_prob
-            if kernel_kwargs is not None:
-                ker_kwargs = {**ker_kwargs, **kernel_kwargs}
-
-        line_thetas = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self._fcm.theta_id)))
-        line_kernel_dist = self._la.get_tensor(shape=(1 + n_cdf, n_chains, 2)) # last dimension is prior probabilities and distances
-        dist = kernel(theta, **ker_kwargs)
-        if return_post_pred:
-            line_data = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)))
-            dist, data = dist
-        line_kernel_dist[0] = dist[:n_chains]  # ordering of the samples from the PDF does not matter for inverse sampling
-        selector = self._la.arange(n_chains)
-
-        theta = theta[: n_chains, :]
-        n_rev = len(self._model._fcm._fwd_id)
-
-        n_tot = n_burn + n * thinning_factor
-        biatch = min(2500, n_tot)
-        for i in tqdm.trange(n_tot, ncols=100):
-            if i % biatch == 0:
-                # pre-sample samples from hypersphere
-                # uniform samples from unit ball in d dims
-                sphere_samples = self._la.sample_hypersphere(shape=(biatch, n_chains, K))
-                # batch compute distances to all planes
-                ARs = self._sampler._G[None, ...] @ self._la.transax(sphere_samples)
-                rands = self._la.randu((biatch, n_chains), dtype=self._sampler._G.dtype)
-                # TODO: https://link.springer.com/article/10.1007/BF02591694
-                #  implement coordinate hit-and-run (might be faster??)
-
-            # given x, the next point in the chain is x+alpha*r
-            #             # it also satisfies A(x+alpha*r)<=b which implies A*alpha*r<=b-Ax
-            #             # so alpha<=(b-Ax)/ar for ar>0, and alpha>=(b-Ax)/ar for ar<0.
-            #             # b - A @ x is always >= 0, clamping for numerical tolerances
-            ar = ARs[i % biatch]
-            sphere_sample = sphere_samples[i % biatch]
-            rnd = rands[i % biatch]
-
-            pol_dist = self._sampler._h - self._sampler._G @ theta[..., :K].T
-            pol_dist[pol_dist < 0.0] = 0.0
-            alpha_min = pol_dist / ar
-            alpha_max = self._la.vecopy(alpha_min)
-
-            alpha_max[alpha_max < 0.0] = alpha_max.max()
-            alpha_max = alpha_max.min(0)
-            if isinstance(alpha_max, tuple):
-                alpha_max = alpha_max[0]
-
-            alpha_min[alpha_min > 0.0] = alpha_min.min()
-            alpha_min = alpha_min.max(0)
-            if isinstance(alpha_min, tuple):
-                alpha_min = alpha_min[0]
-
-            # construct proposals along the line-segment and compute the empirical CDF from which we select the next step
-            line_alphas = self._la.sample_bounded_distribution(
-                shape=(n_cdf, ), lo=alpha_min, hi=alpha_max, which=line_how, std=line_proposal_std
-            )
-            net_basis_points = theta[..., :K] + line_alphas[..., None] * sphere_sample
-
-            xch_fluxes = None
-            if n_rev > 0:
-                # in case there are exchange fluxes, construct them here
-                current_xch = theta[..., -n_rev:]
-                if self._fcm.logit_xch_fluxes:
-                    current_xch = self._fcm._sigmoid_xch(current_xch)
-                xch_fluxes = self._la.sample_bounded_distribution(
-                    shape=(n_cdf, n_chains), lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                    mu=current_xch, which=xch_how, std=xch_proposal_std
-                )
-
-            line_thetas[1:] = self._fcm.append_xch_flux_samples(
-                net_basis_samples=net_basis_points, xch_fluxes=xch_fluxes, return_type='theta'
-            )
-            dist = kernel(line_thetas[1:], **ker_kwargs)
-
-            if return_post_pred:
-                dist, data = dist
-                line_data[1:] = data
-
-            line_kernel_dist[1:] = dist
-            max_line_probs = line_kernel_dist.max(0)
-            if isinstance(max_line_probs, tuple):
-                max_line_probs = max_line_probs[0]
-
-            if algorithm =='cdf':
-                normalized = line_kernel_dist - max_line_probs[None, :]
-                probs = self._la.exp(normalized)  # TODO make sure this does not underflow!
-                cdf = self._la.cumsum(probs, 0)  # empirical CDF
-                cdf = cdf / cdf[-1, :]  # numbers between 0 and 1, now find the one closest to rnd to determine which sample is accepted
-                number_picker = cdf - rnd[None, :, None]
-                selector = cdf
-                # make sure that we select the 'next point' instead of the closest one!
-                number_picker[number_picker < 0.0] = float('inf')
-                accept_idx = self._la.argmin(number_picker, 0, keepdims=False)  # indices of accepted samples
-            else:
-                mh_ratio = self._la.exp(self._la.minimum(mh_min, line_kernel_dist[1, ...] - line_kernel_dist[0, ...]))
-                selector = mh_ratio - rnd[:, None]
-                accept_idx[selector < 0] = 0
-                accept_idx[selector > 0] = 1
-
-            accepted_probs = line_kernel_dist[accept_idx[:, 0], selector]
-            line_kernel_dist[0] = accepted_probs # set the log-probs of the current sample
-            theta = line_thetas[accept_idx[:, 0], selector]
-            line_thetas[0, ...] = theta  # set the log-probs of the current sample
-            if return_post_pred:
-                data = line_data[accept_idx[:, 0], selector]
-                line_data[0, ...] = data
-            j = i - n_burn
-            if (j % thinning_factor == 0) and (j > -1):
-                k = j // thinning_factor
-                kernel_dist[k] = accepted_probs
-                chains[k] = theta
-                if return_post_pred:
-                    sim_data[k] = data
-
-        if return_post_pred:
-            sim_data = {
-                'simulated_data': self._la.transax(sim_data, dim0=1, dim1=0)
-            }
-
-        attrs = {
-                'n_burn': n_burn,
-                'thinning_factor': thinning_factor,
-                'n_cdf': n_cdf,
-                'line_how': line_how,
-                'line_proposal_std': line_proposal_std,
-                'xch_how': xch_how,
-                'xch_proposal_std': xch_proposal_std,
-            }
-        if self.true_theta is not None:
-            attrs['true_theta'] = self._la.tonp(self._true_theta)
-            attrs['true_theta_id'] = self._true_theta_id
-
-        return az.from_dict(
-            posterior={
-                'theta': self._la.transax(chains, dim0=1, dim1=0)  # chains x draws x param
-            },
-            dims={
-                'theta': ['theta_id'],
-                'observed_data': ['measurement_id', 'data_id'],
-                'simulated_data': ['data_id'],
-            },
-            coords={
-                'theta_id': self._model._fcm.theta_id.tolist(),
-                'measurement_id': self._x_meas_id.tolist(),
-                'data_id': [f'{i[0]}: {i[1]}' for i in self.data_id.tolist()],
-            },
-            observed_data={
-                'observed_data': self.measurements.values
-            },
-            sample_stats={
-                'lp': kernel_dist.squeeze(-1).T
-            },
-            posterior_predictive=sim_data,
-            attrs=attrs
-        )
-
-    # @staticmethod
-    def run_parallel(
-            self,
-            num_processes = 4,
-            initial_points = None,
-            n: int = 2000,
-            n_burn = 0,
-            thinning_factor=3,
-            n_chains: int = 7,
-            kernel=None,
-            n_cdf=5,
-            line_how='uniform',
-            line_proposal_std=2.0,
-            xch_how='gauss',
-            xch_proposal_std=0.4,
-            return_post_pred=False,
-            evaluate_prior=False,
-            kernel_kwargs=None
-    ) -> az.InferenceData:
-        mcmc_kwargs = dict(
-            initial_points=initial_points,
-            n=n,
-            n_burn=n_burn,
-            thinning_factor=thinning_factor,
-            n_chains=n_chains,
-            kernel=kernel,
-            n_cdf=n_cdf,
-            line_how=line_how,
-            line_proposal_std=line_proposal_std,
-            xch_how=xch_how,
-            xch_proposal_std=xch_proposal_std,
-            return_post_pred=return_post_pred,
-            evaluate_prior=evaluate_prior,
-            kernel_kwargs=kernel_kwargs
-        )
-        if num_processes < 0:
-            num_processes = psutil.cpu_count(logical=False)
-        elif num_processes == 0:
-            return self.run(**mcmc_kwargs)
-
-        if num_processes > 0:
-            pool = mp.Pool(num_processes)
-            res = pool.starmap(self.run, [tuple(mcmc_kwargs.values()) for i in range(num_processes)])
-            pool.close()
-            pool.join()
-            return az.concat(res, dim='chain')
-
-
-class SMC_ABC(MCMC):
-    # https://www.annualreviews.org/doi/pdf/10.1146/annurev-ecolsys-102209-144621
-    #
-    def __init__(
-            self,
-            model: LabellingModel,
-            substrate_df: pd.DataFrame,
-            mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _BasePrior = None,
-            boundary_observation_model: BoundaryObservationModel = None,
-            num_processes=0,
-    ):
-        for labelling_id, obsmod in mdv_observation_models.items():
-            if obsmod._transformation is None:
-                raise ValueError(f'Observationmodel {obsmod} does not have a transformation and therefore '
-                                 f'euclidian distance is not defined (data lies on simplices)')
-        super(SMC_ABC, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
-        self._num_processes = num_processes
-
-    def quantile_epsilon(
-            self,
-            simulated_data,
-            quantile=0.8, # means that 5% of data in simulated data has a low anough
-    ):
-        obmod = next(iter(self._obmods.values()))
-        rmse = obmod.rmse(simulated_data, self._x_meas)
-
-        max = simulated_data.max(1)[0].max(1)[0]
-        min = simulated_data.min(1)[0].min(1)[0]
-        diff = max - min
-        print(torch.round(diff, decimals=3))
-        print(torch.round(max, decimals=3))
-        print(torch.round(min, decimals=3))
-        print(torch.round(self._x_meas, decimals=3))
-        print()
-
-        print(rmse.min())
-        print(rmse.max())
-        # print(rmse, rmse.shape)
-
-    def run(
-            self,
-            n_smc_steps=10,
-            n=50,
-            n_obs=5,
-            epsilon_quantile=0.8,
-    ):
-        for i in range(n_smc_steps):
-            if i == 0:
-                result = simulate_prior_predictive(self, None, n, True, self._num_processes, n_obs=n_obs)
-                self.quantile_epsilon(result['simulated_data'], epsilon_quantile)
-            else:
-                pass
-
-        pass
-
-
-
-import holoviews as hv
-hv.extension('bokeh')
 class PlotMonster(object):
     _ALLFONTSIZES = {
         'xlabel': 12,
@@ -1266,97 +871,6 @@ class PlotMonster(object):
         return hv.Overlay(plots).opts(legend_position='right', show_legend=True, fontsize=self._FONTSIZES)
 
 
-def check_stuff():
-    model, kwargs = spiro(
-        backend='numpy',
-        batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
-        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3,
-    )
-    sdf = kwargs['substrate_df']
-    dss = kwargs['datasetsim']
-    simm = dss._obmods
-    bom = dss._bom
-    up = UniFluxPrior(model, cache_size=2000)
-    # from botorch.utils.sampling import sample_polytope
-    mcmc = SMC_ABC(
-        model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom,
-        prior=up,
-    )
-    algo = 'rej'
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    mcmc.set_true_theta(theta=kwargs['theta'])
-    run_kwargs = dict(
-        epsilon=5.0,
-        n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_post_pred=True, line_proposal_std=5.0,
-        evaluate_prior=False, algorithm=algo
-    )
-
-    n_obs = 2
-    result = simulate_prior_predictive(mcmc, num_processes=0, n_obs=n_obs, n=500, include_prior_predictive=False)
-    fluxes = model._fcm.map_theta_2_fluxes(result['theta'])[0]
-    sims = dss.simulate_set(fluxes, n_obs=n_obs, what='mdv')
-    mdvs = sims['mdv']
-    results = []
-    for i, (lid, obmod) in enumerate(dss._obmods.items()):
-        part_mdvss = obmod.compute_observations(mdvs[:, i, :], pandalize=True)
-        part_mdvss_df = part_mdvss.loc[np.sort(np.repeat(np.arange(part_mdvss.shape[0]), n_obs))].reset_index(drop=True)
-        logobs = obmod._la.log10(obmod._la.get_tensor(values=part_mdvss.values) + 1e-12)
-        logI = logobs + obmod._log_scaling[None, :]  # in log space, multiplication is addition
-        noisy_observations = obmod._la.tile(logI[:, None, :], (1, n_obs, 1))
-        sigma_x = obmod.construct_sigma(logI=logI)
-        obmod.set_sigma(sigma=sigma_x, verify=False)
-        noise_samples = obmod.sample_sigma(shape=(n_obs,))
-        noisy_observations += noise_samples
-        noisy_observations = 10 ** noisy_observations
-        noisy_observations1 = obmod._la.clip(noisy_observations, 750.0, None)
-        noisy_observations2 = obmod.compute_observations(noisy_observations1, select=False)
-
-        transformed = obmod._transformation(noisy_observations2)
-
-        back = obmod._transformation.inv(transformed)
-
-        shaper = noisy_observations.shape
-        newshape = (math.prod(shaper[:-1]), shaper[-1])
-
-        shaper2 = transformed.shape
-        newshape2 = (math.prod(shaper2[:-1]), shaper2[-1])
-
-        logobs = pd.DataFrame(logobs, columns=part_mdvss.columns)
-        logI = pd.DataFrame(logI, columns=part_mdvss.columns)
-        noise_samples = pd.DataFrame(noise_samples.reshape(newshape), columns=part_mdvss.columns)
-        sigma_x = pd.concat([pd.DataFrame(sigma_x[i], index=part_mdvss.columns, columns=part_mdvss.columns) for i in
-                             range(fluxes.shape[0])], axis=0)
-        # sigma_x.to_excel('sx.xlsx')
-        noisy_observations = pd.DataFrame(noisy_observations.reshape(newshape), columns=part_mdvss.columns)
-        noisy_observations1 = pd.DataFrame(noisy_observations1.reshape(newshape), columns=part_mdvss.columns)
-        noisy_observations2 = pd.DataFrame(noisy_observations2.reshape(newshape), columns=part_mdvss.columns)
-        transformed = pd.DataFrame(transformed.reshape(newshape2), columns=obmod._transformation.transformation_id)
-        back = pd.DataFrame(back.reshape(newshape), columns=part_mdvss.columns)
-
-        diff = abs(back - part_mdvss_df)
-
-    printo = True
-    if printo:
-        data = result['simulated_data']  # data.flatten(start_dim=0, end_dim=-2)
-        shaper = data.shape
-        new_shape = (math.prod(shaper[:-1]), shaper[-1])
-        transformed = data.reshape(new_shape)
-
-        part_mdvs = mcmc.to_partial_mdvs(transformed)
-
-        fluxes = model._fcm.map_theta_2_fluxes(result['theta'])[0]
-        sims = dss.simulate_set(fluxes, n_obs=2, what='all')
-
-        dang = mcmc.to_partial_mdvs(sims['mdv'], is_mdv=True)
-        dang = dang.loc[np.sort(np.repeat(np.arange(dang.shape[0]), n_obs))].reset_index(drop=True)
-
-        mdvs = pd.concat([pd.DataFrame(mdvs[:, i, :], columns=model.state_id) for i in range(mdvs.shape[1])], axis=1)
-        diff = abs(part_mdvs - dang)
-
-
 def speed_plot():
     pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
     pol = pickle.load(open('pol.p', 'rb'))
@@ -1400,57 +914,7 @@ def speed_plot():
 
 
 if __name__ == "__main__":
-    # from pta.sampling.uniform import sample_flux_space_uniform, UniformSamplingModel
-    # from pta.sampling.tfs import TFSModel
     import pickle, os
     from sbmfi.models.small_models import spiro, multi_modal
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
     from sbmfi.core.util import _excel_polytope
-    from sbmfi.core.observation import MVN_BoundaryObservationModel
-    from sbmfi.settings import SIM_DIR
-    from sbmfi.core.polytopia import FluxCoordinateMapper, compute_volume
-    # from sbmfi.inference.simulator import MCMC
-    from cdd import Fraction
-    from bokeh.plotting import show, output_file
-    from arviz import plot_density
-    from holoviews.operation.stats import univariate_kde
-    # hv.extension('bokeh')
-
-    pd.set_option('display.max_rows', 500)
-    pd.set_option('display.max_columns', 500)
-    pd.set_option('display.width', 1000)
-    np.set_printoptions(linewidth=500)
-
-    model, kwargs = spiro(
-        backend='numpy',
-        batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
-        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3, L_12_omega=1.0,
-    )
-    sdf = kwargs['substrate_df']
-    dss = kwargs['datasetsim']
-    simm = dss._obmods
-    bom = dss._bom
-    up = UniFluxPrior(model, cache_size=2000)
-    # from botorch.utils.sampling import sample_polytope
-
-    mcmc = SMC_ABC(
-        model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom,
-        prior=up,
-    )
-    algo = 'rej'
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    mcmc.set_true_theta(theta=kwargs['theta'])
-    run_kwargs = dict(
-        epsilon=5.0,
-        n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_post_pred=True, line_proposal_std=5.0,
-        evaluate_prior=False, algorithm=algo
-    )
-
-    from sbi.inference.abc.abc_base import ABCBASE
-    from sbi.inference.abc.smcabc import SMCABC
-    from sbi.inference.abc.mcabc import MCABC
-    post = mcmc.run()
-

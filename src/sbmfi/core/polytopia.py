@@ -262,7 +262,11 @@ def compute_polytope_halfspaces(vertices, number_type='fraction'):
 
 
 def project_polytope(
-        polytope, P: pd.DataFrame, p: pd.Series = None, return_vertices=False, tolerance=1e-10, number_type='fraction'
+        polytope, P: pd.DataFrame,
+        p: pd.Series = None,
+        return_vertices=False,
+        tolerance=1e-10,
+        number_type='fraction'
 ):
     # computes the projection/ infinite shadow of the labelling-polytope onto the exchange flux dimensions
     # https://github.com/stephane-caron/pypoman
@@ -569,12 +573,13 @@ def round_polytope_keep_ellipsoid(polytope: Polytope, settings: PolyRoundSetting
     polytope.transformation.columns = E.columns
     return polytope, E, E_1, epsilon
 
-# PolyRoundApi.transform_polytope()
+
 def transform_polytope_keep_transform(
     polytope: Polytope,
     settings: PolyRoundSettings = PolyRoundSettings(),
     kernel_basis ='svd',
 ) -> Polytope:
+    # PolyRoundApi.transform_polytope()
     if polytope.inequality_only:
         raise ValueError("Polytope already transformed (only contains inequality constraints)")
 

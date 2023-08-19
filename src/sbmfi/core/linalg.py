@@ -207,6 +207,14 @@ class NumpyBackend(object):
         return np.concatenate(As, axis=dim)
 
     @staticmethod
+    def max(A, dim=None):
+        return A.max(dim)
+
+    @staticmethod
+    def min(A, dim=None):
+        return A.min(dim)
+
+    @staticmethod
     def view(A, shape):
         return A.reshape(shape)
 
@@ -218,6 +226,10 @@ class NumpyBackend(object):
 
     def randperm(self, n):
         return self._rng.permutation(n)
+
+    def multinomial(self, n, p):
+        counts = self._rng.multinomial(1, p, size=n)
+        return np.where(counts)[1]
 
     def choice(self, n, tot):
         return np.random.choice(tot, n)
@@ -400,6 +412,21 @@ class TorchBackend(object):
     @staticmethod
     def cat(As, dim):
         return torch.cat(As, dim)
+    @staticmethod
+    def max(A, dim=None):
+        if dim is not None:
+            return A.max(dim).values
+        return A.max()
+
+    @staticmethod
+    def min(A, dim=None):
+        if dim is not None:
+            return A.min(dim).values
+        return A.min()
+
+    def multinomial(self, n, p):
+        return torch.multinomial(input=p, num_samples=n, generator=self._rng, replacement=True)
+
 
     def randn(self, shape, dtype=np.double):
         if dtype in _NP_TORCH_DTYPE:
@@ -430,7 +457,8 @@ class LinAlg(object):
         'exp', 'log10', 'log', 'atleast_2d', 'diag', 'trace', 'allclose', 'where', 'arange', 'divide',
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'ones', 'zeros', 'sum', 'mean', 'amax', 'linspace',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
-        'cumsum', 'argmin', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit'
+        'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
+        'argsort', 'unique', 'cov', 'split',
     ]
 
     def __getstate__(self):
@@ -600,17 +628,10 @@ class LinAlg(object):
         rnd = self.randu(shape)
         return rnd / self.norm(rnd, 2, -1, True)
 
-
-    # def norm(self):
-    #     pass
-
     def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, which='uniform', std=0.1):
-        if not (lo.shape == hi.shape) or (len(lo.shape) != 1):
+        if not (lo.shape == hi.shape):
             raise ValueError
-        if not isinstance(std, float):
-            raise NotImplementedError('cannot do mvn stuff yet')
-        dim = lo.shape[0]
-        u = self.randu(shape=(*shape, dim))
+        u = self.randu(shape=(*shape, *lo.shape))
         if which == 'uniform':
             return u * (hi - lo) + lo
         elif which == 'gauss':
@@ -624,6 +645,29 @@ class LinAlg(object):
             return self.erfinv(alpha + u * (beta - alpha)) * std + mu
         else:
             raise ValueError
+
+    def evaluate_bounded_distribution(self, x, lo, hi, mu=0.0, which='uniform', std=0.1):
+        if not (lo.shape == hi.shape) or (len(lo.shape) != 1):
+            raise ValueError
+        dim = lo.shape[0]
+        u = self.randu(shape=(*shape, dim))
+        if which == 'uniform':
+            return u * (hi - lo) + lo
+        elif which == 'gauss':
+            alpha = self.erf((lo - mu) / std)
+            beta = self.erf((hi - mu) / std)
+            return self.erfinv(alpha + u * (beta - alpha)) * std + mu
+        else:
+            raise ValueError
+
+    def multinomial(self, n, p):
+        return self._BACKEND.multinomial(n, p)
+
+    def max(self, A, dim=None):
+        return self._BACKEND.max(A, dim)
+
+    def min(self, A, dim=None):
+        return self._BACKEND.min(A, dim)
 
 
 if __name__ == "__main__":

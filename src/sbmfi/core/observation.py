@@ -183,7 +183,7 @@ class MDV_ObservationModel(object):
         if self._transformation is not None:
             self._transformation.set_scaling(self._scaling)
 
-    def _check_x_meas(self, x_meas: pd.Series, compare_scaling=True, atol=1e-3):
+    def check_x_meas(self, x_meas: pd.Series, atol=1e-3):
         # check whether the scaling makes sense and whether the clips are respected
         if isinstance(x_meas, pd.Series):
             x_meas = x_meas.to_frame().T
@@ -193,15 +193,10 @@ class MDV_ObservationModel(object):
         if self._transformation is not None:
             x_meas = self._transformation.inv(x_meas)
         totals = (self._denom_sum @ x_meas.T)[self._denomi].T
-        if compare_scaling:
-            compare = self._scaling
-            clip_compare = totals
-        else:
-            compare = 1.0
-            clip_compare = totals * self._scaling
-        correct_scaling = (abs(totals - compare) <= atol).all()
-        over_cmin = True if self._cmin is None else (clip_compare >= self._cmin).all()
-        undr_cmax = True if self._cmax is None else (clip_compare <= self._cmax).all()
+
+        correct_scaling = (abs(totals - self._scaling) <= atol).all()
+        over_cmin = True if self._cmin is None else (totals >= self._cmin).all()
+        undr_cmax = True if self._cmax is None else (totals <= self._cmax).all()
 
         if not all((correct_scaling, over_cmin, undr_cmax)):
             raise ValueError(
@@ -239,6 +234,23 @@ class MDV_ObservationModel(object):
     def sample_observations(self, mdv, n_obs=3, **kwargs):
         raise NotImplementedError
 
+    def _sum_square_diff(self, data, x_meas):
+        # data = n_samples x n_obs x n_data
+        if len(data.shape) < 3:
+            data = self._la.unsqueeze(data, -2)  # adds the n_obs dimension for simulations with n_obs=0 in the previous step
+        return self._la.sum((data - x_meas) ** 2, -1, keepdims=False) # sum over n_data
+
+    def euclidean(self):
+        raise NotImplementedError
+
+    def rmse(self, data, x_meas):
+        if len(data.shape) < 2:
+            raise ValueError
+        # diff_2 = n_samples x n_obs
+        diff_2 = self._sum_square_diff(data, x_meas)
+        # rmse = n_samples
+        return self._la.sqrt(self._la.mean(diff_2, -1, keepdims=False)) # mean over n_obs
+
     def __call__(self, mdv, n_obs=3, return_obs=False, pandalize=False, **kwargs):
         index = None
         if isinstance(mdv, pd.DataFrame):
@@ -271,6 +283,9 @@ class MDV_ObservationModel(object):
 class MDV_LogRatioTransform():
     # https://www.tandfonline.com/doi/full/10.1080/03610926.2021.2014890?scroll=top&needAccess=true
     # http://www.leg.ufpr.br/lib/exe/fetch.php/pessoais:abtmartins:a_concise_guide_to_compositional_data_analysis.pdf
+    # TODO: instead of only ILR transform, introduce parameter alpha that controls a power-transform (Box-Cox) transform
+    #   at alpha=0, we end up with the ilr and with alpha=1 we end up with the original data;
+    #   note that this is DATA-DEPENDENT and thus we would need to prior sample or perhaps adjust in SNPE
     def __init__(
             self,
             observation_df: pd.DataFrame,
@@ -612,9 +627,6 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
     def set_sigma_x(self, sigma_x: pd.DataFrame):
         self.set_sigma(sigma=sigma_x, verify=True)
 
-    def check_x_meas(self, x_meas: pd.Series, atol=1e-3):
-        self._check_x_meas(x_meas, True, atol)
-
     def _initialize_J_xs(self):
         num_sum_indices = []
         num_sum_values = []
@@ -734,13 +746,13 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             noisy_observations = self._la.clip(noisy_observations, self._cmin, self._cmax)
 
         if self._normalize:
-            if not self._cmax >= 0.0:
+            if (self._cmin is None) or (self._cmin <= 0.0):
                 raise ValueError('cannot normalize if we have negative values')
             noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
         return noisy_observations
 
     def log_lik(self, x_meas, mu_o):
-        x_meas = self._la.atleast_2d(x_meas)  # shape = n_obs x n_mdv
+        x_meas = self._la.atleast_2d(x_meas)  # shape = n_meas x n_mdv
         mu_o = self._la.atleast_2d(mu_o)  # shape = batch x n_d
         diff = mu_o[:, None, :] - x_meas[:, None, :]  # shape = n_obs x batch x n_d
         log_lik = -0.5 * ((diff @ self.sigma_1) * diff).sum(-1)
@@ -859,9 +871,6 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         sigma += self._la.vecopy(self._la.transax(sigma))  # easiest way to make it diagonal
         return sigma
 
-    def check_x_meas(self, x_meas: pd.Series, atol=1e-3):
-        self._check_x_meas(x_meas, False, atol)
-
     def sample_observations(self, mdv, n_obs=3, **kwargs):
         if self._cmin < 1.0:
             raise ValueError('need to clip brohh')
@@ -900,18 +909,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
         return noisy_observations
 
-    def _sum_square_diff(self, data, x_meas):
-        # data = n_chains x n_samples x n_obs x n_data
-        if len(data.shape) < 4:
-            data = self._la.unsqueeze(data, -2)  # adds the n_obs dimension for simulations with n_obs=0 in the previous step
-        return self._la.sum((data - x_meas) ** 2, -1, keepdims=False) # sum over n_data
 
-    def euclidean(self):
-        raise NotImplementedError
-
-    def rmse(self, data, x_meas):
-        diff_2 = self._sum_square_diff(data, x_meas)
-        return self._la.sqrt(self._la.sum(diff_2, -1, keepdims=True) / diff_2.shape[-1]) # sum over n_obs
 
 
 class BoundaryObservationModel(object):

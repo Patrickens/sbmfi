@@ -241,7 +241,6 @@ class _FluxPrior(_BasePrior):
         return len(self._fcm.theta_id)
 
 
-
 class UniFluxPrior(_FluxPrior):
     def __init__(
             self,

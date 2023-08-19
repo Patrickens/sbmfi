@@ -164,8 +164,8 @@ def spiro(
         ('D', 0, 'M-H', 9.0, 0.01, None, 1e5),
         ('D', 3, 'M-H', 13.0, 0.01, None, 1e5),
 
-        ('L|[1,2]', 0, 'M-H', 14.0, 0.1, L_12_omega, 4e4),  # a scaling factor other than 1.0
-        ('L|[1,2]', 1, 'M-H', 15.0, 0.1, L_12_omega, 4e4),
+        ('L|[1,2]', 0, 'M-H', 14.0, 0.01 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
+        ('L|[1,2]', 1, 'M-H', 15.0, 0.01 * L_12_omega, L_12_omega, 4e4),
 
         ('L', 0, 'M-H', 14.0, 0.01, None, 4e5),
         ('L', 1, 'M-H', 15.0, 0.01, None, 4e5),
@@ -275,7 +275,7 @@ def spiro(
             sigma_ii = observation_df['sigma']
             omegas = observation_df.drop_duplicates('ion_id').set_index('ion_id')['omega']
             annotation_dfs = {labelling_id: (annotation_df, sigma_ii, omegas) for labelling_id in substrate_df.index}
-            obsmods = ClassicalObservationModel.build_models(model, annotation_dfs, transformation='ilr', clip_min=1e-12)
+            obsmods = ClassicalObservationModel.build_models(model, annotation_dfs)
         else:
             raise ValueError
 
