@@ -770,20 +770,20 @@ class PolytopeSamplingModel(object):
         """Gets the IDs of the reactions in the model."""
         return self._reaction_ids
 
-    def to_linalg(self, linalg: LinAlg):
+    def to_linalg(self, linalg: LinAlg, dtype=None):
         new = copy.copy(self)
         new._la = linalg
-        new._G = linalg.get_tensor(values=new._F_round.A.values)
-        new._h = linalg.get_tensor(values=new._F_round.b.values[:, np.newaxis])
+        new._G = linalg.get_tensor(values=new._F_round.A.values, dtype=dtype)
+        new._h = linalg.get_tensor(values=new._F_round.b.values[:, np.newaxis], dtype=dtype)
         new._to_fluxes_transform = (
-            linalg.get_tensor(values=new._F_round.transformation.values),
-            linalg.get_tensor(values=new._F_round.shift.values[:, np.newaxis]),
+            linalg.get_tensor(values=new._F_round.transformation.values, dtype=dtype),
+            linalg.get_tensor(values=new._F_round.shift.values[:, np.newaxis], dtype=dtype),
         )
         for kwarg in ['_T', '_T_1', '_tau', '_E', '_E_1', '_epsilon']:
             value = new.__dict__[kwarg]
             if isinstance(value, pd.DataFrame) or isinstance(value, pd.Series):
                 value = value.values
-            new.__dict__[kwarg] = linalg.get_tensor(values=value, dtype=np.double)
+            new.__dict__[kwarg] = linalg.get_tensor(values=value, dtype=dtype)
         return new
 
 
@@ -875,7 +875,7 @@ class FluxCoordinateMapper(object):
 
     @property
     def theta_id(self):
-        return self.net_basis_id.append(self.xch_basis_id)
+        return self.net_basis_id.append(self.xch_basis_id).rename('theta_id')
 
     @property
     def fluxes_id(self):
@@ -935,7 +935,7 @@ class FluxCoordinateMapper(object):
             fluxes = fluxes[..., len(self._F.non_labelling_reactions):]
         if fluxes.shape[-1] != self._n_lr:
             raise ValueError(f'wrong shape brahh, should be {self._n_lr}, is {fluxes.shape}')
-        return fluxes
+        return self._la.atleast_2d(self._la.get_tensor(values=fluxes))
 
     def compute_dgibbsr(self, thermo_fluxes: pd.DataFrame, pandalize=False):
         if len(self._fwd_id) == 0:

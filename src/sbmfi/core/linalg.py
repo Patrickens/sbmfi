@@ -5,7 +5,7 @@ import scipy
 from scipy.special import expit, logit
 import random
 import inspect
-
+import math
 
 def _conditional_torch_import():
     # if 'torch' in sys.modules:
@@ -88,6 +88,8 @@ def torch_auto_jacobian(inputs, outputs, create_graph=False, squeeze=False):
         return jac.squeeze(0)
     return jac
 
+_ONEBYSQRT2PI = 1.0 / math.sqrt(2 * math.pi)
+_SQRT2 = math.sqrt(2)
 
 class NumpyBackend(object):
     _DEFAULT_FKWARGS = {
@@ -97,17 +99,17 @@ class NumpyBackend(object):
     _AUTO_DIFF = False
     _BATCH_PROCESSING = True
 
-    def __init__(self, seed=None, **kwargs):
+    def __init__(self, seed=None, dtype=np.double, **kwargs):
         self._rng = np.random.default_rng(seed=seed)
+        self._def_dtype = dtype
 
-    @staticmethod
-    def get_tensor(shape, indices, values, squeeze, dtype, device):
+    def get_tensor(self, shape, indices, values, squeeze, dtype, device):
         if shape is not None:
             if (values is not None) and values.size:
                 if dtype is None:
                     dtype = values.dtype
             elif dtype is None:
-                dtype = np.double
+                dtype = self._def_dtype
             A = np.zeros(shape=shape, dtype=dtype)
             if (indices is not None) and indices.size:
                 indices, values = _merge_duplicate_indices(indices=indices, values=values)
@@ -218,6 +220,10 @@ class NumpyBackend(object):
     def view(A, shape):
         return A.reshape(shape)
 
+    @staticmethod
+    def logsumexp(A, dim=0, keepdims=False):
+        return scipy.special.logsumexp(A, dim, keepdims=keepdims)
+
     def randn(self, shape, dtype=np.float64):
         return self._rng.standard_normal(shape, dtype=dtype)
 
@@ -231,8 +237,8 @@ class NumpyBackend(object):
         counts = self._rng.multinomial(1, p, size=n)
         return np.where(counts)[1]
 
-    def choice(self, n, tot):
-        return np.random.choice(tot, n)
+    def choice(self, n, tot, replace=False):
+        return self._rng.choice(tot, n, replace=replace)
 
 
 class FactorExTorchBackend():
@@ -281,9 +287,10 @@ class TorchBackend(object):
     _AUTO_DIFF = True
     _BATCH_PROCESSING = True
 
-    def __init__(self, seed=None, solver='lu_solve_ex', device='cpu', **kwargs):
+    def __init__(self, seed=None, solver='lu_solve_ex', device='cpu', dtype=np.double, **kwargs):
         version = _conditional_torch_import()
 
+        self._def_dtype = _NP_TORCH_DTYPE[dtype]
         self._device = torch.device('cpu')
         if (torch.cuda.is_available()) and ('cuda' in device):
             self._device = torch.device(device)
@@ -300,7 +307,13 @@ class TorchBackend(object):
             TorchBackend.solve = staticmethod(FactorExTorchBackend.solve)
         elif solver != 'lu_solve':
             raise ValueError('not a legal solver option')
-        torch.set_default_tensor_type(torch.DoubleTensor)
+
+        if self._def_dtype == torch.double:
+            def_tens_type = torch.DoubleTensor
+        elif self._def_dtype == torch.float32:
+            def_tens_type = torch.FloatTensor
+
+        torch.set_default_tensor_type(def_tens_type)
         torch.autograd.set_detect_anomaly(True)
 
     def get_tensor(self, shape, indices, values, squeeze, dtype, device):
@@ -309,9 +322,10 @@ class TorchBackend(object):
                 if dtype is None:
                     dtype = values.dtype.type
             elif dtype is None:
-                dtype = np.double
+                dtype = self._def_dtype
 
-            dtype = _NP_TORCH_DTYPE[dtype]
+            if not isinstance(dtype, torch.dtype):
+                dtype = _NP_TORCH_DTYPE[dtype]
 
             if device is None:
                 device = self._device
@@ -424,25 +438,33 @@ class TorchBackend(object):
             return A.min(dim).values
         return A.min()
 
-    def multinomial(self, n, p):
-        return torch.multinomial(input=p, num_samples=n, generator=self._rng, replacement=True)
+    @staticmethod
+    def logsumexp(A, dim=0, keepdims=False):
+        return torch.logsumexp(A, dim, keepdims)
 
+    def multinomial(self, n, p, replace=True):
+        return torch.multinomial(input=p, num_samples=n, generator=self._rng, replacement=replace)
 
-    def randn(self, shape, dtype=np.double):
-        if dtype in _NP_TORCH_DTYPE:
+    def randn(self, shape, dtype=None):
+        if dtype is None:
+            dtype = self._def_dtype
+        elif not isinstance(dtype, torch.dtype):
             dtype = _NP_TORCH_DTYPE[dtype]
         return torch.randn(shape, generator=self._rng, dtype=dtype)
 
     def randu(self, shape, dtype=np.double):
-        if dtype in _NP_TORCH_DTYPE:
+        if dtype is None:
+            dtype = self._def_dtype
+        elif not isinstance(dtype, torch.dtype):
             dtype = _NP_TORCH_DTYPE[dtype]
         return torch.rand(shape, generator=self._rng, dtype=dtype, device=self._device)
 
     def randperm(self, n):
         return torch.randperm(n, generator=self._rng)
 
-    def choice(self, n, tot):
-        return torch.argsort(self.randu(tot))[:n]
+    def choice(self, n, tot, replace=False):
+        probs = torch.ones(tot) / tot
+        return self.multinomial(n, probs, replace=replace)
 
 
 class CupyBackend(object):
@@ -493,16 +515,20 @@ class LinAlg(object):
             fkwargs: dict = None,
             auto_diff: bool = False,
             seed: int = None,
+            dtype=np.double
     ):
         random.seed(seed)
         np.random.seed(seed)
 
+        if dtype not in (np.double, np.float64, np.float32, np.single):
+            raise ValueError('not a supported default float type')
+
         self._backwargs = {'backend': backend, 'seed': seed, 'solver': solver, 'device': device}
 
         if backend == 'numpy':
-            self._BACKEND = NumpyBackend(seed=seed)
+            self._BACKEND = NumpyBackend(seed=seed, dtype=dtype)
         elif backend == 'torch':
-            self._BACKEND = TorchBackend(seed=seed, solver=solver, device=device)
+            self._BACKEND = TorchBackend(seed=seed, solver=solver, device=device, dtype=dtype)
         else:
             raise ValueError('not a valid backend, you bellend')
 
@@ -600,10 +626,10 @@ class LinAlg(object):
     def diff(self, inputs, outputs):
         return self._BACKEND.diff(inputs, outputs)
 
-    def randn(self, shape, dtype=np.double):
+    def randn(self, shape, dtype=None):
         return self._BACKEND.randn(shape, dtype)
 
-    def randu(self, shape, dtype=np.double):
+    def randu(self, shape, dtype=None):
         return self._BACKEND.randu(shape, dtype)
 
     def randperm(self, n):
@@ -621,14 +647,14 @@ class LinAlg(object):
     def cat(self, As, dim=0):
         return self._BACKEND.cat(As, dim)
 
-    def choice(self, n, tot):
-        return self._BACKEND.choice(n, tot)
+    def choice(self, n, tot, replace=False):
+        return self._BACKEND.choice(n, tot, replace)
 
     def sample_hypersphere(self, shape):
         rnd = self.randu(shape)
         return rnd / self.norm(rnd, 2, -1, True)
 
-    def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, which='uniform', std=0.1):
+    def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='uniform'):
         if not (lo.shape == hi.shape):
             raise ValueError
         u = self.randu(shape=(*shape, *lo.shape))
@@ -646,19 +672,41 @@ class LinAlg(object):
         else:
             raise ValueError
 
-    def evaluate_bounded_distribution(self, x, lo, hi, mu=0.0, which='uniform', std=0.1):
-        if not (lo.shape == hi.shape) or (len(lo.shape) != 1):
+    def evaluate_bounded_distribution(self, x, lo, hi, mu=0.0, std=0.1, which='uniform', log=True):
+        if not (lo.shape == hi.shape):  # TODO should work with float lo and hi
             raise ValueError
-        dim = lo.shape[0]
-        u = self.randu(shape=(*shape, dim))
+
         if which == 'uniform':
-            return u * (hi - lo) + lo
+            result = 1.0 / (hi - lo)
+            if x.shape != lo.shape:
+                outshape = x.shape[:-1]
+                if not isinstance(mu, float):
+                    outshape = (*outshape, *mu.shape[:-1])
+                outshape = (*outshape, 1)
+                result = self.prod(self.tile(result, outshape), -1, keepdims=False)
         elif which == 'gauss':
-            alpha = self.erf((lo - mu) / std)
-            beta = self.erf((hi - mu) / std)
-            return self.erfinv(alpha + u * (beta - alpha)) * std + mu
+            if x.shape != lo.shape:
+                if not isinstance(std, float):
+                    # TODO not sure this is correct
+                    if std.shape != mu.shape:
+                        raise ValueError
+                xi = self.unsqueeze(x, -2) - mu / std
+            else:
+                xi = (x - mu) / std
+            A = (lo - mu) / std
+            B = (hi - mu) / std
+            varphi = self.exp(-0.5 * xi ** 2) * _ONEBYSQRT2PI
+            PsiA = 0.5 + 0.5 * self.erf(A / _SQRT2)
+            PsiB = 0.5 + 0.5 * self.erf(B / _SQRT2)
+            if x.shape != lo.shape:
+                result = self.prod((varphi / std) / self.unsqueeze((PsiB - PsiA), 0), -1, keepdims=False)
+            else:
+                result = (varphi / std) / (PsiB - PsiA)
         else:
             raise ValueError
+        if log:
+            return self.log(result)
+        return result
 
     def multinomial(self, n, p):
         return self._BACKEND.multinomial(n, p)
@@ -669,19 +717,20 @@ class LinAlg(object):
     def min(self, A, dim=None):
         return self._BACKEND.min(A, dim)
 
+    def logsumexp(self, A, dim=0):
+        return self._BACKEND.logsumexp(A, dim)
+
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
     l = LinAlg(backend='numpy')
-    dim = 2
-    bounds = np.random.rand(dim)
-    # xch = l.sample_bounded_distribution(
-    #     shape=(10,), lo=bounds - 1.0, hi=bounds, mu=bounds - 0.5, which='gauss', std=0.1
-    # )
+    replace=True
+    a = l.choice(10, 20, replace=replace)
+    print(a)
+    l = LinAlg(backend='torch')
+    a = l.choice(10, 20, replace=replace)
+    print(a)
 
-    xch = l.sample_bounded_distribution(
-        shape=(10,), lo=np.zeros(dim), hi=np.ones(dim), mu=bounds, which='gauss', std=0.1
-    )
 
 
     # ding = l.__dict__.keys()

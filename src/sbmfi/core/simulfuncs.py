@@ -62,7 +62,7 @@ def simulator_worker(task: OrderedDict, model=None) -> OrderedDict:
             i = j - step
         fluxes_batch = fluxes_chunk[i: j]
         try:
-            MODEL.set_fluxes(fluxes=fluxes_batch, trim=False)  # free has to be False!
+            MODEL.set_fluxes(fluxes=fluxes_batch, trim=False)  # trim has to be False!
             mdv_chunk[i: j] = MODEL.cascade()
         except Exception as e:
             print(1, e)
@@ -220,6 +220,4 @@ def designer_tasks(
 
 
 if __name__ == "__main__":
-    from sbmfi.models.small_models import spiro
-
-    m, k = spiro()
+    pass

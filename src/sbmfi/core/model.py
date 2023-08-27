@@ -241,12 +241,11 @@ class LabellingModel(Model):
     def set_fluxes(self, fluxes: Union[pd.DataFrame, np.array], samples_id=None, trim=True):
         if not self._is_built:
             raise ValueError('MUST BUILD')
-        fluxes = self._la.atleast_2d(self._la.get_tensor(values=self._fcm.frame_fluxes(fluxes, samples_id, trim)))
+        fluxes = self._fcm.frame_fluxes(fluxes, samples_id, trim)
         if self._la._auto_diff:
             fluxes.requires_grad_(True)
         if fluxes.shape[0] != self._la._batch_size:
-            raise ValueError(f'batch_size = {self._la._batch_size}; '
-                                      f'fluxes.shape[0] = {fluxes.shape[0]}')
+            raise ValueError(f'batch_size = {self._la._batch_size}; fluxes.shape[0] = {fluxes.shape[0]}')
         self._fluxes = fluxes
 
     def set_input_labelling(self, input_labelling: pd.Series):

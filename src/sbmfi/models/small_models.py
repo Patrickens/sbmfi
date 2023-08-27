@@ -1,7 +1,8 @@
 import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMUModel
-from sbmfi.inference.simulator import DataSetSim
+from sbmfi.inference.bayesian import _BaseBayes
+from sbmfi.inference.priors import UniFluxPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory
@@ -263,7 +264,7 @@ def spiro(
     if add_biomass:
         measured_boundary_fluxes.append(biomass_id)
 
-    measurements, datasetsim, theta = None, None, None
+    measurements, basebay, theta = None, None, None
     if which_measurements is not None:
         observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
 
@@ -283,11 +284,13 @@ def spiro(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
-        datasetsim = DataSetSim(model, substrate_df, obsmods, None, bom)
+        up = UniFluxPrior(model._fcm, cache_size=1000)
+
+        basebay = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
         theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
-        datasetsim.set_true_theta(theta.iloc[0])
-        measurements = datasetsim.simulate_true_data(n_obs=n_obs).iloc[[0]]
+        basebay.set_true_theta(theta.iloc[0])
+        measurements = basebay.simulate_true_data(n_obs=n_obs).iloc[[0]]
 
     kwargs = {
         'annotation_df': annotation_df,
@@ -296,7 +299,7 @@ def spiro(
         'measurements': measurements,
         'fluxes': fluxes,
         'theta': theta,
-        'datasetsim': datasetsim,
+        'basebayes': basebay,
     }
 
     return model, kwargs
