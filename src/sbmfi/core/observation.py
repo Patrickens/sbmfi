@@ -76,6 +76,12 @@ class MDV_ObservationModel(object):
         return self._observation_df.index.copy()
 
     @property
+    def transformation(self):
+        if self._transformation is None:
+            return
+        return self._transformation._transformation
+
+    @property
     def state_id(self) -> pd.Index:
         return self._state_id.copy()
 
@@ -98,6 +104,7 @@ class MDV_ObservationModel(object):
     def generate_observation_df(model: LabellingModel, annotation_df: pd.DataFrame, verbose=False):
         columns = pd.Index(['met_id', 'formula', 'adduct_name', 'nC13'])
         assert columns.isin(annotation_df.columns).all()
+        annotation_df.reset_index(drop=True, inplace=True)  # necessary for annot_df_idx to be set correctly
 
         return_ids = model.state_id
         cols = []
@@ -872,7 +879,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         return sigma
 
     def sample_observations(self, mdv, n_obs=3, **kwargs):
-        if self._cmin < 1.0:
+        if self._cmin == 0.0:
             raise ValueError('need to clip brohh')
         if self._total_intensities is None:
             raise ValueError(f'set total intensities')
@@ -882,7 +889,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         if self._natcorr:
             observations = (self._natab @ observations.T).T
 
-        logobs = self._la.log10(observations + 1e-12)
+        logobs = self._la.log10(observations + 1e-15)
         mu_logI = logobs + self._log_scaling[None, :]  # in log space, multiplication is addition
         if (self._cmin is not None) or (self._cmax is not None):
             clip_logI = self._la.clip(mu_logI, self._lcmin, self._lcmax)
@@ -903,12 +910,12 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             noisy_observations += bias
 
         noisy_observations = 10 ** noisy_observations
+        # TODO we would have to re-normalize to total intensities for the inverse transform to work!
         noisy_observations = self._la.clip(noisy_observations, self._cmin, self._cmax)
 
         # recompute the partial MDVs (always on simplex!)
         noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
         return noisy_observations
-
 
 
 
@@ -1082,11 +1089,13 @@ if __name__ == "__main__":
     pd.set_option('display.width', 1000)
 
 
-    model, kwargs = spiro(which_measurements='com', build_simulator=True, L_12_omega=1.0)
+    model, kwargs = spiro(which_measurements='lcms', build_simulator=True, L_12_omega=1.0)
     annotation_df = kwargs['annotation_df']
     fluxes = kwargs['fluxes']
     observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
     com = ClassicalObservationModel(model, kwargs['annotation_df'])
+
+
 
 
     # total_intensities = {}

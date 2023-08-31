@@ -610,7 +610,7 @@ def transform_polytope_keep_transform(
         polytope.apply_shift(x)
     elif kernel_basis == 'rref':
         T, free_vars = rref_null_space(stoichiometry, tolerance=settings.numerics_threshold)
-        T_1 = pd.DataFrame(0, index=T.columns, columns=T.index)
+        T_1 = pd.DataFrame(0.0, index=T.columns, columns=T.index)
         T_1.loc[T.columns, T.columns] = np.eye(len(free_vars))
 
         x_star = T_1 @ x
@@ -770,20 +770,20 @@ class PolytopeSamplingModel(object):
         """Gets the IDs of the reactions in the model."""
         return self._reaction_ids
 
-    def to_linalg(self, linalg: LinAlg, dtype=None):
+    def to_linalg(self, linalg: LinAlg):
         new = copy.copy(self)
         new._la = linalg
-        new._G = linalg.get_tensor(values=new._F_round.A.values, dtype=dtype)
-        new._h = linalg.get_tensor(values=new._F_round.b.values[:, np.newaxis], dtype=dtype)
+        new._G = linalg.get_tensor(values=new._F_round.A.values)
+        new._h = linalg.get_tensor(values=new._F_round.b.values[:, np.newaxis])
         new._to_fluxes_transform = (
-            linalg.get_tensor(values=new._F_round.transformation.values, dtype=dtype),
-            linalg.get_tensor(values=new._F_round.shift.values[:, np.newaxis], dtype=dtype),
+            linalg.get_tensor(values=new._F_round.transformation.values),
+            linalg.get_tensor(values=new._F_round.shift.values[:, np.newaxis]),
         )
         for kwarg in ['_T', '_T_1', '_tau', '_E', '_E_1', '_epsilon']:
             value = new.__dict__[kwarg]
             if isinstance(value, pd.DataFrame) or isinstance(value, pd.Series):
                 value = value.values
-            new.__dict__[kwarg] = linalg.get_tensor(values=value, dtype=dtype)
+            new.__dict__[kwarg] = linalg.get_tensor(values=value)
         return new
 
 
@@ -1248,7 +1248,6 @@ def coordinate_hit_and_run_cpp(  # this is a very fast sampler written in C++ an
         chains = model.simulate(settings, initial_points, directions_transform)
     basis_samples = sample_from_chains(chains, num_samples=n)
     A, b = model.to_fluxes_transform
-    print(A.shape, b.shape)
     fluxes = pd.DataFrame(model.to_fluxes(basis_samples), columns=model.reaction_ids)
     result['fluxes'] = fluxes
     # TODO use linalg to convert stuff to right dtype
@@ -1446,7 +1445,6 @@ def compute_volume(
         n_ball_i = (sample_phis <= ball_phis[i]).sum().item()
         ratios[i] = n / n_ball_i
         # n_ball_i_1 = (sample_phis <= phi_i_1).sum().item()
-        # print(i, phi_i_1, ratios[i], n)
 
     if return_all_ratios:
         result['ratios'] = ratios
@@ -1490,14 +1488,10 @@ if __name__ == "__main__":
 
     psm = fcm._sampler
     thermo = fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
-    print(thermo)
     theta = psm.to_basis(thermo, pandalize=True)
-    print(theta)
     fluxes = psm.to_fluxes(theta, is_rounded=psm.basis_coordinates == 'rounded', pandalize=True)
-    print(fluxes.round(2))
 
     # samples = sample_polytope(m._fcm._sampler, n=50, new_basis_points=True)
-    # print(samples['fluxes'].shape)
 
 
     # res = coordinate_hit_and_run_cpp(m._fcm._sampler)

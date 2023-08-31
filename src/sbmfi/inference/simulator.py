@@ -8,7 +8,7 @@ import pandas as pd
 import multiprocessing as mp
 from typing import Iterable, Union, Dict, Tuple
 from collections import OrderedDict
-
+import tqdm
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.simulfuncs import (
     init_observer,
@@ -164,7 +164,7 @@ class _BaseSimulator(object):
                 result = pd.DataFrame(result, index=index, columns=self.data_id)
         return result
 
-    def to_partial_mdvs(self, data, is_mdv=False, pandalize=True):
+    def to_partial_mdvs(self, data, is_mdv=False, normalize=False, pandalize=True):
         index = None
         if isinstance(data, pd.DataFrame):
             index = data.index
@@ -181,8 +181,14 @@ class _BaseSimulator(object):
                         'obmod does not have transformation specified, perhaps data is not log-ratio transformed'
                     )
                 j, k = self._obsize[labelling_id]
-                processed.append(obmod._transformation.inv(data[..., j:k]))
+                part_mdvs = obmod._transformation.inv(data[..., j:k])  # = intensities
+                if normalize:
+                    part_mdvs = obmod.compute_observations(part_mdvs)
+                processed.append(part_mdvs)
             columns[labelling_id] = obmod._observation_df.index.copy()
+        if self._bomsize > 0:
+            processed.append(data[..., -self._bomsize:])
+            columns['BOM'] = self._bom.boundary_id
         processed = self._la.cat(processed, -1)
         if pandalize:
             processed = pd.DataFrame(self._la.tonp(processed), index=index, columns=make_multidex(columns, name1='data_id'))
@@ -357,9 +363,9 @@ class _BaseSimulator(object):
             theta = theta[ridx]
         return self.prepare_for_sbi(theta, data, device)
 
-    def __call__(self, theta, n_obs=3):
+    def __call__(self, theta, n_obs=3, **kwargs):
         fluxes = self._fcm.map_theta_2_fluxes(theta)
-        return self.simulate(fluxes, n_obs)
+        return self.simulate(fluxes, n_obs, **kwargs)
 
 
 class DataSetSim(_BaseSimulator):
@@ -417,13 +423,14 @@ class DataSetSim(_BaseSimulator):
             what='data',
             break_i=-1,
             close_pool=True,
+            show_progress=False,
     ) -> OrderedDict:
         # TODO perhaps also parse samples_id
         result = {}
         result['validx'] = self._la.get_tensor(shape=(fluxes.shape[0], len(self._obmods)), dtype=np.bool_)
         result['fluxes'] = fluxes # save before trimming
 
-        fluxes = model._fcm.frame_fluxes(fluxes, trim=True)
+        fluxes = self._model._fcm.frame_fluxes(fluxes, trim=True)
 
         if what not in ('all', 'data', 'mdv'):
             raise ValueError('not sure what to simulate')
@@ -444,15 +451,22 @@ class DataSetSim(_BaseSimulator):
         if fluxes_per_task is None:
             fluxes_per_task = math.ceil(fluxes.shape[0] / max(self._num_processes, 1))
 
+        fluxes_per_task = min(fluxes.shape[0], fluxes_per_task)
+
         tasks = observator_tasks(
             fluxes, substrate_df=self._substrate_df, fluxes_per_task=fluxes_per_task, n_obs=n_obs, what=what
         )
+        if show_progress:
+            pbar = tqdm.tqdm(total=fluxes.shape[0], ncols=100)
 
         if self._num_processes == 0:
             init_observer(self._model, self._obmods, self._eps)
             for i, task in enumerate(tasks):
                 worker_result = obervervator_worker(task)
                 self._fill_results(result, worker_result)
+                if show_progress:
+                    i, j = worker_result['start_stop']
+                    pbar.update(n = j - i)
                 # self._fill_results(result, obervervator_worker(task))
                 if (break_i > -1) and (i > break_i):
                     break
@@ -460,14 +474,26 @@ class DataSetSim(_BaseSimulator):
             mp_pool = self._get_mp_pool()
             for worker_result in mp_pool.imap_unordered(obervervator_worker, iterable=tasks):
                 self._fill_results(result, worker_result)
+                if show_progress:
+                    i, j = worker_result['start_stop']
+                    pbar.update(n = j - i)
             if close_pool:
                 mp_pool.close()
                 mp_pool.join()
+        if show_progress:
+            pbar.close()
         return result
 
-    def __call__(self, theta, n_obs=5, close_pool=False):
+    def __call__(self, theta, n_obs=5, fluxes_per_task=None, close_pool=False, show_progress=False, **kwargs):
         fluxes = self._model._fcm.map_theta_2_fluxes(theta)
-        result = self.simulate_set(fluxes, n_obs, what='data', close_pool=close_pool)
+        result = self.simulate_set(
+            fluxes, n_obs,
+            fluxes_per_task=fluxes_per_task,
+            what='data',
+            close_pool=close_pool,
+            show_progress=show_progress,
+            **kwargs
+        )
         return result['data']
 
 

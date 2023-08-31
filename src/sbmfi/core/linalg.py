@@ -108,6 +108,8 @@ class NumpyBackend(object):
             if (values is not None) and values.size:
                 if dtype is None:
                     dtype = values.dtype
+                    if dtype in (np.float32, np.float64):
+                        dtype = self._def_dtype  # maing sure that sbi works
             elif dtype is None:
                 dtype = self._def_dtype
             A = np.zeros(shape=shape, dtype=dtype)
@@ -118,6 +120,8 @@ class NumpyBackend(object):
         else:
             if dtype is None:
                 dtype = values.dtype
+                if dtype in (np.float32, np.float64):
+                    dtype = self._def_dtype  # maing sure that sbi works
             A = np.array(values, dtype=dtype)
 
         if (A.ndim == 3) and squeeze:
@@ -224,6 +228,16 @@ class NumpyBackend(object):
     def logsumexp(A, dim=0, keepdims=False):
         return scipy.special.logsumexp(A, dim, keepdims=keepdims)
 
+    def zeros(self, shape, dtype=None):
+        if dtype is None:
+            dtype = self._def_dtype
+        return np.zeros(shape, dtype)
+
+    def ones(self, shape, dtype=None):
+        if dtype is None:
+            dtype = self._def_dtype
+        return np.ones(shape, dtype)
+
     def randn(self, shape, dtype=np.float64):
         return self._rng.standard_normal(shape, dtype=dtype)
 
@@ -321,6 +335,8 @@ class TorchBackend(object):
             if (values is not None) and values.size:
                 if dtype is None:
                     dtype = values.dtype.type
+                    if dtype in (np.float32, np.float64):
+                        dtype = self._def_dtype  # maing sure that sbi works
             elif dtype is None:
                 dtype = self._def_dtype
 
@@ -343,8 +359,14 @@ class TorchBackend(object):
                 else:
                     dtype = values.dtype
 
+                if not isinstance(dtype, torch.dtype):
+                    dtype = _NP_TORCH_DTYPE[dtype]
+                if dtype in (torch.float32, torch.float64):
+                    dtype = self._def_dtype
+
             if not isinstance(dtype, torch.dtype):
                 dtype = _NP_TORCH_DTYPE[dtype]
+
             A = torch.as_tensor(values, device=device, dtype=dtype)
         if (A.ndim == 3) and squeeze:
             A = A.squeeze(0)
@@ -442,6 +464,16 @@ class TorchBackend(object):
     def logsumexp(A, dim=0, keepdims=False):
         return torch.logsumexp(A, dim, keepdims)
 
+    def zeros(self, shape, dtype=None):
+        if dtype is None:
+            dtype = self._def_dtype
+        return torch.zeros(shape, dtype=dtype)
+
+    def ones(self, shape, dtype=None):
+        if dtype is None:
+            dtype = self._def_dtype
+        return torch.ones(shape, dtype=dtype)
+
     def multinomial(self, n, p, replace=True):
         return torch.multinomial(input=p, num_samples=n, generator=self._rng, replacement=replace)
 
@@ -477,7 +509,7 @@ class LinAlg(object):
     _SAME_SIGNATURE = [
         # these functions have the same signature in numpy and torch, thus we can dynamically add them
         'exp', 'log10', 'log', 'atleast_2d', 'diag', 'trace', 'allclose', 'where', 'arange', 'divide',
-        'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'ones', 'zeros', 'sum', 'mean', 'amax', 'linspace',
+        'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
         'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
         'argsort', 'unique', 'cov', 'split',
@@ -523,7 +555,7 @@ class LinAlg(object):
         if dtype not in (np.double, np.float64, np.float32, np.single):
             raise ValueError('not a supported default float type')
 
-        self._backwargs = {'backend': backend, 'seed': seed, 'solver': solver, 'device': device}
+        self._backwargs = {'backend': backend, 'seed': seed, 'solver': solver, 'device': device, 'dtype': dtype}
 
         if backend == 'numpy':
             self._BACKEND = NumpyBackend(seed=seed, dtype=dtype)
@@ -720,26 +752,26 @@ class LinAlg(object):
     def logsumexp(self, A, dim=0):
         return self._BACKEND.logsumexp(A, dim)
 
+    def zeros(self, shape, dtype=None):
+        return self._BACKEND.zeros(shape, dtype)
+
+    def ones(self, shape, dtype=None):
+        return self._BACKEND.ones(shape, dtype)
+
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
     l = LinAlg(backend='numpy')
     replace=True
     a = l.choice(10, 20, replace=replace)
-    print(a)
     l = LinAlg(backend='torch')
     a = l.choice(10, 20, replace=replace)
-    print(a)
 
 
 
     # ding = l.__dict__.keys()
     # pickle.dump(l, open('linlg.p', 'wb'))
     # l = pickle.load(open('linlg.p', 'rb'))
-    # print(ding)
-    #
-    # print(l.__dict__.keys())
-    # print(ding == l.__dict__.keys())
     # l = LinAlg(backend='numpy')
     # pickle.dump(l, open('linlg.p', 'wb'))
     # from scipy.linalg import lu_factor

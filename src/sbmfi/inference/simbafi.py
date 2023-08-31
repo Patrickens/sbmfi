@@ -91,7 +91,6 @@ class NeuralPolytopePosterior(NeuralPosterior):
             mdv_observation_models: Dict[str, MDV_ObservationModel],
             prior: _FluxPrior,
             boundary_observation_model: BoundaryObservationModel = None,
-            sampler_kwargs={},
             x_shape=None,
             device='cpu',
     ):
@@ -149,11 +148,14 @@ class NeuralPolytopePosterior(NeuralPosterior):
             )
         else:
             raise ValueError
+
+        # sbi works with float32, this is ugly but works for now
         float32_linalg = LinAlg(
             backend='torch', device=device, seed=self._sampler._la._backwargs['seed'], dtype=np.float32
         )
         self._sampler._la = float32_linalg
         self._sampler._fcm._la = float32_linalg
+        self._sampler._fcm._rho_bounds = self._sampler._fcm._rho_bounds.to(torch.float32)
         self._sampler._fcm._sampler = self._sampler._fcm._sampler.to_linalg(float32_linalg, dtype=np.float32)
         self._sampler._sampler = self._sampler._fcm._sampler
 
@@ -166,14 +168,13 @@ class NeuralPolytopePosterior(NeuralPosterior):
         x: Optional[Tensor] = None,
         **kwargs,
     ) -> Tensor:
-        if x is not None:
-            self.potential_fn.set_x(self._x_else_default_x(x))
+        self.potential_fn.set_x(self._x_else_default_x(x))
         kwargs = {**self._default_kwargs, **kwargs}
         kwargs = {**kwargs, **self._constant_kwargs}
         kwargs['n'] = math.prod(sample_shape)
         return_az = kwargs.get('return_az')
         result = self._sampler.run(**kwargs)
-        if not return_az:
+        if return_az:
             return result
         raise NotImplementedError  # reshape into sample_shape, chains and all that
         return self._la.view(result, (sample_shape, ))
@@ -549,7 +550,6 @@ if __name__ == "__main__":
     prior = UniFluxPrior(model, cache_size=n)
     h5_file = 'spiro.h5'
     dataset_id = 'test'
-
     create_data = False
     if create_data:
         if os.path.exists(h5_file):
@@ -572,9 +572,9 @@ if __name__ == "__main__":
         pickle.dump(neural_net, open('nn2.p', 'wb'))
     else:
         neural_net = pickle.load(open('nn2.p', 'rb'))
-
-    post = nfi.build_posterior(neural_net, sample_with='mcmc')
-    post.set_default_x(x=kwargs['measurements'])
+    nfi.set_measurement(kwargs['measurements'])
+    post = nfi.build_posterior(neural_net, sample_with='rejection')
+    post.set_default_x(x=nfi._x_meas)
     azz = post.sample((1000, ))
 
 

@@ -622,10 +622,10 @@ if __name__ == "__main__":
 
     model, kwargs = spiro(
         backend='torch', add_biomass=True, v2_reversible=True,
-        batch_size=1, which_measurements='com', build_simulator=True, which_labellings=list('CD'),
+        batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
         kernel_basis='rref',
     )
-    dss = kwargs['datasetsim']
+    dss = kwargs['basebayes']
     data = kwargs['measurements']
     # inv = dss.to_partial_mdvs(data)
 

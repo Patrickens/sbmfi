@@ -55,7 +55,7 @@ class _CannonicalPolytopeSupport(_Dependent):  #
 
         self._constraint_id = polytope.A.columns
         self._A = torch.from_numpy(polytope.A.values)
-        self._b = torch.atleast_2d(torch.from_numpy(polytope.b.values + validation_tol))
+        self._b = torch.atleast_2d(torch.from_numpy(polytope.b.values + validation_tol)).T
         super().__init__(is_discrete=False, event_dim=self._A.shape[1])
 
     def to(self, *args, **kwargs):

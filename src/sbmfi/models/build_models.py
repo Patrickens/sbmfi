@@ -6,7 +6,8 @@ from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservatio
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex, _excel_polytope
-from sbmfi.inference.simulator import DataSetSim
+from sbmfi.inference.bayesian import _BaseBayes
+from sbmfi.inference.priors import UniFluxPrior
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os
@@ -1914,10 +1915,10 @@ def _parse_anton_model():
 def build_e_coli_anton_glc(
         backend='numpy',
         auto_diff=False,
-        build_simulator=False,
+        build_simulator=True,
         ratios=False,
         batch_size=1,
-        which_measurements: str=None,
+        which_measurements: str='tomek',
         which_labellings=['20% [U]Glc', '[1]Glc'],
         measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
         seed=1,
@@ -1964,7 +1965,7 @@ def build_e_coli_anton_glc(
     # if build_simulator:  # TODO wy did we do this again??
     #     model.build_simulator()
 
-    annotation_df, measurements, datasetsim = None, None, None
+    annotation_df, measurements, basebayes = None, None, None
     if which_measurements == 'anton':
         measurements, annotation_df = read_anton_measurements(which_labellings, measured_boundary_fluxes)
     elif which_measurements == 'tomek':
@@ -1981,41 +1982,55 @@ def build_e_coli_anton_glc(
         observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
 
     if which_measurements == 'anton':
-        sigma_ii = {}
-        for mid, row in observation_df.iterrows():
-            sigma_ii[mid] = annotation_df.loc[
-                (annotation_df['met_id'] == row['met_id']) & (annotation_df['adduct_name'] == row['adduct_name']),
-                'sigma'
-            ].values[0]
-        sigma_ii = pd.Series(sigma_ii)
-        annotation_dfs = {labelling_id: (annotation_df, sigma_ii) for labelling_id in substrate_df.index}
+        sigma_ii = observation_df['sigma']
+        omega = None
+        annotation_dfs = {labelling_id: (annotation_df, sigma_ii, omega) for labelling_id in substrate_df.index}
         obsmods = ClassicalObservationModel.build_models(model, annotation_dfs)
     elif which_measurements == 'tomek':
         annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}
-        total_intensities = {}
-        unique_ion_ids = observation_df.drop_duplicates(subset=['ion_id'])
-        for _, row in unique_ion_ids.iterrows():
-            total_intensities[row['ion_id']] = annotation_df.loc[
-                (annotation_df['met_id'] == row['met_id']) & (annotation_df['adduct_name'] == row['adduct_name']),
-                'total_I'
-            ].values[0]
-        total_intensities = pd.Series(total_intensities)
-        obsmods = LCMS_ObservationModel.build_models(model, annotation_dfs, total_intensities=total_intensities)
-
+        total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
+        obsmods = LCMS_ObservationModel.build_models(
+            model,
+            annotation_dfs,
+            total_intensities=total_intensities,
+            clip_min=1e-12,  # we need to post-process the measurements to create appropriate annotation_df, hence the low clip_min
+        )
     thermo_fluxes, theta = None, None
     if annotation_df is not None:
         bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, _bmid_ANTON)
-        datasetsim = DataSetSim(model, substrate_df, obsmods, None, bom)
+        up = UniFluxPrior(model)
+        basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
         thermo_fluxes = read_anton_fluxes()
         fluxes = model._fcm.map_thermo_2_fluxes(thermo_fluxes=thermo_fluxes, pandalize=True)
         theta = model._fcm.map_fluxes_2_theta(fluxes, pandalize=True)
+        basebayes.set_true_theta(theta.iloc[0])
         if which_measurements == 'anton':
-            measurements = measurements.loc[datasetsim.data_id]
+            measurements = measurements.loc[basebayes.data_id]
         elif which_measurements == 'tomek':
-            batched_fluxes = model._la.tile(fluxes.T, (batch_size,)).T
-            measurements = datasetsim.simulate(batched_fluxes, n_obs=1, pandalize=True).iloc[[0]]
-            raise ValueError('not entirely working yet')
+            measurements = basebayes.simulate_true_data(n_obs=1, pandalize=True).iloc[[0]]
+            intensities = basebayes.to_partial_mdvs(measurements, normalize=False, pandalize=True).iloc[[0]]  # these are slightly clipped intensities!
+            corrected_annot_dfs = {}
+            for labelling_id, df in intensities.T.groupby(level=0):
+                if labelling_id == 'BOM':
+                    continue
+                measurable = df.loc[(df > 300.0).values].droplevel(0)
+                multiple_signals = measurable.index.str.split('+', expand=True).to_frame(name=['met_id', 'nC13'])
+                measurable = measurable.loc[multiple_signals['met_id'].duplicated(keep=False).values]
+                annot_df = annotation_dfs[labelling_id]
+                obs_df = basebayes._obmods[labelling_id].observation_df.loc[measurable.index]
+                corrected_annot_dfs[labelling_id] = annot_df.loc[obs_df['annot_df_idx']].reset_index(drop=True)
+            obsmods = LCMS_ObservationModel.build_models(
+                model,
+                corrected_annot_dfs,
+                total_intensities=total_intensities,
+                clip_min=750.0,  # now we create the real observation models!
+            )
+            basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
+            basebayes.set_true_theta(theta.iloc[0])
+            measurements = basebayes.simulate_true_data(n_obs=1, pandalize=True).iloc[[0]]
+
+            # intensities = intensities.loc[intensities > fobmod._cmin * 0.6]
         measurements.name = which_measurements
 
     kwargs = {
@@ -2023,7 +2038,7 @@ def build_e_coli_anton_glc(
         'substrate_df': substrate_df,
         'measured_boundary_fluxes': measured_boundary_fluxes,
         'measurements': measurements,
-        'datasetsim': datasetsim,
+        'basebayes': basebayes,
         'ratio_repo': _gluc_ratio_repo,
         'thermo_fluxes': thermo_fluxes,
         'theta': theta,
@@ -2229,5 +2244,5 @@ if __name__ == "__main__":
     # from optlang.gurobi_interface import
     from cobra.flux_analysis import flux_variability_analysis
 
-    model, kwargs = build_e_coli_anton_glc(build_simulator=True, which_measurements='anton')
+    model, kwargs = build_e_coli_anton_glc(build_simulator=True)
 
