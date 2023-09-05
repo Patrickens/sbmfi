@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
 from collections import OrderedDict
-from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMUModel
-from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservationModel, ClassicalObservationModel
+from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
+from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservationModel, ClassicalObservationModel, MDV_ObservationModel
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex, _excel_polytope
@@ -1979,7 +1979,7 @@ def build_e_coli_anton_glc(
         annotation_df = pd.concat(annotation_df, axis=0)
 
     if annotation_df is not None:
-        observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
+        observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
 
     if which_measurements == 'anton':
         sigma_ii = observation_df['sigma']
@@ -2211,7 +2211,7 @@ def simulator_factory(
     }
 
     if ratios:
-        model_type = RatioEMUModel
+        model_type = RatioEMU_Model
     else:
         model_type = EMU_Model
 

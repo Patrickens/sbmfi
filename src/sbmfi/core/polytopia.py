@@ -44,6 +44,10 @@ class LabellingPolytope(Polytope):
             objective: dict = None,
             non_labelling_reactions: pd.Index = None
     ):
+        if b is not None:
+            b.name = 'ineq'
+        if h is not None:
+            b.name = 'eq'
         Polytope.__init__(self, A=A, b=b, S=S, h=h)
         self._mapper: dict = mapper if mapper else {}
         self._objective: dict = objective if objective else {}
@@ -737,12 +741,16 @@ class PolytopeSamplingModel(object):
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
         return result
 
-    def to_fluxes(self, theta: pd.DataFrame, is_rounded=True, pandalize=False):
+    def to_fluxes(self, theta: pd.DataFrame, is_rounded=None, pandalize=False):
         index = None
         if isinstance(theta, pd.DataFrame):
             index = theta.index
             theta = theta.loc[:, self.basis_id].values
         theta = self._la.get_tensor(values=theta)
+
+        if is_rounded is None:
+            is_rounded = self._bascoor == 'rounded'
+
         if is_rounded:
             A, b = self._to_fluxes_transform
             fluxes = self._la.transax(A @ self._la.transax(theta) + b)
@@ -837,6 +845,7 @@ class FluxCoordinateMapper(object):
             self._rho_bounds[i, 1] = reaction.rho_max
         self._logxch = logit_xch_fluxes
 
+        self._samples_id = self._la._batch_size
         self._J_lt = None
         self._J_tt = None
 
@@ -918,24 +927,26 @@ class FluxCoordinateMapper(object):
         if isinstance(fluxes, pd.Series):
             # needed to have correct dimensions
             fluxes = fluxes.to_frame(name=fluxes.name).T
+
         if isinstance(fluxes, pd.DataFrame):
-            self._samples_id = fluxes.index  # this means that the passed samples_id is ignored!
-            if samples_id is not None:
-                raise Warning('passed samples_id will be ignored, using DataFrame index instead')
+            samples_id = fluxes.index  # this means that the passed samples_id is ignored!
             fluxes = fluxes.loc[:, self._F.A.columns].values
-        elif samples_id is not None:
+
+        fluxes = self._la.atleast_2d(self._la.get_tensor(values=fluxes))
+
+        if samples_id is None:
+            self._samples_id = fluxes.shape[0]
+        else:
             self._samples_id = pd.Index(samples_id)
             if len(samples_id) != fluxes.shape[0]:
                 raise ValueError('batch-size does not match samples_id size')
             elif self._samples_id.duplicated().any():
                 raise ValueError('non-unique sample ids')
-        if samples_id is None:
-            self._samples_id = fluxes.shape[0]
         if trim:
             fluxes = fluxes[..., len(self._F.non_labelling_reactions):]
         if fluxes.shape[-1] != self._n_lr:
-            raise ValueError(f'wrong shape brahh, should be {self._n_lr}, is {fluxes.shape}')
-        return self._la.atleast_2d(self._la.get_tensor(values=fluxes))
+            raise ValueError(f'wrong shape brahh, should be {self._n_lr}, is {fluxes.shape}, maybe wrong trim?')
+        return fluxes
 
     def compute_dgibbsr(self, thermo_fluxes: pd.DataFrame, pandalize=False):
         if len(self._fwd_id) == 0:
@@ -1082,7 +1093,7 @@ class FluxCoordinateMapper(object):
         if net_fluxes is None:
             n = net_basis_samples.shape[0]
             if return_type in ['fluxes', 'both']:
-                net_fluxes = self._sampler.to_fluxes(net_basis_samples)
+                net_fluxes = self._sampler.to_fluxes(net_basis_samples, is_rounded=self._sampler._bascoor == 'rounded')
         elif net_basis_samples is None:
             n = net_fluxes.shape[0]
             if return_type in ['theta', 'both']:
@@ -1489,7 +1500,7 @@ if __name__ == "__main__":
     psm = fcm._sampler
     thermo = fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
     theta = psm.to_basis(thermo, pandalize=True)
-    fluxes = psm.to_fluxes(theta, is_rounded=psm.basis_coordinates == 'rounded', pandalize=True)
+    fluxes = psm.to_fluxes(theta, pandalize=True)
 
     # samples = sample_polytope(m._fcm._sampler, n=50, new_basis_points=True)
 

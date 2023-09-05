@@ -1167,6 +1167,8 @@ class EMU_Model(LabellingModel):
         return s
 
     def pretty_cascade(self, weight: int):
+        if not self._is_built:
+            raise ValueError
         adx = self._xemus[weight].list_attr('id')
         bdx = self._yemus[weight].list_attr('id')
 
@@ -1261,7 +1263,7 @@ class EMU_Model(LabellingModel):
 
 
 # NB this class is needed to make pickling attribute lookup work!
-class RatioEMUModel(EMU_Model, RatioMixin): pass
+class RatioEMU_Model(EMU_Model, RatioMixin): pass
 
 
 if __name__ == "__main__":

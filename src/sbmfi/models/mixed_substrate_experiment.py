@@ -1,6 +1,6 @@
 import pandas as pd
 from collections import OrderedDict
-from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMUModel
+from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.core.cumodel import CumomerModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.settings import MODEL_DIR, SIM_DIR

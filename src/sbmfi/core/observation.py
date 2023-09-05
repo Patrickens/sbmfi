@@ -753,7 +753,7 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             noisy_observations = self._la.clip(noisy_observations, self._cmin, self._cmax)
 
         if self._normalize:
-            if (self._cmin is None) or (self._cmin <= 0.0):
+            if (self._cmin is None) or (self._cmin < 0.0):
                 raise ValueError('cannot normalize if we have negative values')
             noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
         return noisy_observations

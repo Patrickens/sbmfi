@@ -1,6 +1,6 @@
 import pandas as pd
 from collections import OrderedDict
-from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMUModel
+from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
 from sbmfi.inference.priors import UniFluxPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel

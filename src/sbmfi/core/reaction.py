@@ -763,6 +763,8 @@ class EMU_Reaction(LabellingReaction):
     def pretty_tensors(self, weight: int):
         if self.model is None:
             raise ValueError('no model')
+        elif not self.model._is_built:
+            raise ValueError('model not built')
         result = {}
         if weight == 0:
             return result

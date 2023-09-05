@@ -1,11 +1,13 @@
 from sbmfi.core.polytopia import PolytopeSamplingModel, V_representation, fast_FVA, LabellingPolytope
-import arviz as az
+from sbmfi.inference.arviz_monkey import *
 import pandas as pd
 import holoviews as hv
 from scipy.spatial import ConvexHull
 import numpy as np
 from typing import Iterable, Union, Dict, Tuple
-
+from bokeh.plotting import show
+from bokeh.io import output_file
+import matplotlib.pyplot as plt
 
 class PlotMonster(object):
     _ALLFONTSIZES = {
@@ -36,8 +38,11 @@ class PlotMonster(object):
             self,
             polytope: LabellingPolytope,  # this should be in the sampled basis!
             inference_data: az.InferenceData,
-            v_rep: pd.DataFrame = None
+            v_rep: pd.DataFrame = None,
+            hv_backend='matplotlib',
     ):
+        hv.extension(hv_backend)
+        self._hvb = hv_backend
         self._pol = polytope
         self._data = inference_data
 
@@ -51,6 +56,7 @@ class PlotMonster(object):
             'posterior': post_color,
             'posterior_predictive': post_color,
         }
+        self._px = 1/plt.rcParams['figure.dpi']
 
         if not all(polytope.A.columns.isin(inference_data.posterior.theta_id.values)):
             raise ValueError
@@ -64,7 +70,6 @@ class PlotMonster(object):
         self._v_rep = v_rep
         self._fva = fast_FVA(polytope)
         self._odf = self._load_observed_data()
-        self._map = self._load_MAP()
         self._ttdf = self._load_true_theta()
 
     @property
@@ -98,7 +103,7 @@ class PlotMonster(object):
         verts = np.concatenate([verts, [verts[0]]])
         return hull.points[verts]
 
-    def _get_samples(self, group='posterior', num_samples=None, *args):
+    def _get_samples(self, *args, group='posterior', num_samples=None):
         group_var_map = {
             'posterior': 'theta',
             'prior': 'theta',
@@ -113,6 +118,9 @@ class PlotMonster(object):
             num_samples=num_samples,
             rng=True,
         ).loc[list(args)].values.T
+
+    def _get_chain(self, *args, group='posterior'):
+        pass
 
     def density_plot(
             self,
@@ -136,7 +144,13 @@ class PlotMonster(object):
             plots.extend([
                 hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
             ])
-        return hv.Overlay(plots).opts(xrotation=90, height=400, width=400, show_grid=True, fontsize=self._FONTSIZES)
+
+        kwargs = dict(
+            height=400, width=400,
+        )
+        if self._hvb == 'matplotlib':
+            kwargs = dict(height=400 * self._px, width=400 * self._px,)
+        return hv.Overlay(plots).opts(xrotation=90, show_grid=True, fontsize=self._FONTSIZES, **kwargs)
 
     def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None, color='#ebb821'):
         xax = self._axes_range(var1_id)
@@ -187,27 +201,6 @@ class PlotMonster(object):
             self._data.observed_data['observed_data'].values, index=measurement_id, columns=data_id
         )
 
-    def _load_MAP(self):
-        lp = self._data.sample_stats.lp.values
-        chain_idx, draw_idx = np.argwhere(lp == lp.max()).T
-        row, col = chain_idx[0], draw_idx[0]
-        max_lp = lp[row, col]
-
-        theta_id = self._data['posterior']['theta_id'].values
-        theta = pd.DataFrame(
-            self._data['posterior']['theta'].values[row, col, :], index=theta_id
-        ).T
-
-        result = {'lp': max_lp, 'theta': theta}
-
-        if 'posterior_predictive' in self._data:
-            data_id = self._data['posterior_predictive']['data_id'].values
-            data = pd.DataFrame(
-                self._data['posterior_predictive']['data'].values[row, col, :], index=data_id
-            ).T
-            result['data']=data
-        return result
-
     def _load_true_theta(self):
         theta_id = self._data.posterior['theta_id'].values
         true_theta = self._data.attrs.get('true_theta')
@@ -245,14 +238,14 @@ class PlotMonster(object):
             color=self._colors[what_point], size=7, fontsize=self._FONTSIZES
         )
 
-    # def observed_data_plot(self, var1_id, var2_id=None, what='map'):
-    #     if var2_id is None:
-    #         return hv.VLine(self.obsdat_df.loc[:, var1_id].values).opts(
-    #             color=self._colors['true_theta'], line_dash='dashed', xrotation=90
-    #         )
-    #     return hv.Points(self.obsdat_df.loc[:, [var1_id, var2_id]], kdims=[var1_id, var2_id]).opts(
-    #         color=self._colors['true_theta'], size=7, fontsize=self._FONTSIZES
-    #     )
+    def observed_data_plot(self, var1_id, var2_id=None, what='map'):
+        if var2_id is None:
+            return hv.VLine(self.obsdat_df.loc[:, var1_id].values).opts(
+                color=self._colors['true_theta'], line_dash='dashed', xrotation=90
+            )
+        return hv.Points(self.obsdat_df.loc[:, [var1_id, var2_id]], kdims=[var1_id, var2_id]).opts(
+            color=self._colors['true_theta'], size=7, fontsize=self._FONTSIZES
+        )
 
     def grand_data_plot(self, var_names: Iterable):
         plots = []
@@ -284,6 +277,55 @@ class PlotMonster(object):
                 self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='true')
             ])
         return hv.Overlay(plots).opts(legend_position='right', show_legend=True, fontsize=self._FONTSIZES)
+
+
+class MCMC_PLOT(PlotMonster):
+    def __init__(
+            self,
+            polytope: LabellingPolytope,  # this should be in the sampled basis!
+            inference_data: az.InferenceData,
+            v_rep: pd.DataFrame = None,
+            hv_backend='bokeh',
+    ):
+        super().__init__(polytope, inference_data, v_rep, hv_backend)
+        self._map = self._load_MAP()
+
+    def _load_MAP(self):
+        lp = self._data.sample_stats.lp.values
+        chain_idx, draw_idx = np.argwhere(lp == lp.max()).T
+        row, col = chain_idx[0], draw_idx[0]
+        max_lp = lp[row, col]
+
+        theta_id = self._data['posterior']['theta_id'].values
+        theta = pd.DataFrame(
+            self._data['posterior']['theta'].values[row, col, :], index=theta_id
+        ).T
+
+        result = {'lp': max_lp, 'theta': theta}
+
+        if 'posterior_predictive' in self._data:
+            data_id = self._data['posterior_predictive']['data_id'].values
+            data = pd.DataFrame(
+                self._data['posterior_predictive']['data'].values[row, col, :], index=data_id
+            ).T
+            result['data']=data
+        return result
+
+
+class SMC_PLOT(PlotMonster):
+
+    def __init__(
+            self,
+            polytope: LabellingPolytope,  # this should be in the sampled basis!
+            inference_data: az.InferenceData,
+            v_rep: pd.DataFrame = None,
+            hv_backend='bokeh',
+    ):
+        super().__init__(polytope, inference_data, v_rep, hv_backend)
+
+
+    def plot_evolution(self, *args, group='posterior'):
+        self._get_chain(args, group=group)
 
 
 def speed_plot():
@@ -330,3 +372,18 @@ def speed_plot():
 
 if __name__ == "__main__":
     import pickle, os
+
+    variables = ['B_svd0', 'B_svd1', 'B_svd2', 'B_svd3', 'B_svd4', 'B_svd5', 'B_svd6',
+                 'B_svd7', 'B_svd8', 'B_svd9', 'PGI_xch', 'FBA_xch', 'TPI_xch',
+                 'GAPD_xch', 'PGK_xch', 'PGM_xch', 'ENO_xch', 'RPE_xch', 'RPI_xch',
+                 'TKTa_xch', 'TKTb_xch', 'TKTc_xch', 'TALAa_xch', 'TALAb_xch',
+                 'ACONTa_xch', 'ACONTb_xch', 'ICDHyr_xch', 'SUCOAS_xch', 'SUCDi_xch',
+                 'FUM_xch', 'MDH_xch', 'PTAr_xch', 'ACKr_xch', 'GHMT2r_xch', 'GLYCL_xch']
+
+    hv_backend = 'bokeh'
+    v_rep = pd.read_excel(r"C:\python_projects\sbmfi\v_rep.xlsx", index_col=0)
+    pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
+    data = az.from_netcdf(r"C:\python_projects\sbmfi\src\sbmfi\inference\SMC_e_coli_glc_tomek_obsmod.nc")
+    pm = SMC_PLOT(pol, data, v_rep, hv_backend)
+
+    pm.plot_evolution(variables[3])

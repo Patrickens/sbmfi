@@ -563,19 +563,19 @@ if __name__ == "__main__":
     else:
         theta, data = dss.sbi_data_from_hdf(h5_file, dataset_id, n=1000)
 
-    train_nn = False
+    train_nn = True
     nn_fn = SNPE_P.constuct_nn_fn()
     nfi = SNPE_P(nn_fn, model, sdf, bbs._obmods, prior, bbs._bom)
     nfi.append_simulations(theta, data)
     if train_nn:
         neural_net = nfi.train()
-        pickle.dump(neural_net, open('nn2.p', 'wb'))
+        # pickle.dump(neural_net, open('nn2.p', 'wb'))
     else:
         neural_net = pickle.load(open('nn2.p', 'rb'))
     nfi.set_measurement(kwargs['measurements'])
-    post = nfi.build_posterior(neural_net, sample_with='rejection')
-    post.set_default_x(x=nfi._x_meas)
-    azz = post.sample((1000, ))
+    # post = nfi.build_posterior(neural_net, sample_with='rejection')
+    # post.set_default_x(x=nfi._x_meas)
+    # azz = post.sample((1000, ))
 
 
 

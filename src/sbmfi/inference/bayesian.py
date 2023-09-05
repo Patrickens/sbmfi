@@ -566,7 +566,7 @@ class MCMC(_BaseBayes):
 
             line_thetas[1:] = self.perturb_particles(theta, ii, **perturb_kwargs)
 
-            pot = self.potential(theta)
+            pot = self.potential(line_thetas[1:])
 
             if return_data:
                 pot, data = pot
@@ -602,6 +602,11 @@ class MCMC(_BaseBayes):
                 if algorithm == 'cdf':
                     accept_idx[accept_idx > 0] = 1
                 accept_rate += accept_idx
+                if (j > 0) and (j % 1000 == 0):
+                    avg_rate = self._la.mean(accept_rate / j)
+                    if avg_rate < 0.05:
+                        raise ValueError('average acceptance rate under 5%')
+
 
             if (j % thinning_factor == 0) and (j > -1):
                 k = j // thinning_factor
@@ -1170,7 +1175,7 @@ if __name__ == "__main__":
     pd.set_option('display.width', 1000)
     np.set_printoptions(linewidth=500)
 
-    a = True
+    a = False
     if a:
         which = 'lcms'
         # which = 'tomek'
@@ -1202,7 +1207,7 @@ if __name__ == "__main__":
             n= 20,
             n_burn = 10,
             thinning_factor = 2,
-            n_chains = 9,
+            n_chains = 3,
             potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
             n_cdf = 6,
             algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
@@ -1253,6 +1258,5 @@ if __name__ == "__main__":
     mcmc.set_true_theta(theta=kwargs['theta'])
 
     post = mcmc.run(**run_kwargs)
-    az.to_netcdf(post, 'MCMC_e_coli_glc_anton_obsmod.nc')
-
-    print(prof2.print_stats())
+    # az.to_netcdf(post, 'MCMC_e_coli_glc_anton_obsmod.nc')
+    # print(prof2.print_stats())

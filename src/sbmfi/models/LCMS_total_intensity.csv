@@ -1,4 +1,4 @@
-met_id,adduct_name,nC,mz,total_I,sigma_x
+met_id,adduct_name,nC,mz,total_I,sigma
 1agpe161_c,M-H,21,471.3330644602994,10136.48029026747,0.01
 1agpg161_c,M-H,22,503.3309995644894,10400.022551897076,0.01
 2mecdp_c,M-H,5,282.0051529577194,39109.85103461633,0.01
