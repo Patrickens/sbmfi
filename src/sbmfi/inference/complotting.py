@@ -122,6 +122,24 @@ class PlotMonster(object):
             rng=True,
         ).loc[list(args)].values.T
 
+    def _plot_distribution(
+            self,
+            to_plot: pd.DataFrame,
+            var_id,
+            label=None,
+            show_grid=True,
+            bandwidth=None,
+            color=None,
+            muted=False,
+            alpha=0.1,
+            muted_alpha=0.07,
+            **opts
+    ):
+        opts = {**self._size_opts(), **opts}
+        return hv.Distribution(to_plot, kdims=[var_id], label=label).opts(
+            show_grid=show_grid, bandwidth=bandwidth, color=color, muted=muted, alpha=alpha, muted_alpha=muted_alpha, **opts
+        )
+
     def _get_chain(self, *args, chain_idx=0, group='posterior'):
         var = self._group_var_map[group]
         return self._data[group][var].sel({f'{var}_id': list(args)}).values[chain_idx]
@@ -137,16 +155,15 @@ class PlotMonster(object):
             var_id,
             num_samples=30000,
             group='posterior',
-            bw=None,
             include_fva = True,
     ):
-        sampled_points = self._get_samples(group, num_samples, var_id)
+        sampled_points = self._get_samples(var_id, group=group, num_samples=num_samples)
         if group in ['posterior', 'prior']:
             xax = self._axes_range(var_id)
         else:
             xax = hv.Dimension(var_id)
         plots = [
-            hv.Distribution(sampled_points, kdims=[xax], label=group).opts(bandwidth=bw, color=self._colors[group])
+            self._plot_distribution(sampled_points, xax, group, color=self._colors[group])
         ]
         if include_fva and (group in ['posterior', 'prior']):
             fva_min, fva_max = self._axes_range(var_id, return_dimension=False, tol=0)
@@ -213,7 +230,7 @@ class PlotMonster(object):
             return
         return pd.DataFrame(true_theta, index=theta_id).T
 
-    def point_plot(self, var1_id, var2_id=None, what_var='theta', what_point='true'):
+    def point_plot(self, var1_id, var2_id=None, what_var='theta', what_point='true', label=None):
         if what_var == 'theta':
             xax = self._axes_range(var1_id)
             if var2_id is not None:
@@ -235,10 +252,13 @@ class PlotMonster(object):
                 to_plot = self._ttdf
             else:
                 to_plot = self._odf
+
+        if label is None:
+            label = what_point
         if var2_id is None:
-            return hv.VLine(to_plot.loc[:, var1_id].values).opts(
-                color=self._colors[what_point], line_dash='dashed', xrotation=90
-            )
+            data = to_plot.loc[:, var1_id].values
+            opts = dict(color=self._colors[what_point], line_dash='dashed', xrotation=90, line_width=2.5)
+            return hv.VLine(data).opts(**opts) * hv.Spikes(data, label=label).opts(**opts)
         return hv.Points(to_plot.loc[:, [var1_id, var2_id]], kdims=[xax, yax], label=what_point).opts(
             color=self._colors[what_point], size=7, fontsize=self._FONTSIZES
         )
@@ -317,6 +337,7 @@ class MCMC_PLOT(PlotMonster):
         return result
 
 
+
 class SMC_PLOT(PlotMonster):
 
     def __init__(
@@ -328,9 +349,7 @@ class SMC_PLOT(PlotMonster):
     ):
         super().__init__(polytope, inference_data, v_rep, hv_backend)
 
-
     def plot_evolution(self, var1_id, var2_id=None, include_prior=True):
-
         plots = []
         if var2_id is None:
             num_chains = len(self._data['posterior']['chain'].values)
@@ -350,14 +369,11 @@ class SMC_PLOT(PlotMonster):
                         muted = False
                         color = self._colors['posterior']
                         label = 'posterior'
-                if self._hvb == 'bokeh':
-                    opts = dict(color=color, alpha=0.1, muted_alpha=0.07)
-                else:
-                    raise NotImplementedError
                 plots.append(
-                    hv.Distribution(to_plot, kdims=[var1_id], label=label).opts(show_grid=True, muted=muted, **opts)
+                    self._plot_distribution(to_plot, var_id=var1_id, label=label, color=color, muted=muted)
                 )
         return hv.Overlay(plots).opts(legend_position='right', fontsize=self._FONTSIZES, **self._size_opts(width=600), )
+
 
 
 def speed_plot():
@@ -416,7 +432,7 @@ if __name__ == "__main__":
     v_rep = pd.read_excel(r"C:\python_projects\sbmfi\v_rep.xlsx", index_col=0)
     pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
 
-    smc_data = az.from_netcdf(r"C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod.nc")
+    smc_data = az.from_netcdf(r"C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_CORR.nc")
     # pm = SMC_PLOT(pol, smc_data, v_rep, hv_backend)
     # plots = []
     # for i in range(4):
@@ -424,12 +440,42 @@ if __name__ == "__main__":
     #
     # plot = hv.Layout(plots).cols(3)
 
-    mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod.nc")
-    pm = MCMC_PLOT(pol, mcmc_data, v_rep, hv_backend)
+    layout = []
+    mcmc_anton = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod_wprior.nc")
+    pmcmc_anton = MCMC_PLOT(pol, mcmc_anton, v_rep, hv_backend)
 
+    mcmc_tomek = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_tomek_obsmod_CORR.nc")
+    psmc_tomek = MCMC_PLOT(pol, mcmc_tomek, v_rep, hv_backend)
 
+    smc_tomek = az.from_netcdf(r"C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_CORR.nc")
+    psmc_tomek = SMC_PLOT(pol, smc_tomek, v_rep, hv_backend)
 
+    for i in range(10):
+        varid = variables[i]
 
+        dens_anton = pmcmc_anton.density_plot(var_id=varid)
+        dens = dens_anton.data[('Distribution', 'Posterior')]
+        dens.opts(color='#ffa500')
+        dens_anton.data[('Distribution', 'Posterior')] = dens.relabel('Antoniewicz MCMC')
 
-    # output_file('test2.html')
-    # show(hv.render(plot))
+        dens_mcmc_tomek = psmc_tomek.density_plot(var_id=varid)
+        dens = dens_mcmc_tomek.data[('Distribution', 'Posterior')]
+        dens.opts(color='#b55ef1')
+        dens_mcmc_tomek.data[('Distribution', 'Posterior')] = dens.relabel('LCMS MCMC')
+
+        to_plot = psmc_tomek._get_chain(varid, chain_idx=-1)
+        dens_smc_tomek = psmc_tomek._plot_distribution(to_plot, var_id=varid, label='LCMS SMC', color=psmc_tomek._colors['posterior'])
+
+        prior_dens = psmc_tomek.density_plot(var_id=varid, group='prior')
+
+        true_plot = pmcmc_anton.point_plot(varid, label='Antoniewicz MLE')
+
+        plot = (prior_dens * dens_anton * dens_mcmc_tomek * dens_smc_tomek * true_plot).opts(
+            legend_position='right', **psmc_tomek._size_opts(width=600), fontsize=PlotMonster._FONTSIZES
+        )
+        layout.append(plot)
+
+    plot = hv.Layout(layout).cols(2)
+
+    output_file('test2.html')
+    show(hv.render(plot))
