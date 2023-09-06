@@ -759,6 +759,9 @@ class LinAlg(object):
     def ones(self, shape, dtype=None):
         return self._BACKEND.ones(shape, dtype)
 
+    def tensormul_T(self, A, x, dim0=-2, dim1=-1):  # TODO add b argument that adds to x after multiplication?
+        return self.transax(A @ self.transax(x, dim0=dim0, dim1=dim1), dim0=dim0, dim1=dim1)
+
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch

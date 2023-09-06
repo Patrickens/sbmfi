@@ -8,6 +8,8 @@ from typing import Iterable, Union, Dict, Tuple
 from bokeh.plotting import show
 from bokeh.io import output_file
 import matplotlib.pyplot as plt
+import colorcet
+
 
 class PlotMonster(object):
     _ALLFONTSIZES = {
@@ -48,6 +50,7 @@ class PlotMonster(object):
 
         prior_color = '#2855de'
         post_color = '#e02450'
+
         self._colors = {
             'true': '#ff0000',
             'map': '#13f269',
@@ -55,6 +58,12 @@ class PlotMonster(object):
             'prior_predictive': prior_color,
             'posterior': post_color,
             'posterior_predictive': post_color,
+        }
+        self._group_var_map = {
+            'posterior': 'theta',
+            'prior': 'theta',
+            'posterior_predictive': 'data',
+            'prior_predictive': 'data',
         }
         self._px = 1/plt.rcParams['figure.dpi']
 
@@ -104,23 +113,24 @@ class PlotMonster(object):
         return hull.points[verts]
 
     def _get_samples(self, *args, group='posterior', num_samples=None):
-        group_var_map = {
-            'posterior': 'theta',
-            'prior': 'theta',
-            'posterior_predictive': 'data',
-            'prior_predictive': 'data',
-        }
         return az.extract(
             self._data,
             group=group,
-            var_names=group_var_map[group],
+            var_names=self._group_var_map[group],
             combined=True,
             num_samples=num_samples,
             rng=True,
         ).loc[list(args)].values.T
 
-    def _get_chain(self, *args, group='posterior'):
-        pass
+    def _get_chain(self, *args, chain_idx=0, group='posterior'):
+        var = self._group_var_map[group]
+        return self._data[group][var].sel({f'{var}_id': list(args)}).values[chain_idx]
+
+    def _size_opts(self, width=500, height=400):
+        kwargs = dict(height=height, width=width,)
+        if self._hvb == 'matplotlib':
+            kwargs = dict(height=height * self._px, width=width * self._px,)
+        return kwargs
 
     def density_plot(
             self,
@@ -145,12 +155,7 @@ class PlotMonster(object):
                 hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
             ])
 
-        kwargs = dict(
-            height=400, width=400,
-        )
-        if self._hvb == 'matplotlib':
-            kwargs = dict(height=400 * self._px, width=400 * self._px,)
-        return hv.Overlay(plots).opts(xrotation=90, show_grid=True, fontsize=self._FONTSIZES, **kwargs)
+        return hv.Overlay(plots).opts(xrotation=90, show_grid=True, fontsize=self._FONTSIZES, **self._size_opts())
 
     def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None, color='#ebb821'):
         xax = self._axes_range(var1_id)
@@ -324,8 +329,35 @@ class SMC_PLOT(PlotMonster):
         super().__init__(polytope, inference_data, v_rep, hv_backend)
 
 
-    def plot_evolution(self, *args, group='posterior'):
-        self._get_chain(args, group=group)
+    def plot_evolution(self, var1_id, var2_id=None, include_prior=True):
+
+        plots = []
+        if var2_id is None:
+            num_chains = len(self._data['posterior']['chain'].values)
+            addon = 1 if include_prior else 0
+            for i in range(num_chains + addon):
+                color = colorcet.glasbey[i]
+                if i == 0:
+                    color = self._colors['prior']
+                    to_plot = self._get_chain(var1_id, chain_idx=0, group='prior')
+                    label = 'prior'
+                    muted = False
+                else:
+                    to_plot = self._get_chain(var1_id, chain_idx=i-1, group='posterior')
+                    label = f'pop_{i}'
+                    muted = True
+                    if i == num_chains - 1:
+                        muted = False
+                        color = self._colors['posterior']
+                        label = 'posterior'
+                if self._hvb == 'bokeh':
+                    opts = dict(color=color, alpha=0.1, muted_alpha=0.07)
+                else:
+                    raise NotImplementedError
+                plots.append(
+                    hv.Distribution(to_plot, kdims=[var1_id], label=label).opts(show_grid=True, muted=muted, **opts)
+                )
+        return hv.Overlay(plots).opts(legend_position='right', fontsize=self._FONTSIZES, **self._size_opts(width=600), )
 
 
 def speed_plot():
@@ -383,7 +415,21 @@ if __name__ == "__main__":
     hv_backend = 'bokeh'
     v_rep = pd.read_excel(r"C:\python_projects\sbmfi\v_rep.xlsx", index_col=0)
     pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
-    data = az.from_netcdf(r"C:\python_projects\sbmfi\src\sbmfi\inference\SMC_e_coli_glc_tomek_obsmod.nc")
-    pm = SMC_PLOT(pol, data, v_rep, hv_backend)
 
-    pm.plot_evolution(variables[3])
+    smc_data = az.from_netcdf(r"C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod.nc")
+    # pm = SMC_PLOT(pol, smc_data, v_rep, hv_backend)
+    # plots = []
+    # for i in range(4):
+    #     plots.append(pm.plot_evolution(variables[i]))
+    #
+    # plot = hv.Layout(plots).cols(3)
+
+    mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod.nc")
+    pm = MCMC_PLOT(pol, mcmc_data, v_rep, hv_backend)
+
+
+
+
+
+    # output_file('test2.html')
+    # show(hv.render(plot))

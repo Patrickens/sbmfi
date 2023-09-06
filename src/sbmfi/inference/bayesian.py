@@ -93,6 +93,8 @@ class _BaseBayes(_BaseSimulator):
             obmod.check_x_meas(x_meas_df.loc[:, labelling_id], atol=atol)
 
     def set_true_theta(self, theta: pd.Series):
+        if theta is None:
+            return
         if isinstance(theta, pd.DataFrame):
             if theta.shape[0] > 1:
                 raise ValueError
@@ -351,7 +353,8 @@ class _BaseBayes(_BaseSimulator):
             # uniform samples from unit ball in batch_shape dims
             self._sphere_samples = self._la.sample_hypersphere(shape=(*batch_shape, self._sampler.dimensionality))
             # batch compute distances to all planes
-            self._A_dist = self._la.transax(self._sampler._G @ self._la.transax(self._sphere_samples))
+            # self._A_dist = self._la.transax(self._sampler._G @ self._la.transax(self._sphere_samples))
+            self._A_dist = self._la.tensormul_T(self._sampler._G, self._sphere_samples)
 
         sphere_sample = self._sphere_samples[ii]
         A_dist = self._A_dist[ii]
@@ -409,19 +412,21 @@ class _BaseBayes(_BaseSimulator):
             inference_data: az.InferenceData = None,
             n=20000,
             theta=None,
-            include_prior_predictive=True,
+            include_predictive=True,
             num_processes=2,
             n_obs=0,
+            show_progress=True,
     ):
         model = self._model
 
-        if theta is None:
+        from_prior = theta is None
+        if from_prior:
             theta = self._prior.sample(sample_shape=(n,))
             if model._la.backend != 'torch':
                 # TODO inconsistency between model and prior LinAlg, where prior has torch backend and model has numpy backend
                 theta = self._prior._fcm._la.tonp(theta)
 
-        if inference_data is None:
+        if (inference_data is None) or not from_prior:
             result = dict(theta=theta[None, :, :])
         else:
             prior_dataset = az.convert_to_dataset(
@@ -433,7 +438,7 @@ class _BaseBayes(_BaseSimulator):
                 group_dict={'prior': prior_dataset},
             )
 
-        if include_prior_predictive:
+        if include_predictive:
             dsim = DataSetSim(
                 model=model,
                 substrate_df=self._substrate_df,
@@ -442,20 +447,20 @@ class _BaseBayes(_BaseSimulator):
                 num_processes=num_processes,
             )
             fluxes = model._fcm.map_theta_2_fluxes(theta)
-            prior_data = dsim.simulate_set(fluxes, n_obs=n_obs)['data']
+            data = dsim.simulate_set(fluxes, n_obs=n_obs, show_progress=show_progress)['data']
             dims = {'data': ['data_id']}
             coords = {'data_id': [f'{i[0]}: {i[1]}' for i in self.data_id.tolist()]}
             if n_obs == 0:
-                prior_data = model._la.transax(prior_data, 0, 1)
+                data = model._la.transax(data, 0, 1)
             else:
                 dims['data'] = ['obs_idx', 'data_id']
-                prior_data = prior_data[None, :, :, :]
+                data = data[None, :, :, :]
 
-            if inference_data is None:
-                result['data'] = prior_data
+            if (inference_data is None) or not from_prior:
+                result['data'] = data
             else:
                 prior_dataset = az.convert_to_dataset(
-                    {'data': prior_data},
+                    {'data': data},
                     dims=dims,
                     coords=coords,
                 )
@@ -463,7 +468,9 @@ class _BaseBayes(_BaseSimulator):
                     group_dict={'prior_predictive': prior_dataset},
                 )
 
-        if inference_data is None:
+        if (inference_data is None) or not from_prior:
+            if inference_data is not None:
+                print('returning result instead of adding to inference data, since it is not clear where theta originates')
             return result
 
 
@@ -764,7 +771,8 @@ class SMC(_BaseBayes):
 
             diff = old_pol - self._la.unsqueeze(new_pol, -2)  # centered at old_pol!
             directions = diff / self._la.norm(diff, 2, -1, True)
-            A_dist = self._la.transax(self._sampler._G @ self._la.transax(directions))
+            # A_dist = self._la.transax(self._sampler._G @ self._la.transax(directions))
+            A_dist = self._la.tensormul_T(self._sampler._G, directions)
 
             allpha = self._particle_pol_dist[i: i + pbatch] / A_dist
             alpha_min, alpha_max, line_var = self._format_line_kernel_kwargs(allpha, line_variance, directions)
@@ -937,58 +945,74 @@ class SMC(_BaseBayes):
         data = None
         if n_smc_steps < 2:
             raise ValueError
-        for i in range(n_smc_steps):
-            if i == 0:
-                prior_theta = self._prior.sample(sample_shape=(n * n0_multiplier, ))
-                if self._la.backend != 'torch':
-                    prior_theta = self._prior._fcm._la.tonp(prior_theta)
-                dist = self.potential(prior_theta, fluxes_per_task=500, show_progress=True)
-                if return_data:
-                    dist, data = dist
-                    prior_data = data
-
-                sortidx = self._la.argsort(dist)
-                particles = prior_theta[sortidx][:n]
-                dist = dist[sortidx][:n]
-                epsilon = dist[-1]
-                log_weights = self._la.log(1 / n * self._la.ones(n))
-
-                if return_all_populations:
-                    all_particles = [particles]
-                    all_log_weights = [log_weights]
-                    all_distances = [dist]
-                    all_epsilons = [epsilon]
+        try:
+            for i in range(n_smc_steps):
+                if i == 0:
+                    prior_theta = self._prior.sample(sample_shape=(n * n0_multiplier, ))
+                    if self._la.backend != 'torch':
+                        prior_theta = self._prior._fcm._la.tonp(prior_theta)
+                    dist = self.potential(prior_theta, fluxes_per_task=500, show_progress=True)
                     if return_data:
-                        all_data = [data[sortidx][:n]]
-            else:
-                if distance_based_decay:
-                    # Quantile of last population
-                    epsidx = self.quantile_indices(dist, quantiles=epsilon_decay)
-                    epsilon = dist[epsidx]
+                        dist, data = dist
+                        prior_data = data
+
+                    sortidx = self._la.argsort(dist)
+                    particles = prior_theta[sortidx][:n]
+                    dist = dist[sortidx][:n]
+                    epsilon = dist[-1]
+                    log_weights = self._la.log(1 / n * self._la.ones(n))
+
+                    if return_all_populations:
+                        all_particles = [particles]
+                        all_log_weights = [log_weights]
+                        all_distances = [dist]
+                        all_epsilons = [epsilon]
+                        if return_data:
+                            all_data = [data[sortidx][:n]]
                 else:
-                    # Constant decay.
-                    epsilon *= epsilon_decay
+                    if distance_based_decay:
+                        # Quantile of last population
+                        epsidx = self.quantile_indices(dist, quantiles=epsilon_decay)
+                        epsilon = dist[epsidx]
+                    else:
+                        # Constant decay.
+                        epsilon *= epsilon_decay
 
-                particles, log_weights, dist, data = self._sample_next_population(
-                    particles=particles,
-                    log_weights=log_weights,
-                    epsilon=epsilon,
-                    population_batch=population_batch,
-                    kernel_variance_scale=kernel_variance_scale,
-                    line_kernel=line_kernel,
-                    xch_kernel=xch_kernel,
-                    xch_variance=xch_variance,
-                    return_data=return_data,
-                    evaluate_prior=evaluate_prior,
+                    particles, log_weights, dist, data = self._sample_next_population(
+                        particles=particles,
+                        log_weights=log_weights,
+                        epsilon=epsilon,
+                        population_batch=population_batch,
+                        kernel_variance_scale=kernel_variance_scale,
+                        line_kernel=line_kernel,
+                        xch_kernel=xch_kernel,
+                        xch_variance=xch_variance,
+                        return_data=return_data,
+                        evaluate_prior=evaluate_prior,
+                    )
+                    if return_all_populations:
+                        all_particles.append(particles)
+                        all_log_weights.append(log_weights)
+                        all_distances.append(dist)
+                        all_epsilons.append(epsilon)
+                        if return_data:
+                            all_data.append(data)
+        except:
+            if return_all_populations:
+                kwargs = dict(
+                    all_particles=all_particles,
+                    all_log_weights=all_log_weights,
+                    all_distances=all_distances,
+                    all_epsilons=all_epsilons
                 )
-                if return_all_populations:
-                    all_particles.append(particles)
-                    all_log_weights.append(log_weights)
-                    all_distances.append(dist)
-                    all_epsilons.append(epsilon)
-                    if return_data:
-                        all_data.append(data)
-
+                if return_data:
+                    kwargs['all_data'] = all_data
+            else:
+                kwargs = dict(particles=particles, log_weights=log_weights, dist=dist, epsilon=epsilon)
+                if return_data:
+                    kwargs['data'] = data
+            # could be used to reset the SMC algo!
+            pickle.dump(kwargs, open('FAILUREPOPULATIONS.p', 'wb'))
         if return_all_populations:
             particles = self._la.stack(all_particles, 0)
             log_weights = self._la.stack(all_log_weights, 0)
@@ -1099,7 +1123,7 @@ def check_stuff():
         part_mdvss = obmod.compute_observations(mdvs[:, i, :], pandalize=True)
         part_mdvss_df = part_mdvss.loc[np.sort(np.repeat(np.arange(part_mdvss.shape[0]), n_obs))].reset_index(drop=True)
         logobs = obmod._la.log10(obmod._la.get_tensor(values=part_mdvss.values) + 1e-12)
-        logI = logobs + obmod._log_scaling[None, :]  # in log space, multiplication is addition
+        logI = logobs + obmod._log_scaling  # in log space, multiplication is addition
         noisy_observations = obmod._la.tile(logI[:, None, :], (1, n_obs, 1))
         sigma_x = obmod.construct_sigma(logI=logI)
         obmod.set_sigma(sigma=sigma_x, verify=False)
@@ -1175,88 +1199,157 @@ if __name__ == "__main__":
     pd.set_option('display.width', 1000)
     np.set_printoptions(linewidth=500)
 
-    a = False
-    if a:
-        which = 'lcms'
-        # which = 'tomek'
-        ding = SMC
-        run_kwargs = dict(
-            n_smc_steps=3,
-            n=50,
-            n_obs=5,
-            population_batch=7,
-            n0_multiplier=2,
-            distance_based_decay=True,
-            epsilon_decay=0.8,
-            kernel_variance_scale=1.0,
-            evaluate_prior=False,
-            potentype='approx',
-            return_data=True,
-            potential_kwargs={},
-            metric='rmse',
-            line_kernel='gauss',
-            xch_kernel='gauss',
-            xch_variance=0.4,
-            return_all_populations=False,
-        )
-    else:
-        which = 'com'
-        # which = 'anton'
-        ding = MCMC
-        run_kwargs = dict(
-            n= 20,
-            n_burn = 10,
-            thinning_factor = 2,
-            n_chains = 3,
-            potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
-            n_cdf = 6,
-            algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
-            line_kernel = 'gauss',
-            line_variance = 2.0,
-            xch_kernel = 'gauss',
-            xch_variance = 0.4,
-            return_data = True,
-            evaluate_prior = False,
-            potential_kwargs = {},
-            return_az = True,
-        )
-
-
-    model, kwargs = spiro(
-        backend='numpy',
-        batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
-        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3, L_12_omega=1.0,
-        v5_reversible=True
+    model, kwargs = build_e_coli_anton_glc(
+        backend='torch',
+        auto_diff=False,
+        build_simulator=True,
+        ratios=False,
+        batch_size=25,
+        which_measurements='tomek',
+        which_labellings=['20% [U]Glc', '[1]Glc'],
+        measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+        seed=1,
     )
-    # model, kwargs = build_e_coli_anton_glc(
-    #     backend='torch',
-    #     auto_diff=False,
-    #     build_simulator=True,
-    #     ratios=False,
-    #     batch_size=10,
-    #     which_measurements=which,
-    #     which_labellings=['20% [U]Glc', '[1]Glc'],
-    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    #     seed=1,
-    # )
+
     sdf = kwargs['substrate_df']
     dss = kwargs['basebayes']
     simm = dss._obmods
     bom = dss._bom
     up = UniFluxPrior(model, cache_size=2000)
-    # from botorch.utils.sampling import sample_polytope
 
-    mcmc = ding(
+    smc = SMC(
         model=model,
         substrate_df=sdf,
         mdv_observation_models=simm,
         boundary_observation_model=bom,
         prior=up,
-        # num_processes=0,
+        num_processes=0,
     )
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    mcmc.set_true_theta(theta=kwargs['theta'])
+    smc.set_measurement(x_meas=kwargs['measurements'])
+    smc.set_true_theta(theta=kwargs['theta'])
 
-    post = mcmc.run(**run_kwargs)
+    # a = False
+    # if a:
+    #     which = 'lcms'
+    #     # which = 'tomek'
+    #     ding = SMC
+    #     run_kwargs = dict(
+    #         n_smc_steps=3,
+    #         n=50,
+    #         n_obs=5,
+    #         population_batch=7,
+    #         n0_multiplier=2,
+    #         distance_based_decay=True,
+    #         epsilon_decay=0.8,
+    #         kernel_variance_scale=1.0,
+    #         evaluate_prior=False,
+    #         potentype='approx',
+    #         return_data=True,
+    #         potential_kwargs={},
+    #         metric='rmse',
+    #         line_kernel='gauss',
+    #         xch_kernel='gauss',
+    #         xch_variance=0.4,
+    #         return_all_populations=False,
+    #     )
+    # else:
+    #     which = 'com'
+    #     # which = 'anton'
+    #     ding = MCMC
+    #     run_kwargs = dict(
+    #         n= 20,
+    #         n_burn = 10,
+    #         thinning_factor = 2,
+    #         n_chains = 3,
+    #         potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
+    #         n_cdf = 6,
+    #         algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
+    #         line_kernel = 'gauss',
+    #         line_variance = 2.0,
+    #         xch_kernel = 'gauss',
+    #         xch_variance = 0.4,
+    #         return_data = True,
+    #         evaluate_prior = False,
+    #         potential_kwargs = {},
+    #         return_az = True,
+    #     )
+    #
+    #
+    # model, kwargs = spiro(
+    #     backend='numpy',
+    #     batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
+    #     v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3, L_12_omega=1.0,
+    #     v5_reversible=True
+    # )
+    # # model, kwargs = build_e_coli_anton_glc(
+    # #     backend='torch',
+    # #     auto_diff=False,
+    # #     build_simulator=True,
+    # #     ratios=False,
+    # #     batch_size=10,
+    # #     which_measurements=which,
+    # #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    # #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    # #     seed=1,
+    # # )
+    # sdf = kwargs['substrate_df']
+    # dss = kwargs['basebayes']
+    # simm = dss._obmods
+    # bom = dss._bom
+    # up = UniFluxPrior(model, cache_size=2000)
+    # # from botorch.utils.sampling import sample_polytope
+    #
+    # mcmc = ding(
+    #     model=model,
+    #     substrate_df=sdf,
+    #     mdv_observation_models=simm,
+    #     boundary_observation_model=bom,
+    #     prior=up,
+    #     # num_processes=0,
+    # )
+    # mcmc.set_measurement(x_meas=kwargs['measurements'])
+    # mcmc.set_true_theta(theta=kwargs['theta'])
+    #
+    # post = mcmc.run(**run_kwargs)
     # az.to_netcdf(post, 'MCMC_e_coli_glc_anton_obsmod.nc')
     # print(prof2.print_stats())
+
+    # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod.nc")
+    # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\src\sbmfi\inference\MCMC_e_coli_glc_anton_obsmod.nc")
+
+    # if 'prior' in mcmc_data:
+    #     del mcmc_data.prior
+    # if 'prior_predictive' in mcmc_data:
+    #     del mcmc_data.prior_predictive
+
+    # make_model = True
+    # if make_model:
+    #     model, kwargs = build_e_coli_anton_glc(
+    #         backend='torch',
+    #         auto_diff=False,
+    #         build_simulator=True,
+    #         ratios=False,
+    #         batch_size=25,
+    #         which_measurements='anton',
+    #         which_labellings=['20% [U]Glc', '[1]Glc'],
+    #         measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    #         seed=1,
+    #     )
+    #     sdf = kwargs['substrate_df']
+    #     dss = kwargs['basebayes']
+    #     simm = dss._obmods
+    #     bom = dss._bom
+    #     up = UniFluxPrior(model, cache_size=2000)
+    #
+    #     mcmc = MCMC(
+    #         model=model,
+    #         substrate_df=sdf,
+    #         mdv_observation_models=simm,
+    #         boundary_observation_model=bom,
+    #         prior=up,
+    #     )
+    #     mcmc.set_measurement(x_meas=kwargs['measurements'])
+    #     mcmc.set_true_theta(theta=kwargs['theta'])
+    #     mcmc.simulate_data(mcmc_data, n=60000)
+
+

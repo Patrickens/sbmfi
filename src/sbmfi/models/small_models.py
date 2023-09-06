@@ -5,7 +5,7 @@ from sbmfi.inference.bayesian import _BaseBayes
 from sbmfi.inference.priors import UniFluxPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel
 from sbmfi.core.linalg import LinAlg
-from sbmfi.models.build_models import simulator_factory
+from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os
@@ -19,7 +19,7 @@ def spiro(
         ratios=True, build_simulator=False, add_cofactors=True, which_measurements=None, seed=2,
         which_labellings=None, include_bom=True, v5_reversible=False, n_obs=0,
         kernel_basis='svd', basis_coordinates='rounded', logit_xch_fluxes=False,
-        L_12_omega = 20.0,
+        L_12_omega = 20.0, clip_min=750.0,
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -148,9 +148,9 @@ def spiro(
         ('H', 1, 'M-H', 3.0, 0.01, None, 3e3),
         ('H', 0, 'M-H', 2.0, 0.01, None, 3e3),
 
-        ('H', 1, 'M+F', 5.0, 0.03, None, 2e3),
+        ('H', 1, 'M+F', 5.0, 0.03, None, 3e3),
         ('H', 1, 'M+Cl', 88.0, 0.03, None, 2e3),
-        ('H', 0, 'M+F', 4.0, 0.03, None, 2e3),  # to indicate that da_df is not yet in any order!
+        ('H', 0, 'M+F', 4.0, 0.03, None, 3e3),  # to indicate that da_df is not yet in any order!
         ('H', 0, 'M+Cl', 89.0, 0.03, None, 2e3),
 
         ('P', 1, 'M-H', 3.7, 0.02, None, 2e3),  # an annotated metabolite that is not in the model
@@ -271,7 +271,9 @@ def spiro(
         if which_measurements == 'lcms':
             annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}
             total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
-            obsmods = LCMS_ObservationModel.build_models(model, annotation_dfs, total_intensities=total_intensities)
+            obsmods = LCMS_ObservationModel.build_models(
+                model, annotation_dfs, total_intensities=total_intensities, clip_min=clip_min
+            )
         elif which_measurements == 'com':
             sigma_ii = observation_df['sigma']
             omegas = observation_df.drop_duplicates('ion_id').set_index('ion_id')['omega']
@@ -290,6 +292,8 @@ def spiro(
 
         theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
         basebay.set_true_theta(theta.iloc[0])
+        if which_measurements == 'lcms':
+            _correct_base_bayes_lcms(basebay, clip_min=clip_min)
         measurements = basebay.simulate_true_data(n_obs=n_obs).iloc[[0]]
 
     kwargs = {

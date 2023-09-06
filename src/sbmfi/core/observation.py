@@ -35,7 +35,6 @@ class MDV_ObservationModel(object):
             transformation=None,
             correct_natab=False,
             clip_min=750.0,
-            clip_max=None,
             **kwargs,
     ):
         self._la = model._la
@@ -47,14 +46,11 @@ class MDV_ObservationModel(object):
             self._natab = self._set_natural_abundance_correction() # TODO this currently sucks
         self._state_id = model.state_id
 
-        self._scaling = self._la.get_tensor(shape=(self._n_o,))
-        self._log_scaling = self._la.get_tensor(shape=(self._n_o,))
+        self._scaling = self._la.get_tensor(shape=(self._n_o, ))
+        self._scaled = True
+        self._mdv_scaling = self._la.get_tensor(shape=(len(model.state_id),))
 
         self._cmin = clip_min
-        self._lcmin = math.log10(clip_min) if (clip_min is not None) and (clip_min > 0.0) else None
-
-        self._cmax = clip_max
-        self._lcmax = None if clip_max is None else math.log10(clip_max)
 
         if transformation is not None:
             if (clip_min is None) or (clip_min <= 0.0):
@@ -177,18 +173,24 @@ class MDV_ObservationModel(object):
                 )
         return obs_df
 
-    def _set_scaling(self, scaling: pd.Series):
+    def _set_scaling(self, scaling: pd.Series, ionindices, transform_scaling=True):
         if scaling.index.duplicated().any():
             raise ValueError('double ions')
+        # num_C = self._observation_df['isotope_decomposition'].apply(lambda x: Formula(x).no_isotope()['C'])
+        # ions = num_C.index.str.rsplit('+', n=1, expand=True).to_frame().reset_index(drop=True)[0]
+        odf = self._observation_df
         for ion_id, value in scaling.items():
-            indices = self._ionindices.get(ion_id)
+            indices = ionindices.get(ion_id)
             if indices is not None:
+                value = self._la.get_tensor(values=np.array([value]))
                 self._scaling[indices] = value
+                mdv_indices = self._la.get_tensor(values=odf.loc[(odf['ion_id'] == ion_id), 'state_idx'].values)
+                self._mdv_scaling[mdv_indices] = value
         if (self._scaling <= 0.0).any():
             raise ValueError(f'a total intensity is not set: {self.scaling}')
-        self._log_scaling = self._la.log10(self._scaling)  # will fail if there are any 0s left
-        if self._transformation is not None:
+        if (self._transformation is not None) and transform_scaling:
             self._transformation.set_scaling(self._scaling)
+        self._scaled = transform_scaling
 
     def check_x_meas(self, x_meas: pd.Series, atol=1e-3):
         # check whether the scaling makes sense and whether the clips are respected
@@ -201,16 +203,17 @@ class MDV_ObservationModel(object):
             x_meas = self._transformation.inv(x_meas)
         totals = (self._denom_sum @ x_meas.T)[self._denomi].T
 
-        correct_scaling = (abs(totals - self._scaling) <= atol).all()
-        over_cmin = True if self._cmin is None else (totals >= self._cmin).all()
-        undr_cmax = True if self._cmax is None else (totals <= self._cmax).all()
+        if self._scaled:
+            # can unfortunately not check this for LCMS model, since we lose the total intensity information!
+            correct_scaling = (abs(totals - self._scaling) <= atol).all()
+            over_cmin = True if self._cmin is None else (totals >= self._cmin).all()
 
-        if not all((correct_scaling, over_cmin, undr_cmax)):
-            raise ValueError(
-                f'the measurement cannot be produced by the observation model. '
-                f'Correct scaling: {correct_scaling}, '
-                f'over clip_min: {over_cmin}, under clip_max: {undr_cmax}'
-            )
+            if not all((correct_scaling, over_cmin)):
+                raise ValueError(
+                    f'the measurement cannot be produced by the observation model. '
+                    f'Correct scaling: {correct_scaling}, '
+                    f'over clip_min: {over_cmin}'
+                )
 
     def _set_natural_abundance_correction(self, isotope_threshold=1e-4, correction_threshold=0.001):
         if self._observation_df.empty:
@@ -258,33 +261,28 @@ class MDV_ObservationModel(object):
         # rmse = n_samples
         return self._la.sqrt(self._la.mean(diff_2, -1, keepdims=False)) # mean over n_obs
 
-    def __call__(self, mdv, n_obs=3, return_obs=False, pandalize=False, **kwargs):
+    def __call__(self, mdv, n_obs=3, pandalize=False, **kwargs):
         index = None
         if isinstance(mdv, pd.DataFrame):
             index = mdv.index
             mdv = self._la.get_tensor(values=mdv.loc[:, self.state_id].values)
 
-        observations = self.sample_observations(mdv, n_obs=n_obs, **kwargs)
+        result = self.sample_observations(mdv, n_obs=n_obs, **kwargs)
         if self._transformation is not None:
-            transformations = self._transformation(observations)
+            result = self._transformation(result)
 
         if pandalize:
-            n_mdv = mdv.shape[0]
+            n_samples = mdv.shape[0]
             if index is None:
-                index = pd.RangeIndex(n_mdv)
-            obs_index = pd.RangeIndex(n_obs)
+                index = pd.RangeIndex(n_samples)
+            n_obshape = max(1, n_obs)
+            obs_index = pd.RangeIndex(n_obshape)
             index = make_multidex({i: obs_index for i in index}, 'samples_id', 'obs_i')
-            observations = self._la.tonp(observations).transpose(1, 0, 2).reshape((n_mdv*n_obs, self._n_o))
-            observations = pd.DataFrame(observations, index=index, columns=self.observation_df.index)
-            if self._transformation is not None:
-                transformations = self._la.tonp(transformations).transpose(1, 0, 2).reshape((n_mdv * n_obs, self._n_o))
-                transformations = pd.DataFrame(transformations, index=index, columns=self.observation_id)
-
-        if self._transformation is not None:
-            if return_obs:
-                return transformations, observations
-            return transformations
-        return observations
+            if len(result.shape) > 2:
+                result = self._la.tonp(result).transpose(1, 0, 2)
+            result = result.reshape((n_samples*n_obshape, len(self.observation_id)))
+            result = pd.DataFrame(result, index=index, columns=self.observation_id)
+        return result
 
 
 class MDV_LogRatioTransform():
@@ -412,7 +410,8 @@ class MDV_LogRatioTransform():
         return self._clr_inv(psi)
 
     def set_scaling(self, scaling):
-        self._scaled_sumatrix = self._sumatrix * (1.0 / scaling[None, :])
+        scaling = self._la.atleast_2d(scaling)
+        self._scaled_sumatrix = self._sumatrix * (1.0 / scaling)
 
     def inv(self, transform):
         return self._inv_transfunc(transform)
@@ -476,7 +475,6 @@ class _BlockDiagGaussian(object):
         self._sigma_1 = self._la.get_tensor(shape=(self._la._batch_size, self._no, self._no))
         self._chol = None
         self._bias = self._la.get_tensor(shape=(self._la._batch_size, self._no,))
-
 
     @property
     def sigma_1(self):
@@ -551,9 +549,9 @@ class _BlockDiagGaussian(object):
         observations_num = s
         if select:
             observations_num = s[..., self._numi]
-        observations_denom = self._denom_sum @ self._la.transax(observations_num)
+        observations_denom = self._la.tensormul_T(self._denom_sum, observations_num)
         observations_denom[observations_denom == 0.0] = 1.0
-        observations = observations_num / self._la.transax(observations_denom)[..., self._denomi]
+        observations = observations_num / observations_denom[..., self._denomi]
         if pandalize:
             observations = pd.DataFrame(self._la.tonp(observations), index=index, columns=self._observation_df.index)
         return observations
@@ -576,12 +574,11 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             transformation = None,
             correct_natab=False,
             clip_min=0.0,
-            clip_max=None,
             normalize=True,
             **kwargs,
     ):
         MDV_ObservationModel.__init__(
-            self, model, annotation_df, transformation, correct_natab, clip_min, clip_max, **kwargs
+            self, model, annotation_df, transformation, correct_natab, clip_min, **kwargs
         )
         _BlockDiagGaussian.__init__(self, linalg=self._la, observation_df=self._observation_df)
         # TODO introduce scaling factor w as in Wiechert publications
@@ -600,7 +597,7 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             ion_ids = self._observation_df['ion_id'].unique()
             omega = pd.Series(1.0, index=ion_ids)
         omega = omega.fillna(1.0)
-        self._set_scaling(omega)
+        self._set_scaling(omega, self._ionindices)
 
     @staticmethod
     def build_models(
@@ -609,7 +606,6 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             normalize=True,
             transformation=None,
             clip_min=0.0,
-            clip_max=None,
     ) -> OrderedDict:
         obsims = OrderedDict()
         for labelling_id, (annotation_df, sigma_df, omega) in annotation_dfs.items():
@@ -622,7 +618,6 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
                     omega=omega,
                     transformation=transformation,
                     clip_min=clip_min,
-                    clip_max=clip_max,
                     normalize=normalize,
                 )
                 if sigma_df is None:
@@ -749,8 +744,8 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         noise = self.sample_sigma(shape=(mdv.shape[0], n_obs))
         noisy_observations = observations[:, None, ...] + noise
 
-        if (self._cmin is not None) or (self._cmax is not None):
-            noisy_observations = self._la.clip(noisy_observations, self._cmin, self._cmax)
+        if (self._cmin is not None):
+            noisy_observations = self._la.clip(noisy_observations, self._cmin, None)
 
         if self._normalize:
             if (self._cmin is None) or (self._cmin < 0.0):
@@ -826,17 +821,18 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             transformation = None,
             correct_natab=False,
             clip_min=750.0,
-            clip_max=None,
             **kwargs
     ):
         MDV_ObservationModel.__init__(
-            self, model, annotation_df, transformation, correct_natab, clip_min, clip_max, **kwargs
+            self, model, annotation_df, transformation, correct_natab, clip_min, **kwargs
         )
         _BlockDiagGaussian.__init__(self, linalg=self._la, observation_df=self._observation_df)
-        self._total_intensities = {}
+        self._total_intensities = total_intensities
         self._p = parameters
         self._p._la = self._la
-        self._set_scaling(scaling=total_intensities)
+
+        # transform_scaling=True would be incorrect since we lose information about intensities when mulitplying MDVs
+        self._set_scaling(total_intensities, self._ionindices, transform_scaling=False)
 
     @staticmethod
     def build_models(
@@ -878,45 +874,37 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         sigma += self._la.vecopy(self._la.transax(sigma))  # easiest way to make it diagonal
         return sigma
 
-    def sample_observations(self, mdv, n_obs=3, **kwargs):
+    def sample_observations(self, mdv, n_obs=3, atol=1e-10, **kwargs):
         if self._cmin == 0.0:
             raise ValueError('need to clip brohh')
         if self._total_intensities is None:
             raise ValueError(f'set total intensities')
 
         mdv = self._la.atleast_2d(mdv)  # shape = batch x n_mdv
-        observations = self.compute_observations(s=mdv, select=True)  # batch x n_observables
+        intensities = mdv * self._mdv_scaling  #
+
+        observations_num = intensities[..., self._numi]
         if self._natcorr:
-            observations = (self._natab @ observations.T).T
+            observations_num = self._la.tensormul_T(self._natcorr, observations_num)
 
-        logobs = self._la.log10(observations + 1e-15)
-        mu_logI = logobs + self._log_scaling[None, :]  # in log space, multiplication is addition
-        if (self._cmin is not None) or (self._cmax is not None):
-            clip_logI = self._la.clip(mu_logI, self._lcmin, self._lcmax)
-        else:
-            clip_logI = mu_logI
+        if n_obs == 0:
+            clip_observations_num = self._la.clip(observations_num, self._cmin, None)
+            return self.compute_observations(clip_observations_num, select=False)
 
-        if n_obs == 0:  # this means we return the 'mean'
-            observations = 10 ** clip_logI
-            return self.compute_observations(observations, select=False)
-
-        noisy_observations = self._la.tile(mu_logI[:, None, :], (1, n_obs, 1))
-        sigma_x = self.construct_sigma(logI=clip_logI)
-        self.set_sigma(sigma=sigma_x, verify=False)  # TODO deal with singular matrices here
-        noisy_observations += self.sample_sigma(shape=(n_obs, ))
+        log10_observations_num = self._la.log10(observations_num + atol)
+        noisy_observations = self._la.tile(log10_observations_num[:, None, :], (1, n_obs, 1))
+        sigma_x = self.construct_sigma(logI=log10_observations_num)
+        self.set_sigma(sigma=sigma_x, verify=False)
+        noisy_observations += self.sample_sigma(shape=(n_obs,))
 
         if self._p._has_bias:
-            bias = self._p.bias(I=clip_logI)
+            bias = self._p.bias(I=log10_observations_num)
             noisy_observations += bias
 
         noisy_observations = 10 ** noisy_observations
-        # TODO we would have to re-normalize to total intensities for the inverse transform to work!
-        noisy_observations = self._la.clip(noisy_observations, self._cmin, self._cmax)
-
-        # recompute the partial MDVs (always on simplex!)
-        noisy_observations = self.compute_observations(noisy_observations, select=False)  # n_obs x batch x features
-        return noisy_observations
-
+        # THESE ARE THE OBSERVED INTENSITIES RESPECTING THE CLIP!
+        noisy_observations = self._la.clip(noisy_observations, self._cmin, None)
+        return self.compute_observations(noisy_observations, select=False)  # batch x n_obs x features
 
 
 class BoundaryObservationModel(object):
@@ -1092,8 +1080,23 @@ if __name__ == "__main__":
     model, kwargs = spiro(which_measurements='lcms', build_simulator=True, L_12_omega=1.0)
     annotation_df = kwargs['annotation_df']
     fluxes = kwargs['fluxes']
+    substrate_df = kwargs['substrate_df']
+    model.set_input_labelling(input_labelling=substrate_df.iloc[1])
+
+    # observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
+    # com = ClassicalObservationModel(model, kwargs['annotation_df'])
+
     observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
-    com = ClassicalObservationModel(model, kwargs['annotation_df'])
+    total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
+    lcms = LCMS_ObservationModel(model, annotation_df, total_intensities, transformation='ilr')
+    model.set_fluxes(fluxes)
+    mdv = model.cascade()
+    obs = lcms(mdv, pandalize=True)
+    aa = pd.DataFrame(lcms._transformation.inv(obs.values), columns=lcms._observation_df.index)
+    # print(aa)
+    obs = lcms(mdv, n_obs=0, pandalize=True)
+    aa = pd.DataFrame(lcms._transformation.inv(obs.values), columns=lcms._observation_df.index)
+    # print(aa)
 
 
 

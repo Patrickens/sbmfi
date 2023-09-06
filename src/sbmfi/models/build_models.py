@@ -1912,6 +1912,35 @@ def _parse_anton_model():
     return anton_model
 
 
+def _correct_base_bayes_lcms(basebayes, clip_min=750.0, min_intensity_factor=500.0/750.0):
+    measurements = basebayes.simulate_true_data(n_obs=1, pandalize=True).iloc[[0]]
+    # these are slightly clipped intensities!
+    partial_mdvs = basebayes.to_partial_mdvs(measurements, normalize=False, pandalize=True).iloc[[0]]
+
+    corrected_annot_dfs = {}
+    for labelling_id, part_mdv in partial_mdvs.T.groupby(level=0):
+        if labelling_id == 'BOM':
+            continue
+        obmod = basebayes._obmods[labelling_id]
+        total_intensities = basebayes._la.tonp(obmod._scaling)
+        intensities = (part_mdv.T * total_intensities).T
+        measurable = part_mdv.loc[(intensities > min_intensity_factor * clip_min).values].droplevel(0)
+        multiple_signals = measurable.index.str.rsplit('+', n=1, expand=True).to_frame(name=['met_id', 'nC13'])
+        measurable = measurable.loc[multiple_signals['met_id'].duplicated(keep=False).values]
+        obs_df = obmod.observation_df.loc[measurable.index]
+        corrected_annot_dfs[labelling_id] = obmod._annotation_df.loc[obs_df['annot_df_idx']].reset_index(drop=True)
+
+    obsmods = LCMS_ObservationModel.build_models(
+        basebayes._model,
+        corrected_annot_dfs,
+        total_intensities=obmod.scaling,
+        clip_min=clip_min,  # now we create the real observation models!
+    )
+    corrected_basebayes = _BaseBayes(basebayes._model, basebayes._substrate_df, obsmods, basebayes._prior, basebayes._bom)
+    corrected_basebayes.set_true_theta(basebayes.true_theta)
+    return corrected_basebayes
+
+
 def build_e_coli_anton_glc(
         backend='numpy',
         auto_diff=False,
@@ -2008,26 +2037,7 @@ def build_e_coli_anton_glc(
         if which_measurements == 'anton':
             measurements = measurements.loc[basebayes.data_id]
         elif which_measurements == 'tomek':
-            measurements = basebayes.simulate_true_data(n_obs=1, pandalize=True).iloc[[0]]
-            intensities = basebayes.to_partial_mdvs(measurements, normalize=False, pandalize=True).iloc[[0]]  # these are slightly clipped intensities!
-            corrected_annot_dfs = {}
-            for labelling_id, df in intensities.T.groupby(level=0):
-                if labelling_id == 'BOM':
-                    continue
-                measurable = df.loc[(df > 300.0).values].droplevel(0)
-                multiple_signals = measurable.index.str.split('+', expand=True).to_frame(name=['met_id', 'nC13'])
-                measurable = measurable.loc[multiple_signals['met_id'].duplicated(keep=False).values]
-                annot_df = annotation_dfs[labelling_id]
-                obs_df = basebayes._obmods[labelling_id].observation_df.loc[measurable.index]
-                corrected_annot_dfs[labelling_id] = annot_df.loc[obs_df['annot_df_idx']].reset_index(drop=True)
-            obsmods = LCMS_ObservationModel.build_models(
-                model,
-                corrected_annot_dfs,
-                total_intensities=total_intensities,
-                clip_min=750.0,  # now we create the real observation models!
-            )
-            basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
-            basebayes.set_true_theta(theta.iloc[0])
+            basebayes = _correct_base_bayes_lcms(basebayes)
             measurements = basebayes.simulate_true_data(n_obs=1, pandalize=True).iloc[[0]]
 
             # intensities = intensities.loc[intensities > fobmod._cmin * 0.6]
@@ -2244,5 +2254,5 @@ if __name__ == "__main__":
     # from optlang.gurobi_interface import
     from cobra.flux_analysis import flux_variability_analysis
 
-    model, kwargs = build_e_coli_anton_glc(build_simulator=True)
+    model, kwargs = build_e_coli_anton_glc(backend='torch', build_simulator=True, which_measurements='tomek')
 
