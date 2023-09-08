@@ -44,7 +44,7 @@ class PlotMonster(object):
             hv_backend='matplotlib',
     ):
         hv.extension(hv_backend)
-        self._hvb = hv_backend
+        self._hvb = hv_backend == 'matplotlib'
         self._pol = polytope
         self._data = inference_data
 
@@ -131,14 +131,19 @@ class PlotMonster(object):
             bandwidth=None,
             color=None,
             muted=False,
-            alpha=0.1,
+            alpha=0.3,
             muted_alpha=0.07,
+            show_legend=True,
             **opts
     ):
-        opts = {**self._size_opts(), **opts}
-        return hv.Distribution(to_plot, kdims=[var_id], label=label).opts(
-            show_grid=show_grid, bandwidth=bandwidth, color=color, muted=muted, alpha=alpha, muted_alpha=muted_alpha, **opts
-        )
+        kwargs = locals()
+        kwargs.pop('opts')
+        kwargs = {k: v for i, (k, v) in enumerate(kwargs.items()) if i > 3}
+        kwargs = {**kwargs, **self._size_opts(), **opts}
+        if self._hvb:
+            kwargs.pop('muted', None)
+            kwargs.pop('muted_alpha', None)
+        return hv.Distribution(to_plot, kdims=[var_id], label=label).opts(**kwargs)
 
     def _get_chain(self, *args, chain_idx=0, group='posterior'):
         var = self._group_var_map[group]
@@ -146,8 +151,8 @@ class PlotMonster(object):
 
     def _size_opts(self, width=500, height=400):
         kwargs = dict(height=height, width=width,)
-        if self._hvb == 'matplotlib':
-            kwargs = dict(height=height * self._px, width=width * self._px,)
+        if self._hvb:
+            kwargs = dict(fig_inches=(height * self._px, width * self._px),)
         return kwargs
 
     def density_plot(
@@ -168,11 +173,13 @@ class PlotMonster(object):
         if include_fva and (group in ['posterior', 'prior']):
             fva_min, fva_max = self._axes_range(var_id, return_dimension=False, tol=0)
             opts = dict(color='#000000', line_dash='dashed')
+            if self._hvb:
+                opts['linestyle'] = opts.pop('line_dash')
             plots.extend([
                 hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
             ])
 
-        return hv.Overlay(plots).opts(xrotation=90, show_grid=True, fontsize=self._FONTSIZES, **self._size_opts())
+        return hv.Overlay(plots).opts(xrotation=90, show_grid=True, fontsize=self._FONTSIZES, show_legend=True, **self._size_opts())
 
     def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None, color='#ebb821'):
         xax = self._axes_range(var1_id)
@@ -257,7 +264,10 @@ class PlotMonster(object):
             label = what_point
         if var2_id is None:
             data = to_plot.loc[:, var1_id].values
-            opts = dict(color=self._colors[what_point], line_dash='dashed', xrotation=90, line_width=2.5)
+            opts = dict(color=self._colors[what_point], line_dash='dashed', xrotation=90, line_width=2.5, show_legend=True)
+            if self._hvb:
+                opts['linewidth'] = opts.pop('line_width')
+                opts['linestyle'] = opts.pop('line_dash')
             return hv.VLine(data).opts(**opts) * hv.Spikes(data, label=label).opts(**opts)
         return hv.Points(to_plot.loc[:, [var1_id, var2_id]], kdims=[xax, yax], label=what_point).opts(
             color=self._colors[what_point], size=7, fontsize=self._FONTSIZES
@@ -375,7 +385,6 @@ class SMC_PLOT(PlotMonster):
         return hv.Overlay(plots).opts(legend_position='right', fontsize=self._FONTSIZES, **self._size_opts(width=600), )
 
 
-
 def speed_plot():
     pickle.dump(model._fcm._sampler.basis_polytope, open('pol.p', 'wb'))
     pol = pickle.load(open('pol.p', 'rb'))
@@ -418,9 +427,21 @@ def speed_plot():
     # show(hv.render(d))
 
 
-if __name__ == "__main__":
-    import pickle, os
+def _load_data(hv_backend = 'matplotlib'):
+    v_rep = pd.read_excel(r"C:\python_projects\sbmfi\v_rep.xlsx", index_col=0)
+    pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
 
+    mcmc_anton = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod_wprior.nc")
+    pmcmc_anton = MCMC_PLOT(pol, mcmc_anton, v_rep, hv_backend)
+
+    mcmc_tomek = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_tomek_obsmod_CORR.nc")
+    pmcmc_tomek = MCMC_PLOT(pol, mcmc_tomek, v_rep, hv_backend)
+
+    smc_tomek = az.from_netcdf(r"C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_CORR_winv.nc")
+    psmc_tomek = SMC_PLOT(pol, smc_tomek, v_rep, hv_backend)
+    return pmcmc_anton, pmcmc_tomek, psmc_tomek
+
+def MARGINAL_PLOT():
     variables = ['B_svd0', 'B_svd1', 'B_svd2', 'B_svd3', 'B_svd4', 'B_svd5', 'B_svd6',
                  'B_svd7', 'B_svd8', 'B_svd9', 'PGI_xch', 'FBA_xch', 'TPI_xch',
                  'GAPD_xch', 'PGK_xch', 'PGM_xch', 'ENO_xch', 'RPE_xch', 'RPI_xch',
@@ -428,29 +449,11 @@ if __name__ == "__main__":
                  'ACONTa_xch', 'ACONTb_xch', 'ICDHyr_xch', 'SUCOAS_xch', 'SUCDi_xch',
                  'FUM_xch', 'MDH_xch', 'PTAr_xch', 'ACKr_xch', 'GHMT2r_xch', 'GLYCL_xch']
 
-    hv_backend = 'bokeh'
-    v_rep = pd.read_excel(r"C:\python_projects\sbmfi\v_rep.xlsx", index_col=0)
-    pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
+    pmcmc_anton, pmcmc_tomek, psmc_tomek = _load_data()
 
-    smc_data = az.from_netcdf(r"C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_CORR.nc")
-    # pm = SMC_PLOT(pol, smc_data, v_rep, hv_backend)
-    # plots = []
-    # for i in range(4):
-    #     plots.append(pm.plot_evolution(variables[i]))
-    #
-    # plot = hv.Layout(plots).cols(3)
-
+    maxI = 10
     layout = []
-    mcmc_anton = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod_wprior.nc")
-    pmcmc_anton = MCMC_PLOT(pol, mcmc_anton, v_rep, hv_backend)
-
-    mcmc_tomek = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_tomek_obsmod_CORR.nc")
-    psmc_tomek = MCMC_PLOT(pol, mcmc_tomek, v_rep, hv_backend)
-
-    smc_tomek = az.from_netcdf(r"C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_CORR.nc")
-    psmc_tomek = SMC_PLOT(pol, smc_tomek, v_rep, hv_backend)
-
-    for i in range(10):
+    for i in range(maxI):
         varid = variables[i]
 
         dens_anton = pmcmc_anton.density_plot(var_id=varid)
@@ -458,13 +461,14 @@ if __name__ == "__main__":
         dens.opts(color='#ffa500')
         dens_anton.data[('Distribution', 'Posterior')] = dens.relabel('Antoniewicz MCMC')
 
-        dens_mcmc_tomek = psmc_tomek.density_plot(var_id=varid)
+        dens_mcmc_tomek = pmcmc_tomek.density_plot(var_id=varid)
         dens = dens_mcmc_tomek.data[('Distribution', 'Posterior')]
         dens.opts(color='#b55ef1')
         dens_mcmc_tomek.data[('Distribution', 'Posterior')] = dens.relabel('LCMS MCMC')
 
         to_plot = psmc_tomek._get_chain(varid, chain_idx=-1)
-        dens_smc_tomek = psmc_tomek._plot_distribution(to_plot, var_id=varid, label='LCMS SMC', color=psmc_tomek._colors['posterior'])
+        dens_smc_tomek = psmc_tomek._plot_distribution(to_plot, var_id=varid, label='LCMS SMC',
+                                                       color=psmc_tomek._colors['posterior'])
 
         prior_dens = psmc_tomek.density_plot(var_id=varid, group='prior')
 
@@ -473,9 +477,35 @@ if __name__ == "__main__":
         plot = (prior_dens * dens_anton * dens_mcmc_tomek * dens_smc_tomek * true_plot).opts(
             legend_position='right', **psmc_tomek._size_opts(width=600), fontsize=PlotMonster._FONTSIZES
         )
+        if i != maxI - 1:
+            plot.opts(show_legend=False)
         layout.append(plot)
 
-    plot = hv.Layout(layout).cols(2)
+    plot = hv.Layout(layout).cols(2).opts(hspace=0.1, vspace=0.2, fig_size=150)
+    hv.save(plot, 'naks.png', fmt='png', dpi=400)
 
-    output_file('test2.html')
-    show(hv.render(plot))
+
+def PPC_PLOT():
+
+    pmcmc_anton, pmcmc_tomek, psmc_tomek = _load_data()
+
+    anton_ids = pd.Series(pmcmc_anton._data.posterior_predictive.data_id.values)
+    tomek_ids = pd.Series(pmcmc_tomek._data.posterior_predictive.data_id.values)
+    anton_ids = anton_ids.str.replace('_{M-}', '', regex=False)
+    shared = anton_ids.loc[anton_ids.isin(tomek_ids)].values
+    print(shared)
+    varid = shared[1]
+    print(varid)
+
+    plot = pmcmc_anton.point_plot(varid, what_var='data')
+
+    hv.save(plot, 'noks.png', fmt='png', dpi=400)
+
+
+
+
+
+if __name__ == "__main__":
+    import pickle, os
+
+    PPC_PLOT()

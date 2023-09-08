@@ -475,6 +475,10 @@ class _BaseBayes(_BaseSimulator):
 
 
 class MCMC(_BaseBayes):
+
+    def accept_reject(self):
+        pass
+
     def run(
             self,
             initial_points=None,

@@ -10,9 +10,9 @@ from cobra import Reaction, Model
 import functools
 from sympy import nsimplify, Matrix
 from sympy.core.numbers import One
-import pypoman
+# import pypoman
 import cvxpy as cp
-import cdd
+# import cdd
 
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
     _rev_reactions_rex, _xch_reactions_rex
