@@ -328,16 +328,21 @@ class _BaseBayes(_BaseSimulator):
             line_variance = self._la.sum(((directions @ line_variance) * directions), -1)
         return alpha_min, alpha_max, line_variance
 
+    def choose_direction(self):
+        pass
+
     def perturb_particles(
             self,
             theta,
             i,
             batch_shape,
             n_cdf=5,
-            line_kernel='uniform',
-            line_variance=2.0,
-            xch_kernel='gauss',
+            chord_proposal='uniform',
+            chord_variance=2.0,
+            xch_proposal='gauss',
             xch_variance=0.4,
+            return_alphas=True,
+            return_prop_log_probs=True,
     ):
         # TODO implement random coordinate instead of random direction
         # given x, the next point in the chain is x+alpha*r
@@ -362,10 +367,15 @@ class _BaseBayes(_BaseSimulator):
         pol_dist = self._la.transax(self._sampler._h - self._sampler._G @ theta[..., :self._K].T)
         pol_dist[pol_dist < 0.0] = 0.0
         allpha = pol_dist / A_dist
-        alpha_min, alpha_max, line_variance = self._format_line_kernel_kwargs(allpha, line_variance, sphere_sample)
+        alpha_min, alpha_max, chord_variance = self._format_line_kernel_kwargs(allpha, chord_variance, sphere_sample)
         line_alphas = self._la.sample_bounded_distribution(
-            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=line_kernel, std=line_variance
+            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal, std=chord_variance,
+            return_log_probs=return_prop_log_probs
         )
+
+        if return_prop_log_probs:
+            line_alphas, prop_log_probs = line_alphas
+
         net_basis_points = theta[..., :self._K] + line_alphas[..., None] * sphere_sample
 
         xch_fluxes = None
@@ -376,12 +386,22 @@ class _BaseBayes(_BaseSimulator):
                 current_xch = self._fcm._sigmoid_xch(current_xch)
             xch_fluxes = self._la.sample_bounded_distribution(
                 shape=net_basis_points.shape[:-1], lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                mu=current_xch, which=xch_kernel, std=xch_variance
+                mu=current_xch, which=xch_proposal, std=xch_variance, return_log_probs=return_prop_log_probs,
             )
+            if return_prop_log_probs:
+                xch_fluxes, xch_prop_log_probs = xch_fluxes
+                xch_prop_log_probs = self._la.sum(xch_prop_log_probs, -1)  # sum xch flux proposals
+                prop_log_probs += xch_prop_log_probs
 
-        return self._fcm.append_xch_flux_samples(
+        perturbed_particles = self._fcm.append_xch_flux_samples(
             net_basis_samples=net_basis_points, xch_fluxes=xch_fluxes, return_type='theta'
         )
+        result = dict(perturbed_particles=perturbed_particles)
+        if return_alphas:
+            result['line_alphas'] = line_alphas
+        if return_prop_log_probs:
+            result['prop_log_probs'] = prop_log_probs
+        return result
 
     def quantile_indices(self, distances, quantiles=0.8):
         dist_cumsum = self._la.cumsum(distances, 0)
@@ -473,11 +493,35 @@ class _BaseBayes(_BaseSimulator):
                 print('returning result instead of adding to inference data, since it is not clear where theta originates')
             return result
 
+    def compute_proposal_prob(self):
+        pass
+
 
 class MCMC(_BaseBayes):
 
-    def accept_reject(self):
-        pass
+    def _accept_reject(self, potentials, samples, line_alphas, line_kernel, line_variance, xch_kernel, xch_variance):
+        # based on: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf
+        # other notation: https://ntnuopen.ntnu.no/ntnu-xmlui/bitstream/handle/11250/258340/348197_FULLTEXT01.pdf?sequence=2&isAllowed=y
+        if (line_kernel == 'uniform') & (xch_kernel == 'uniform'):
+            # TODO only potentials, since all the all the transition probabilities are equal
+            return # TODO sample categorical according to potentials
+        std_diff = (line_alphas[:, None, ...] - line_alphas[None, ...]) / line_variance # evaluate transition probability on by diff on standard normal!
+        std_log_prob = self._la.eval_std_normal(std_diff)
+        P = std_log_prob + potentials
+        print(std_diff)
+        print(std_log_prob.shape, potentials.shape)
+        print(potentials)
+        print(std_log_prob)
+        print(P)
+        if (xch_kernel == 'normal') and (self._n_rev > 0):
+            xch_theta = samples[..., self._K:]
+            P_hat += self._la.evaluate_bounded_distribution(
+                x=xch_theta,
+                lo=self._fcm._rho_bounds[:, 0],
+                hi=self._fcm._rho_bounds[:, 1],
+                mu=xch_theta, std=xch_variance, which=xch_kernel, log=True,
+            )
+
 
     def run(
             self,
@@ -485,13 +529,12 @@ class MCMC(_BaseBayes):
             n: int = 50,
             n_burn=50,
             thinning_factor=3,
-            n_chains: int = 9,
+            n_chains: int = 4,
             potentype='exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
             n_cdf=6,
-            algorithm='mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
-            line_kernel='gauss',
-            line_variance=2.0,
-            xch_kernel='gauss',
+            chord_proposal='gauss',
+            chord_variance=1.0,
+            xch_proposal='gauss',
             xch_variance=0.4,
             return_data=True,
             evaluate_prior=False,
@@ -505,13 +548,14 @@ class MCMC(_BaseBayes):
         if self._fcm._sampler.basis_coordinates == 'transformed':
             raise NotImplementedError('transform the chains to transformed')
 
-        log_rnds = False
-        if algorithm == 'mh':
-            n_cdf = 1  # means we only evaluate the current and proposed parameters
-            accept_idx = self._la.get_tensor(shape=(n_chains, ), dtype=np.int64)
-            log_rnds = True
-        elif algorithm not in ['cdf', 'peskun_nd']:
-            raise ValueError
+        # log_rnds = False
+        # accept_idx = self._la.get_tensor(shape=(n_chains,), dtype=np.int64)
+        # if algorithm == 'mh':
+        #     n_cdf = 1  # means we only evaluate the current and proposed parameters
+        #
+        #     log_rnds = True
+        # elif algorithm not in ['cdf', 'peskun_nd']:
+        #     raise ValueError
 
         batch_size = n_chains * n_cdf
         if (self._la._batch_size != batch_size) or not self._model._is_built:
@@ -520,7 +564,7 @@ class MCMC(_BaseBayes):
             self._model.build_simulator(**self._fcm.fcm_kwargs)
 
         chains = self._la.get_tensor(shape=(n, n_chains, len(self._fcm.theta_id)))
-        potentials = self._la.get_tensor(shape=(n, n_chains))
+        post_probs = self._la.get_tensor(shape=(n, n_chains))
         accept_rate = self._la.get_tensor(shape=(n_chains,), dtype=np.int64)
 
         if return_data:
@@ -528,11 +572,11 @@ class MCMC(_BaseBayes):
 
         if initial_points is None:
             net_basis_points = self._sampler.get_initial_points(num_points=n_chains)
-            theta = self._fcm.append_xch_flux_samples(net_basis_samples=net_basis_points, return_type='theta')
+            y = self._fcm.append_xch_flux_samples(net_basis_samples=net_basis_points, return_type='theta')
         else:
-            theta = initial_points
+            y = initial_points
 
-        theta = self._la.tile(theta, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
+        y = self._la.tile(y, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
 
         self._set_potential(potentype, **dict(return_data=return_data, evaluate_prior=evaluate_prior, **potential_kwargs))
         if (self._potentype == 'approx'):
@@ -545,72 +589,85 @@ class MCMC(_BaseBayes):
                 )
             raise NotImplementedError('this is complicated, since we need to weight samples by the prior somehow')
 
-        line_thetas = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self._fcm.theta_id)))
-        line_pot   = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
-        pot = self.potential(theta)
+        chord_ys = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self._fcm.theta_id)))
+        chord_alphas = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
+        chord_post_prob = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
+        chord_prop_prob = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
+        post_prob = self.potential(y)
+
         if return_data:
-            line_data = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)))
-            pot, data = pot
-        line_pot[0] = pot[:n_chains]  # ordering of the samples from the PDF does not matter for inverse sampling
+            chord_data = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)))
+            post_prob, data = post_prob
+            chord_data[0] = data[:n_chains]
+
+        chord_post_prob[0] = post_prob[:n_chains]  # ordering of the samples from the PDF does not matter for inverse sampling
         theta_selector = self._la.arange(n_chains)
 
-        theta = theta[: n_chains, :]
+        y = y[: n_chains, :]
 
         n_tot = n_burn + n * thinning_factor
         biatch = min(5000, n_tot)
         perturb_kwargs = dict(
             batch_shape=(biatch, n_chains),
             n_cdf=n_cdf,
-            line_kernel=line_kernel,
-            line_variance=line_variance,
-            xch_kernel=xch_kernel,
-            xch_variance=xch_variance
+            chord_proposal=chord_proposal,
+            chord_variance=chord_variance,
+            xch_proposal=xch_proposal,
+            xch_variance=xch_variance,
+            return_prop_log_probs=True,
         )
-        # while i < n_tot:
-        for i in tqdm.trange(n_tot, ncols=100):
-            ii = i % biatch
-            if ii == 0:
-                self._rnds = self._la.randu((biatch, n_chains), dtype=self._sampler._G.dtype)
-                if log_rnds:
-                    self._rnds = self._la.log(self._rnds)
-            rnd = self._rnds[ii]
-
-            line_thetas[1:] = self.perturb_particles(theta, ii, **perturb_kwargs)
-
-            pot = self.potential(line_thetas[1:])
+        # for i in tqdm.trange(n_tot, ncols=100):
+        pbar = tqdm.tqdm(total=n_tot, ncols=100)
+        i = 0
+        while i < n_tot:
+            result = self.perturb_particles(y, i, **perturb_kwargs)
+            chord_ys[1:] = result['perturbed_particles']
+            post_prob = self.potential(chord_ys[1:])
+            if self.potentype == 'approx':
+                raise NotImplementedError('reject ABC proposals if all are too distant!')
 
             if return_data:
-                pot, data = pot
-                line_data[1:] = data
+                post_prob, data = post_prob
+                chord_data[1:] = data
 
-            line_pot[1:] = pot
+            chord_post_prob[1:] = post_prob
 
-            if algorithm == 'cdf':
-                max_line_pot = line_pot.max(0)
-                normalized = line_pot - max_line_pot[None, :]
-                probs = self._la.exp(normalized)  # TODO make sure this does not underflow!
-                accept_idx = self.quantile_indices(distances=probs, quantiles=rnd)
-            elif algorithm == 'peskun_nd':
-                # https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf
-                raise NotImplementedError
-            elif algorithm == 'mh':
-                accept_idx[:] = 0
-                log_mh_ratio = line_pot[1] - line_pot[0]
-                accept_idx[rnd <= log_mh_ratio] = 1  # rnd is already in log due to log_rnd=True
-            else:
-                raise ValueError
+            accept_idx = self._accept_reject(chord_post_prob, chord_ys, chord_alphas, chord_proposal, chord_variance, xch_proposal, xch_variance)
+            # if n_cdf == 0:
+            #     accept_idx[:] = 0
+            #     log_mh_ratio = line_pot[1] - line_pot[0]
+            #     accept_idx[rnd <= log_mh_ratio] = 1  # rnd is already in log due to log_rnd=True
+            # else:
+            #     pass
+            # if algorithm == 'cdf':
+            #     max_line_pot = line_pot.max(0)
+            #     normalized = line_pot - max_line_pot[None, :]
+            #     probs = self._la.exp(normalized)  # TODO make sure this does not underflow!
+            #     accept_idx = self.quantile_indices(distances=probs, quantiles=rnd)
+            # elif algorithm == 'peskun_nd':
+            #     # https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf
+            #     raise NotImplementedError
+            # elif algorithm == 'mh':
+            #     accept_idx[:] = 0
+            #     log_mh_ratio = line_pot[1] - line_pot[0]
+            #     accept_idx[rnd <= log_mh_ratio] = 1  # rnd is already in log due to log_rnd=True
+            # else:
+            #     raise ValueError
 
-            accepted_probs = line_pot[accept_idx, theta_selector]
-            line_pot[0] = accepted_probs  # set the log-probs of the current sample
-            theta = line_thetas[accept_idx, theta_selector]
-            line_thetas[0, ...] = theta  # set the log-probs of the current sample
+            accepted_probs = chord_post_prob[accept_idx, theta_selector]
+            chord_post_prob[0] = accepted_probs  # set the log-probs of the current sample
+            y = chord_ys[accept_idx, theta_selector]
+            chord_ys[0] = y  # set the log-probs of the current sample
+            alpha = chord_alphas[accept_idx, theta_selector]
+            chord_alphas[0] = alpha
             if return_data:
-                data = line_data[accept_idx, theta_selector]
-                line_data[0, ...] = data
+                data = chord_data[accept_idx, theta_selector]
+                chord_data[0] = data
+
             j = i - n_burn
 
             if j > 0:
-                if algorithm == 'cdf':
+                if n_cdf > 1:
                     accept_idx[accept_idx > 0] = 1
                 accept_rate += accept_idx
                 if (j > 0) and (j % 1000 == 0):
@@ -618,13 +675,16 @@ class MCMC(_BaseBayes):
                     if avg_rate < 0.05:
                         raise ValueError('average acceptance rate under 5%')
 
-
             if (j % thinning_factor == 0) and (j > -1):
                 k = j // thinning_factor
-                potentials[k] = accepted_probs
-                chains[k] = theta
+                post_probs[k] = accepted_probs
+                chains[k] = y
                 if return_data:
                     sim_data[k] = data
+
+            i += 1
+            pbar.update(1)
+        pbar.close()
 
         if not return_az:
             return chains
@@ -636,7 +696,6 @@ class MCMC(_BaseBayes):
             }
 
         attrs = {
-            'algorithm': f'mcmc: {algorithm}',
             'potentype': potentype,
             'evaluate_prior': str(evaluate_prior),
             'potential_kwargs': [(k, v if not isinstance(v, bool) else str(v)) for k, v in potential_kwargs.items()],
@@ -644,9 +703,9 @@ class MCMC(_BaseBayes):
             'acceptance_rate': self._la.tonp(accept_rate) / j,
             'thinning_factor': thinning_factor,
             'n_cdf': n_cdf,
-            'line_kernel': line_kernel,
-            'line_variance': line_variance,
-            'xch_kernel': xch_kernel,
+            'line_kernel': chord_proposal,
+            'line_variance': chord_variance,
+            'xch_kernel': xch_proposal,
             'xch_variance': xch_variance,
         }
         if self.true_theta is not None:
@@ -665,7 +724,7 @@ class MCMC(_BaseBayes):
                 'observed_data': self.measurements.values
             },
             sample_stats={
-                'lp': potentials.T
+                'lp': post_probs.T
             },
             posterior_predictive=posterior_predictive,
             attrs=attrs
@@ -861,9 +920,9 @@ class SMC(_BaseBayes):
                 i=0,
                 batch_shape=(1, population_batch),
                 n_cdf=n_cdf,
-                line_kernel=line_kernel,
-                line_variance=line_variance,
-                xch_kernel=xch_kernel,
+                chord_proposal=line_kernel,
+                chord_variance=line_variance,
+                xch_proposal=xch_kernel,
                 xch_variance=xch_variance,
             ).squeeze(0)
 
@@ -1203,118 +1262,117 @@ if __name__ == "__main__":
     pd.set_option('display.width', 1000)
     np.set_printoptions(linewidth=500)
 
-    model, kwargs = build_e_coli_anton_glc(
-        backend='torch',
-        auto_diff=False,
-        build_simulator=True,
-        ratios=False,
-        batch_size=25,
-        which_measurements='tomek',
-        which_labellings=['20% [U]Glc', '[1]Glc'],
-        measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-        seed=1,
-    )
-
-    sdf = kwargs['substrate_df']
-    dss = kwargs['basebayes']
-    simm = dss._obmods
-    bom = dss._bom
-    up = UniFluxPrior(model, cache_size=2000)
-
-    smc = SMC(
-        model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom,
-        prior=up,
-        num_processes=0,
-    )
-    smc.set_measurement(x_meas=kwargs['measurements'])
-    smc.set_true_theta(theta=kwargs['theta'])
-
-    # a = False
-    # if a:
-    #     which = 'lcms'
-    #     # which = 'tomek'
-    #     ding = SMC
-    #     run_kwargs = dict(
-    #         n_smc_steps=3,
-    #         n=50,
-    #         n_obs=5,
-    #         population_batch=7,
-    #         n0_multiplier=2,
-    #         distance_based_decay=True,
-    #         epsilon_decay=0.8,
-    #         kernel_variance_scale=1.0,
-    #         evaluate_prior=False,
-    #         potentype='approx',
-    #         return_data=True,
-    #         potential_kwargs={},
-    #         metric='rmse',
-    #         line_kernel='gauss',
-    #         xch_kernel='gauss',
-    #         xch_variance=0.4,
-    #         return_all_populations=False,
-    #     )
-    # else:
-    #     which = 'com'
-    #     # which = 'anton'
-    #     ding = MCMC
-    #     run_kwargs = dict(
-    #         n= 20,
-    #         n_burn = 10,
-    #         thinning_factor = 2,
-    #         n_chains = 3,
-    #         potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
-    #         n_cdf = 6,
-    #         algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
-    #         line_kernel = 'gauss',
-    #         line_variance = 2.0,
-    #         xch_kernel = 'gauss',
-    #         xch_variance = 0.4,
-    #         return_data = True,
-    #         evaluate_prior = False,
-    #         potential_kwargs = {},
-    #         return_az = True,
-    #     )
-    #
-    #
-    # model, kwargs = spiro(
-    #     backend='numpy',
-    #     batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
-    #     v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3, L_12_omega=1.0,
-    #     v5_reversible=True
+    # model, kwargs = build_e_coli_anton_glc(
+    #     backend='torch',
+    #     auto_diff=False,
+    #     build_simulator=True,
+    #     ratios=False,
+    #     batch_size=25,
+    #     which_measurements='tomek',
+    #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    #     seed=1,
     # )
-    # # model, kwargs = build_e_coli_anton_glc(
-    # #     backend='torch',
-    # #     auto_diff=False,
-    # #     build_simulator=True,
-    # #     ratios=False,
-    # #     batch_size=10,
-    # #     which_measurements=which,
-    # #     which_labellings=['20% [U]Glc', '[1]Glc'],
-    # #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    # #     seed=1,
-    # # )
+    #
     # sdf = kwargs['substrate_df']
     # dss = kwargs['basebayes']
     # simm = dss._obmods
     # bom = dss._bom
     # up = UniFluxPrior(model, cache_size=2000)
-    # # from botorch.utils.sampling import sample_polytope
     #
-    # mcmc = ding(
+    # smc = SMC(
     #     model=model,
     #     substrate_df=sdf,
     #     mdv_observation_models=simm,
     #     boundary_observation_model=bom,
     #     prior=up,
-    #     # num_processes=0,
+    #     num_processes=0,
     # )
-    # mcmc.set_measurement(x_meas=kwargs['measurements'])
-    # mcmc.set_true_theta(theta=kwargs['theta'])
-    #
-    # post = mcmc.run(**run_kwargs)
+    # smc.set_measurement(x_meas=kwargs['measurements'])
+    # smc.set_true_theta(theta=kwargs['theta'])
+
+    a = False
+    if a:
+        which = 'lcms'
+        # which = 'tomek'
+        ding = SMC
+        run_kwargs = dict(
+            n_smc_steps=3,
+            n=50,
+            n_obs=5,
+            population_batch=7,
+            n0_multiplier=2,
+            distance_based_decay=True,
+            epsilon_decay=0.8,
+            kernel_variance_scale=1.0,
+            evaluate_prior=False,
+            potentype='approx',
+            return_data=True,
+            potential_kwargs={},
+            metric='rmse',
+            line_kernel='gauss',
+            xch_kernel='gauss',
+            xch_variance=0.4,
+            return_all_populations=False,
+        )
+    else:
+        which = 'com'
+        # which = 'anton'
+        ding = MCMC
+        run_kwargs = dict(
+            n= 20,
+            n_burn = 10,
+            thinning_factor = 2,
+            n_chains = 3,
+            potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
+            n_cdf = 1,
+            # algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
+            chord_proposal = 'gauss',
+            chord_variance = 1.0,
+            xch_proposal = 'gauss',
+            xch_variance = 0.4,
+            return_data = True,
+            evaluate_prior = False,
+            potential_kwargs = {},
+            return_az = True,
+        )
+
+
+    model, kwargs = spiro(
+        backend='numpy',
+        batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
+        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3, L_12_omega=1.0,
+        v5_reversible=True
+    )
+    # model, kwargs = build_e_coli_anton_glc(
+    #     backend='torch',
+    #     auto_diff=False,
+    #     build_simulator=True,
+    #     ratios=False,
+    #     batch_size=10,
+    #     which_measurements=which,
+    #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    #     seed=1,
+    # )
+    sdf = kwargs['substrate_df']
+    dss = kwargs['basebayes']
+    simm = dss._obmods
+    bom = dss._bom
+    up = UniFluxPrior(model, cache_size=2000)
+    # from botorch.utils.sampling import sample_polytope
+
+    mcmc = ding(
+        model=model,
+        substrate_df=sdf,
+        mdv_observation_models=simm,
+        boundary_observation_model=bom,
+        prior=up,
+    )
+    mcmc.set_measurement(x_meas=kwargs['measurements'])
+    mcmc.set_true_theta(theta=kwargs['theta'])
+
+    post = mcmc.run(**run_kwargs)
     # az.to_netcdf(post, 'MCMC_e_coli_glc_anton_obsmod.nc')
     # print(prof2.print_stats())
 

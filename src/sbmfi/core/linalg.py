@@ -88,7 +88,8 @@ def torch_auto_jacobian(inputs, outputs, create_graph=False, squeeze=False):
         return jac.squeeze(0)
     return jac
 
-_ONEBYSQRT2PI = 1.0 / math.sqrt(2 * math.pi)
+_SQRT2PI = math.sqrt(2 * math.pi)
+_ONEBYSQRT2PI = 1.0 / _SQRT2PI
 _SQRT2 = math.sqrt(2)
 
 
@@ -254,6 +255,14 @@ class NumpyBackend(object):
 
     def choice(self, n, tot, replace=False):
         return self._rng.choice(tot, n, replace=replace)
+
+    # def categorical(self, sample_shape, probs=None, logits=None):
+    #     if logits is not None:
+    #         if probs is not None:
+    #             raise ValueError
+    #         probs = np.exp(logits)
+    #     probs = probs / probs.sum(-1) # make sure sums to 1
+    #     return self._rng.multinomial(n=1, pvals=probs, size=sample_shape)
 
 
 class FactorExTorchBackend():
@@ -499,11 +508,20 @@ class TorchBackend(object):
         probs = torch.ones(tot) / tot
         return self.multinomial(n, probs, replace=replace)
 
+    # def categorical(self, sample_shape, probs=None, logits=None):
+    #     return torch.distributions.Categorical(probs, logits).sample(sample_shape)
+
 
 class CupyBackend(object):
     # TODO: make a cupy backend: https://cupy.dev/
     pass
 
+_2PI = 2 * math.pi
+_SQRT2PI = math.sqrt(_2PI)
+_ONEBYSQRT2PI = 1.0 / _SQRT2PI
+_SQRT2 = math.sqrt(2)
+_1_SQRT2 = 1.0 / _SQRT2
+_LN2PI_2 = math.log(_2PI) / 2.0
 
 class LinAlg(object):
 
@@ -683,25 +701,89 @@ class LinAlg(object):
     def choice(self, n, tot, replace=False):
         return self._BACKEND.choice(n, tot, replace)
 
+    def categorical(self, sample_shape, probs=None, logits=None):
+        return self._BACKEND.categorical(sample_shape, probs, logits)
+
     def sample_hypersphere(self, shape):
         rnd = self.randu(shape)
         return rnd / self.norm(rnd, 2, -1, True)
 
-    def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='uniform'):
+    # https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
+    def _compute_xi(self, A, mu=0.0, std=1.0):
+        return (A - mu) / std
+
+    def norm_pdf(self, A, mu=0.0, std=1.0):
+        xi = self._compute_xi(A, mu, std)
+        return _ONEBYSQRT2PI * 1.0 / std * self.exp(-xi**2 * 0.5)
+
+    def norm_log_pdf(self, A, mu=0.0, std=1.0):
+        xi = self._compute_xi(A, mu, std)
+        return -_LN2PI_2 - self.log(std) - xi**2 * 0.5
+
+    def norm_cdf(self, A, mu=0.0, std=1.0):
+        xi = self._compute_xi(A, mu, std)
+        return 0.5 + self.erf(xi * _1_SQRT2) * 0.5
+
+    def norm_inv_cdf(self, u, mu=0.0, std=1.0, return_log_probs=False):
+        samples = mu + std * _SQRT2 * self.erfinv(2 * u - 1.0)
+        if return_log_probs:
+            log_norm_pdf = self.norm_log_pdf(samples, mu, std)
+            return samples, log_norm_pdf
+        return samples
+
+    def trunc_norm_pdf(self, A, lo, hi, mu=0.0, std=1.0):
+        norm_pdf = self.norm_pdf(A, mu, std)
+        alpha = self.norm_cdf(lo, mu, std)
+        beta  = self.norm_cdf(hi, mu, std)
+        return norm_pdf / (beta - alpha)
+
+    def trunc_norm_log_pdf(self, A, lo, hi, mu=0.0, std=1.0):
+        log_norm_pdf = self.norm_log_pdf(A, mu, std)
+        alpha = self.norm_cdf(lo, mu, std)
+        beta = self.norm_cdf(hi, mu, std)
+        return log_norm_pdf - self.log(beta - alpha)
+
+    def trunc_norm_cdf(self, A, lo, hi, mu=0.0, std=1.0):
+        norm_cdf = self.norm_cdf(A, mu, std)
+        alpha = self.norm_cdf(lo, mu, std)
+        beta  = self.norm_cdf(hi, mu, std)
+        return (norm_cdf - alpha) / (beta - alpha)
+
+    def trunc_norm_inv_cdf(self, u, lo, hi, mu=0.0, std=1.0, return_log_probs=False):
+        alpha = self.norm_cdf(lo, mu, std)
+        beta  = self.norm_cdf(hi, mu, std)
+        diff  = beta - alpha
+        uu = alpha + u * (beta - alpha)
+        samples = self.norm_inv_cdf(uu, mu, std)
+        if return_log_probs:
+            log_norm_pdf = self.norm_log_pdf(samples, mu, std)
+            trunc_log_norm_pdf = log_norm_pdf - self.log(diff)
+            return samples, trunc_log_norm_pdf
+        return samples
+
+    def unif_inv_cdf(self, u, lo=0.0, hi=1.0, return_log_probs=False):
+        diff = hi - lo
+        samples = lo + u * diff
+        if return_log_probs:
+            log_1_diff = self.log(1.0 / diff)
+            log_probs = self.tile(log_1_diff, samples.shape[:-1])
+            return samples, log_probs
+        return samples
+
+    def sample_bounded_distribution(
+            self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='uniform', return_log_probs=False
+    ):
         if not (lo.shape == hi.shape):
-            raise ValueError
+            raise ValueError(f'lo.shape: {lo.shape}, hi.shape: {hi.shape}')
         u = self.randu(shape=(*shape, *lo.shape))
         if which == 'uniform':
-            return u * (hi - lo) + lo
+            return self.unif_inv_cdf(u, lo, hi, return_log_probs)
         elif which == 'gauss':
             # truncated multivariate normal sampling
             # publication: Efficient Sampling Methods for Truncated Multivariate
             #   Normal and Student-t Distributions Subject to Linear
             #   Inequality Constraints
-            # http://web.michaelchughes.com/research/sampling-from-truncated-normal
-            alpha = self.erf((lo - mu) / std)
-            beta = self.erf((hi - mu) / std)
-            return self.erfinv(alpha + u * (beta - alpha)) * std + mu
+            return self.trunc_norm_inv_cdf(u, lo, hi, mu, std, return_log_probs)
         else:
             raise ValueError
 
@@ -716,7 +798,8 @@ class LinAlg(object):
                 if not isinstance(mu, float):
                     outshape = (*outshape, *mu.shape[:-1])
                 outshape = (*outshape, 1)
-                result = self.prod(self.tile(result, outshape), -1, keepdims=False)
+                # result = self.prod(self.tile(result, outshape), -1, keepdims=False)  # TODO why do we prod?
+                result = self.tile(result, outshape)
         elif which == 'gauss':
             if x.shape != lo.shape:
                 if not isinstance(std, float):
@@ -762,15 +845,31 @@ class LinAlg(object):
     def tensormul_T(self, A, x, dim0=-2, dim1=-1):  # TODO add b argument that adds to x after multiplication?
         return self.transax(A @ self.transax(x, dim0=dim0, dim1=dim1), dim0=dim0, dim1=dim1)
 
+    def eval_std_normal(self, x):
+        return x ** 2 - _SQRT2PI
+
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
     l = LinAlg(backend='numpy')
-    replace=True
-    a = l.choice(10, 20, replace=replace)
-    l = LinAlg(backend='torch')
-    a = l.choice(10, 20, replace=replace)
 
+    n_dim = 1
+    lo = np.array([0.0, 0.5])[:n_dim]
+    hi = np.array([1.0, 1.0])[:n_dim]
+    mu = np.array([0.2, 0.6])[:n_dim]
+    shape = (2, )
+    # ding,u = l.sample_bounded_distribution(
+    #     shape=(6, ),
+    #     lo=lo,
+    #     hi=hi,
+    #     mu=mu,
+    #     which='gauss',
+    #     return_log_probs=True
+    # )
+    u = l.randu(shape=(*shape, *lo.shape))
+    dang = l.trunc_norm_inv_cdf(u, lo, hi, mu, std=0.1, return_log_probs=True)
+    # print(ding)
+    # print(dang)
 
 
     # ding = l.__dict__.keys()

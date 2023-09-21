@@ -689,7 +689,6 @@ class PolytopeSamplingModel(object):
         F_round, self._E, self._E_1, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
         self._F_round = LabellingPolytope.from_Polytope(F_round)
         self._basis_pol = self._F_round if basis_coordinates == 'rounded' else F_trans
-        # self._E_1 = pd.DataFrame(np.linalg.inv(E), index=E.index, columns=E.columns).T
         self._log_det_E = np.log(np.linalg.eig(self._E)[0]).sum()
         if basis_coordinates == 'transformed':
             self._basis_id = self._T_1.index

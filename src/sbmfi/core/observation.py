@@ -767,12 +767,22 @@ class TOF6546Alaa5minParameters(object):
         self._is_diagonal = is_diagonal
         self._has_bias = has_bias
 
-        self._popt_cvhi = [-1.15955235,  1.76738371]
-        self._popt_corr = [-0.12690790,  0.00185103,  0.04830099,  0.92988777, -0.08980002, -1.63842671]
+        self._popt_cv = {
+            'cv_0': 16.719278619482555,
+            'lambada': -2.0877441212691403,
+            'cv_o': 0.0031074197067964154,  # offset
+        }
+        self._popt_corr = {
+            'a': -0.14393031668998882,
+            'b': -0.14879596171381898,
+            'c': 0.24163561630186947,
+            'd': 0.43951441482203674,
+            'e': 0.199848985709391,
+            'f': -1.5323041071704333,
+        }
 
-
-    def _exp_decay(self, I, lambada, y0):
-        return self._la.exp(I * lambada) * y0
+    def _exp_decay(self, I, lambada, cv_0, cv_o):
+        return self._la.exp(I * lambada) * cv_0 + cv_o
 
     def _quadratic_surface(self, I_arr, a, b, c, d, e, f):
         x = I_arr[..., 0]
@@ -781,7 +791,7 @@ class TOF6546Alaa5minParameters(object):
 
     def CV(self, I):
         return self._la.clip(  # CLIP TO ONE ORDER OF MAGNITUDE!!
-            self._exp_decay(I, *self._popt_cvhi), None, 1.0
+            self._exp_decay(I, **self._popt_cv), None, 1.0
         )
 
     def std(self, I):
@@ -799,7 +809,7 @@ class TOF6546Alaa5minParameters(object):
         I_arr[..., 0][switch] = I_arr[..., 1][switch]
         I_arr[..., 1][switch] = memberberry
 
-        corr = self._quadratic_surface(I_arr, *self._popt_corr)
+        corr = self._quadratic_surface(I_arr, **self._popt_corr)
         corr[corr < 0.0] = 0.0
         return corr
 

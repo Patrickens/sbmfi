@@ -1,6 +1,5 @@
 import pandas as pd
-from sbmfi.fianalysis.util import hdf_opener_and_closer
-from sbmfi.core.util import _optlang_reverse_id_rex
+from sbmfi.core.util import _optlang_reverse_id_rex, hdf_opener_and_closer
 import lxml.etree as etree
 import numpy as np
 import re
@@ -14,6 +13,7 @@ from sympy import Matrix, matrix2numpy
 _long_str = printable.replace('"', '').replace('', '').replace('\n', '').replace('\t', '').replace('\n', '').replace(' ', '')
 
 emu_pos = lambda x: [i for i, c in enumerate(x) if c == '1']
+
 def parse_result_fml(fml):
     xmlns = '{http://www.13cflux.net/fwdsim}'
     tree = etree.parse(fml)
