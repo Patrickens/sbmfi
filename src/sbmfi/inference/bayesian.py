@@ -1,7 +1,7 @@
 from sbi.inference.abc.smcabc import SMCABC
 from sbi.inference.posteriors.base_posterior import NeuralPosterior
 from sbmfi.inference.simulator import _BaseSimulator, DataSetSim
-from sbmfi.inference.priors import _BasePrior, UniFluxPrior, _FluxPrior
+from sbmfi.inference.priors import _BasePrior, UniFluxPrior, _NetFluxPrior
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
 from sbmfi.core.model import LabellingModel
@@ -30,7 +30,7 @@ class _BaseBayes(_BaseSimulator):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _FluxPrior,
+            prior: _NetFluxPrior,
             boundary_observation_model: BoundaryObservationModel = None,
     ):
         super(_BaseBayes, self).__init__(model, substrate_df, mdv_observation_models, boundary_observation_model)
@@ -286,7 +286,7 @@ class _BaseBayes(_BaseSimulator):
             value,
             weights=None,
             samples_per_dim: int = 100,
-            kernel_variance_scale: float = 1.0,
+            kernel_std_scale: float = 1.0,
             prev_cov=True,
             exclude_xch=True,
     ):
@@ -305,14 +305,14 @@ class _BaseBayes(_BaseSimulator):
             # Make sure variance is nonsingular.
             # I'd rather have this crash out if the singular, means that the parameters are not independent
             #    or constrained to a single value
-            self._la.cholesky(kernel_variance_scale * population_cov)
-            return kernel_variance_scale * population_cov
+            self._la.cholesky(kernel_std_scale * population_cov)
+            return kernel_std_scale * population_cov
         else:
             # Toni et al. and Sisson et al. it comes from the parameter ranges.
             indices = self._la.multinomial(samples_per_dim * theta.shape[1], p=weights)
             samples = theta[indices]
             particle_ranges = self._la.max(samples, 0) - self._la.min(samples, 0)
-            return kernel_variance_scale * self._la.diag(particle_ranges)
+            return kernel_std_scale * self._la.diag(particle_ranges)
 
     def _format_line_kernel_kwargs(self, alpha, line_variance, directions):
         alpha_min = alpha
@@ -337,12 +337,11 @@ class _BaseBayes(_BaseSimulator):
             i,
             batch_shape,
             n_cdf=5,
-            chord_proposal='uniform',
-            chord_variance=2.0,
+            chord_proposal='unif',
+            chord_std=2.0,
             xch_proposal='gauss',
-            xch_variance=0.4,
+            xch_std=0.4,
             return_alphas=True,
-            return_prop_log_probs=True,
     ):
         # TODO implement random coordinate instead of random direction
         # given x, the next point in the chain is x+alpha*r
@@ -364,19 +363,16 @@ class _BaseBayes(_BaseSimulator):
         sphere_sample = self._sphere_samples[ii]
         A_dist = self._A_dist[ii]
 
-        pol_dist = self._la.transax(self._sampler._h - self._sampler._G @ theta[..., :self._K].T)
+        pol_dist = self._la.transax(self._sampler._h - self._sampler._G @ theta[..., :self._K].T)  # TODO
+        pol_dist = self._sampler._h - self._la.tensormul_T(self._sampler._G, theta[..., :self._K])
         pol_dist[pol_dist < 0.0] = 0.0
         allpha = pol_dist / A_dist
-        alpha_min, alpha_max, chord_variance = self._format_line_kernel_kwargs(allpha, chord_variance, sphere_sample)
-        line_alphas = self._la.sample_bounded_distribution(
-            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal, std=chord_variance,
-            return_log_probs=return_prop_log_probs
+        alpha_min, alpha_max, chord_std = self._format_line_kernel_kwargs(allpha, chord_std, sphere_sample)
+        chord_alphas = self._la.sample_bounded_distribution(
+            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal, std=chord_std,
         )
 
-        if return_prop_log_probs:
-            line_alphas, prop_log_probs = line_alphas
-
-        net_basis_points = theta[..., :self._K] + line_alphas[..., None] * sphere_sample
+        net_basis_points = theta[..., :self._K] + chord_alphas[..., None] * sphere_sample
 
         xch_fluxes = None
         if self._n_rev > 0:
@@ -386,22 +382,15 @@ class _BaseBayes(_BaseSimulator):
                 current_xch = self._fcm._sigmoid_xch(current_xch)
             xch_fluxes = self._la.sample_bounded_distribution(
                 shape=net_basis_points.shape[:-1], lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                mu=current_xch, which=xch_proposal, std=xch_variance, return_log_probs=return_prop_log_probs,
+                mu=current_xch, which=xch_proposal, std=xch_std,
             )
-            if return_prop_log_probs:
-                xch_fluxes, xch_prop_log_probs = xch_fluxes
-                xch_prop_log_probs = self._la.sum(xch_prop_log_probs, -1)  # sum xch flux proposals
-                prop_log_probs += xch_prop_log_probs
 
         perturbed_particles = self._fcm.append_xch_flux_samples(
             net_basis_samples=net_basis_points, xch_fluxes=xch_fluxes, return_type='theta'
         )
-        result = dict(perturbed_particles=perturbed_particles)
         if return_alphas:
-            result['line_alphas'] = line_alphas
-        if return_prop_log_probs:
-            result['prop_log_probs'] = prop_log_probs
-        return result
+            return perturbed_particles, dict(chord_alphas=chord_alphas, alpha_min=alpha_min, alpha_max=alpha_max)
+        return perturbed_particles
 
     def quantile_indices(self, distances, quantiles=0.8):
         dist_cumsum = self._la.cumsum(distances, 0)
@@ -493,8 +482,41 @@ class _BaseBayes(_BaseSimulator):
                 print('returning result instead of adding to inference data, since it is not clear where theta originates')
             return result
 
-    def compute_proposal_prob(self):
-        pass
+    def compute_proposal_prob(
+            self,
+            old_particles,
+            new_particles,
+            chord_alphas=None,
+            alpha_min=None,
+            alpha_max=None,
+            chord_proposal='unif',
+            chord_std=1.0,
+            xch_proposal='unif',
+            xch_std=0.4,
+    ):
+        if chord_alphas is not None:
+            if (alpha_min is None) or (alpha_max is None):
+                raise ValueError
+        # old_pol = self._la.unsqueeze(old_particles[..., :self._K], dim=1)
+        old_pol = old_particles[..., :self._K]
+        # new_pol = self._la.unsqueeze(new_particles[..., :self._K], dim=0)
+        new_pol = new_particles[..., :self._K]
+        # diff = old_pol - new_pol
+
+        diff = old_pol - self._la.unsqueeze(new_pol, -2)  # centered at old_pol!
+        directions = diff / self._la.norm(diff, 2, -1, True)
+        A_dist = self._la.tensormul_T(self._sampler._G, directions)
+        print(A_dist)
+
+        # allpha = self._particle_pol_dist[i: i + pbatch] / A_dist
+        # alpha_min, alpha_max, line_var = self._format_line_kernel_kwargs(allpha, chord_variance, directions)
+        #
+        # alpha = diff[..., 0] / directions[..., 0]  # alpha is scalar and is thus the same along all polytope dimensions
+        #
+        # print(old_particles[..., :self._K])
+        # print(self._la.norm(diff, 2, -1, True).shape, old_pol.shape, diff.shape, old_particles.shape)
+        # directions = diff / self._la.norm(diff, 2, -1, True)
+        # print(directions)
 
 
 class MCMC(_BaseBayes):
@@ -502,7 +524,7 @@ class MCMC(_BaseBayes):
     def _accept_reject(self, potentials, samples, line_alphas, line_kernel, line_variance, xch_kernel, xch_variance):
         # based on: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf
         # other notation: https://ntnuopen.ntnu.no/ntnu-xmlui/bitstream/handle/11250/258340/348197_FULLTEXT01.pdf?sequence=2&isAllowed=y
-        if (line_kernel == 'uniform') & (xch_kernel == 'uniform'):
+        if (line_kernel == 'unif') & (xch_kernel == 'unif'):
             # TODO only potentials, since all the all the transition probabilities are equal
             return # TODO sample categorical according to potentials
         std_diff = (line_alphas[:, None, ...] - line_alphas[None, ...]) / line_variance # evaluate transition probability on by diff on standard normal!
@@ -515,7 +537,7 @@ class MCMC(_BaseBayes):
         print(P)
         if (xch_kernel == 'normal') and (self._n_rev > 0):
             xch_theta = samples[..., self._K:]
-            P_hat += self._la.evaluate_bounded_distribution(
+            P_hat += self._la.bounded_distribution_log_prob(
                 x=xch_theta,
                 lo=self._fcm._rho_bounds[:, 0],
                 hi=self._fcm._rho_bounds[:, 1],
@@ -530,12 +552,12 @@ class MCMC(_BaseBayes):
             n_burn=50,
             thinning_factor=3,
             n_chains: int = 4,
-            potentype='exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
+            potentype='exact',
             n_cdf=6,
             chord_proposal='gauss',
-            chord_variance=1.0,
+            chord_std=1.0,
             xch_proposal='gauss',
-            xch_variance=0.4,
+            xch_std=0.4,
             return_data=True,
             evaluate_prior=False,
             potential_kwargs={},
@@ -604,6 +626,7 @@ class MCMC(_BaseBayes):
         theta_selector = self._la.arange(n_chains)
 
         y = y[: n_chains, :]
+        chord_ys[0] = y
 
         n_tot = n_burn + n * thinning_factor
         biatch = min(5000, n_tot)
@@ -611,18 +634,19 @@ class MCMC(_BaseBayes):
             batch_shape=(biatch, n_chains),
             n_cdf=n_cdf,
             chord_proposal=chord_proposal,
-            chord_variance=chord_variance,
+            chord_std=chord_std,
             xch_proposal=xch_proposal,
-            xch_variance=xch_variance,
-            return_prop_log_probs=True,
+            xch_std=xch_std,
+            return_alphas=True,
         )
         # for i in tqdm.trange(n_tot, ncols=100):
         pbar = tqdm.tqdm(total=n_tot, ncols=100)
         i = 0
         while i < n_tot:
-            result = self.perturb_particles(y, i, **perturb_kwargs)
-            chord_ys[1:] = result['perturbed_particles']
+            chord_ys[1:], alphas = self.perturb_particles(y, i, **perturb_kwargs)
+            chord_alphas[1:] = alphas['chord_alphas']
             post_prob = self.potential(chord_ys[1:])
+
             if self.potentype == 'approx':
                 raise NotImplementedError('reject ABC proposals if all are too distant!')
 
@@ -632,7 +656,21 @@ class MCMC(_BaseBayes):
 
             chord_post_prob[1:] = post_prob
 
-            accept_idx = self._accept_reject(chord_post_prob, chord_ys, chord_alphas, chord_proposal, chord_variance, xch_proposal, xch_variance)
+            self.compute_proposal_prob(
+                old_particles=chord_ys,
+                new_particles=chord_ys,
+                chord_alphas=chord_alphas,
+                alpha_min=alphas['alpha_min'],
+                alpha_max=alphas['alpha_max'],
+                chord_proposal=chord_proposal,
+                chord_std=chord_std,
+                xch_proposal=xch_proposal,
+                xch_std=xch_std
+            )
+            return
+
+
+            accept_idx = self._accept_reject(chord_post_prob, chord_ys, chord_alphas, chord_proposal, chord_std, xch_proposal, xch_std)
             # if n_cdf == 0:
             #     accept_idx[:] = 0
             #     log_mh_ratio = line_pot[1] - line_pot[0]
@@ -658,8 +696,8 @@ class MCMC(_BaseBayes):
             chord_post_prob[0] = accepted_probs  # set the log-probs of the current sample
             y = chord_ys[accept_idx, theta_selector]
             chord_ys[0] = y  # set the log-probs of the current sample
-            alpha = chord_alphas[accept_idx, theta_selector]
-            chord_alphas[0] = alpha
+            # alpha = chord_alphas[accept_idx, theta_selector]  # NOTE: the accepted alpha is always 0
+            # chord_alphas[0] = alpha
             if return_data:
                 data = chord_data[accept_idx, theta_selector]
                 chord_data[0] = data
@@ -704,9 +742,9 @@ class MCMC(_BaseBayes):
             'thinning_factor': thinning_factor,
             'n_cdf': n_cdf,
             'line_kernel': chord_proposal,
-            'line_variance': chord_variance,
+            'line_variance': chord_std,
             'xch_kernel': xch_proposal,
-            'xch_variance': xch_variance,
+            'xch_variance': xch_std,
         }
         if self.true_theta is not None:
             attrs['true_theta'] = self._la.tonp(self._true_theta)
@@ -741,7 +779,7 @@ class MCMC(_BaseBayes):
             n_chains: int = 7,
             kernel=None,
             n_cdf=5,
-            line_how='uniform',
+            line_how='unif',
             line_proposal_std=2.0,
             xch_how='gauss',
             xch_proposal_std=0.4,
@@ -817,9 +855,9 @@ class SMC(_BaseBayes):
             old_particles,
             old_log_weights,
             line_kernel,
-            line_variance,
+            chord_variance,
             xch_kernel,
-            xch_variance,
+            xch_std,
             evaluate_prior=True,
             pbatch=1000,
     ):
@@ -838,10 +876,10 @@ class SMC(_BaseBayes):
             A_dist = self._la.tensormul_T(self._sampler._G, directions)
 
             allpha = self._particle_pol_dist[i: i + pbatch] / A_dist
-            alpha_min, alpha_max, line_var = self._format_line_kernel_kwargs(allpha, line_variance, directions)
+            alpha_min, alpha_max, line_var = self._format_line_kernel_kwargs(allpha, chord_variance, directions)
 
             alpha = diff[..., 0] / directions[..., 0]  # alpha is scalar and is thus the same along all polytope dimensions
-            log_probs[..., i: i+pbatch] = self._la.evaluate_bounded_distribution(
+            log_probs[..., i: i+pbatch] = self._la.bounded_distribution_log_prob(
                 alpha, alpha_min, alpha_max, std=line_var, which=line_kernel, log=True,
             )
 
@@ -854,11 +892,11 @@ class SMC(_BaseBayes):
                 # TODO for sampling and evaluating exchange fluxes, we use a constant kernel
                 #   and do not adapt it to the previous population, check whether this leads to funny results in a model
                 #   where we can identify xch fluxes
-                log_probs[..., i: i+pbatch] += self._la.evaluate_bounded_distribution(
+                log_probs[..., i: i+pbatch] += self._la.bounded_distribution_log_prob(
                     x=new_xch,
                     lo=self._fcm._rho_bounds[:, 0],
                     hi=self._fcm._rho_bounds[:, 1],
-                    mu=old_xch, std=xch_variance, which=xch_kernel, log=True,
+                    mu=old_xch, std=xch_std, which=xch_kernel, log=True,
                 )
 
         log_weighted_sum = self._la.logsumexp(log_probs + old_log_weights, -1)  # computes importance weights
@@ -901,7 +939,7 @@ class SMC(_BaseBayes):
                 particles,
                 weights=self._la.exp(log_weights),
                 samples_per_dim=500,
-                kernel_variance_scale=kernel_variance_scale,
+                kernel_std_scale=kernel_variance_scale,
                 prev_cov=True,
             )
 
@@ -921,9 +959,9 @@ class SMC(_BaseBayes):
                 batch_shape=(1, population_batch),
                 n_cdf=n_cdf,
                 chord_proposal=line_kernel,
-                chord_variance=line_variance,
+                chord_std=line_variance,
                 xch_proposal=xch_kernel,
-                xch_variance=xch_variance,
+                xch_std=xch_variance,
             ).squeeze(0)
 
             dist = self.potential(perturbed_particles)
@@ -945,9 +983,9 @@ class SMC(_BaseBayes):
                         old_log_weights=log_weights,
                         evaluate_prior=evaluate_prior,
                         line_kernel=line_kernel,
-                        line_variance=line_variance,
+                        chord_variance=line_variance,
                         xch_kernel=xch_kernel,
-                        xch_variance=xch_variance,
+                        xch_std=xch_variance,
                         pbatch=population_batch,
                     )
                 )
@@ -1312,7 +1350,7 @@ if __name__ == "__main__":
             metric='rmse',
             line_kernel='gauss',
             xch_kernel='gauss',
-            xch_variance=0.4,
+            xch_std=0.4,
             return_all_populations=False,
         )
     else:
@@ -1323,14 +1361,14 @@ if __name__ == "__main__":
             n= 20,
             n_burn = 10,
             thinning_factor = 2,
-            n_chains = 3,
+            n_chains = 1,
             potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
-            n_cdf = 1,
+            n_cdf = 2,
             # algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
             chord_proposal = 'gauss',
-            chord_variance = 1.0,
+            chord_std = 1.0,
             xch_proposal = 'gauss',
-            xch_variance = 0.4,
+            xch_std = 0.4,
             return_data = True,
             evaluate_prior = False,
             potential_kwargs = {},
@@ -1341,7 +1379,7 @@ if __name__ == "__main__":
     model, kwargs = spiro(
         backend='numpy',
         batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
-        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3, L_12_omega=1.0,
+        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=2, L_12_omega=1.0,
         v5_reversible=True
     )
     # model, kwargs = build_e_coli_anton_glc(

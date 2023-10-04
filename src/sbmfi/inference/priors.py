@@ -17,7 +17,7 @@ from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg, TorchBackend, NumpyBackend
 from sbmfi.core.polytopia import LabellingPolytope, FluxCoordinateMapper, \
-    PolytopeSamplingModel, coordinate_hit_and_run_cpp, extract_labelling_polytope, thermo_2_net_polytope, \
+    PolytopeSamplingModel, extract_labelling_polytope, thermo_2_net_polytope, \
     project_polytope, fast_FVA, rref_and_project, transform_polytope_keep_transform, \
     compute_polytope_halfspaces, V_representation, sample_polytope
 
@@ -75,14 +75,22 @@ class _CannonicalPolytopeSupport(_Dependent):  #
         valid   = (self._A @ viewlue <= self._b).T
         return valid.view(*vape[:-1], self._A.shape[0])
 
-    def euclidian_distance(self, value):
-        # https://github.com/cvxgrp/cvxpylayers
-        # https://github.com/cvxgrp/diffcp
-        # https://github.com/locuslab/qpth
-        #
-        in_polytope = self.check(value).all(-1)
-        not_in_pol = value[~in_polytope, :]  # values that are not in the polytope for which to compute distance
-        raise NotImplementedError
+
+class _SphereSupport(_CannonicalPolytopeSupport):
+    def __init__(
+            self,
+            polytope: LabellingPolytope,
+            validation_tol=_CannonicalPolytopeSupport._VTOL,
+    ):
+        self._vtol = validation_tol
+
+    def check(self, value: torch.Tensor) -> torch.Tensor:
+        if value.dtype != self._A.dtype:
+            value = value.to(self._A.dtype)
+        vape    = value.shape
+        viewlue = value.permute((-1, *range(value.ndim -1))).view(vape[-1], vape[:-1].numel())
+        viewlue = viewlue[:self._A.shape[1], :]
+        raise NotImplementedError('just check whether norm is less than 0, radius in [0,1] and xch between bounds')
 
 
 class _BasePrior(Distribution):
@@ -95,16 +103,13 @@ class _BasePrior(Distribution):
         # prior sampling variables
         self._ic = cache_size  # current index in the cache
         if isinstance(model, LabellingModel):
-            kwargs = {}
             linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
-            if model._fcm is not None:
-                kwargs = dict(
-                    kernel_basis=model._fcm._sampler.kernel_basis,
-                    basis_coordinates=model._fcm._sampler.basis_coordinates,
-                    logit_xch_fluxes=model._fcm.logit_xch_fluxes,
-                    free_reaction_id=model.labelling_reactions.list_attr('id'),
-                )
-            model = FluxCoordinateMapper(model, linalg=linalg, **kwargs)
+            model = FluxCoordinateMapper(
+                model,
+                linalg=linalg,
+                free_reaction_id=model.labelling_reactions.list_attr('id'),
+                **model._fcm.fcm_kwargs
+            )
 
         self._fcm = model
 
@@ -118,7 +123,6 @@ class _BasePrior(Distribution):
         self._sample_shape = None
 
         self._theta_cache = torch.zeros((cache_size, self.n_theta), dtype=torch.double) # cache to store dependent variables
-        self._flux_cache  = torch.zeros((cache_size, self.n_fluxes), dtype=torch.double)  # cache to store corresponding fluxes
         # NOTE passing validate_args={} will trigger support checking
         Distribution.__init__(self, event_shape=torch.Size((self.n_theta,)), validate_args={})
 
@@ -137,10 +141,6 @@ class _BasePrior(Distribution):
     def n_theta(self):
         # number of theta elements, depends on coordinate system for fluxes or number of ratios
         raise NotImplementedError
-
-    @property
-    def n_fluxes(self):
-        return self._fcm._F.A.shape[1]
 
     @property
     def theta_id(self):
@@ -215,7 +215,7 @@ class _BasePrior(Distribution):
             return results
 
 
-class _FluxPrior(_BasePrior):
+class _NetFluxPrior(_BasePrior):
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
@@ -223,7 +223,7 @@ class _FluxPrior(_BasePrior):
             num_processes: int = 0,
     ):
         self._basis_points = None
-        super(_FluxPrior, self).__init__(model, cache_size, num_processes)
+        super(_NetFluxPrior, self).__init__(model, cache_size, num_processes)
 
     # NB event_dim=1 means that the right-most dimension defines an event!
     @constraints.dependent_property(is_discrete=False, event_dim=1)
@@ -241,7 +241,34 @@ class _FluxPrior(_BasePrior):
         return len(self._fcm.theta_id)
 
 
-class UniFluxPrior(_FluxPrior):
+class _XchFluxPrior(_BasePrior):
+    def __init__(
+            self,
+            model: Union[FluxCoordinateMapper, LabellingModel],
+            cache_size: int = 20000,
+    ):
+        super().__init__(model, cache_size, num_processes=0)
+
+
+class UniXchFluxPrior(_XchFluxPrior):
+    def __init__(
+            self,
+            model: Union[FluxCoordinateMapper, LabellingModel],
+            cache_size: int = 20000,
+    ):
+        super().__init__(model, cache_size, num_processes=0)
+
+
+class TruncNormFluxPrior(_XchFluxPrior):
+    def __init__(
+            self,
+            model: Union[FluxCoordinateMapper, LabellingModel],
+            cache_size: int = 20000,
+    ):
+        pass
+
+
+class UniFluxPrior(_NetFluxPrior):
     def __init__(
             self,
             model,
@@ -259,7 +286,6 @@ class UniFluxPrior(_FluxPrior):
         self._run_tasks(tasks=[task], format=True, scramble=True)
 
     def log_prob(self, value):
-        # multiply constant by distance?
         # log prob for uniform distribution is log(1 / vol(polytope))
         # for non-uniform xch flux distribution, return log(1 / vol(net_polytope)) + log_prob(xch_flux)
         if self._validate_args:
@@ -267,6 +293,11 @@ class UniFluxPrior(_FluxPrior):
         # place-holder until we can compute polytope volumes
         return torch.zeros((*value.shape[:-1], 1))
 
+
+class UniSpherePrior():
+    def __init__(self):
+        pass
+        # TODO this is a prior that somples with uniform density over directions and uniform density in radius
 
 # def get_initial_points(self: TFSModel, num_points: int) -> np.ndarray:
 #
@@ -1201,7 +1232,7 @@ class RatioPrior(_BasePrior):
         return self._ratio_dist.log_prob(value=value).sum(-1)
 
 
-class ProjectionPrior(_FluxPrior):
+class ProjectionPrior(_NetFluxPrior):
     # TODO I noticed that for the biomass flux, it is rarely sampled over 0.3, thus here we
     #  sample boundary fluxes in a projected polytope and then constrain and sample just like with ratios
 
@@ -1280,7 +1311,6 @@ class ProjectionPrior(_FluxPrior):
             return_basis_samples=True, return_kwargs=self._num_processes == 0,
         )
         self._run_tasks(sampling_task_generator, break_i=break_i, close_pool=close_pool, format=True)
-
 
 
 if __name__ == "__main__":

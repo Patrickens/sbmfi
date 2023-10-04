@@ -656,13 +656,14 @@ class PolytopeSamplingModel(object):
             pr_verbose = False,
             kernel_basis ='svd',
             basis_coordinates = 'rounded',
+            clip_sphere=False,
             linalg: LinAlg = None,
             **kwargs
     ):
         if kernel_basis not in ['rref', 'svd']:
-            raise ValueError(f'{kernel_basis}')
-        if basis_coordinates not in ['transformed', 'rounded']:
-            raise ValueError(f'{basis_coordinates}')
+            raise ValueError(f'{kernel_basis} not a valid basis kernel basis')
+        if basis_coordinates not in ['transformed', 'rounded', 'spherical', 'half_spherical']:
+            raise ValueError(f'{basis_coordinates} not a valid basis coordinate system')
         if polytope.A.columns.str.contains(_xch_reactions_rex).any() or \
                 polytope.A.columns.str.contains(_rev_reactions_rex).any():
             print(
@@ -690,11 +691,18 @@ class PolytopeSamplingModel(object):
         self._F_round = LabellingPolytope.from_Polytope(F_round)
         self._basis_pol = self._F_round if basis_coordinates == 'rounded' else F_trans
         self._log_det_E = np.log(np.linalg.eig(self._E)[0]).sum()
+
+        self._rounded_id = self._E_1.index
         if basis_coordinates == 'transformed':
             self._basis_id = self._T_1.index
-        else:
+        elif basis_coordinates == 'rounded':
             self._basis_id = self._E_1.index
+        elif basis_coordinates in ['spherical', 'half_spherical']:
+            basis_str = 'S' if basis_coordinates == 'spherical' else 'HS'
+            self._basis_id = pd.Index([f'{basis_str}_{self._kerbas}_{i}' for i in range(self._F_round.A.shape[-1])] + [''])
+
         self._reaction_ids = polytope.A.columns.tolist()
+        self._clipsphere = clip_sphere
 
         if linalg == None:
             linalg = LinAlg(backend='numpy')
@@ -727,35 +735,103 @@ class PolytopeSamplingModel(object):
     def dimensionality(self) -> int:
         return self._G.shape[1]
 
-    def to_basis(self, net_fluxes: pd.DataFrame, pandalize=False):
+    def _map_rounded_2_spherical(self, rounded_basis, pandalize=False):
+        if rounded_basis.shape[-1] < 2:
+            raise ValueError('only works for systems with at least 2 free dimensions!')
+        index = None
+        if isinstance(rounded_basis, pd.DataFrame):
+            index = rounded_basis.index
+            rounded_basis = self._la.get_tensor(values=rounded_basis.loc[:, self._rounded_id].values)
+
+        norm = self._la.norm(rounded_basis, 2, -1, keepdims=True)
+        directions = rounded_basis / norm
+
+        if self._bascoor == 'half_spherical':
+            directions[..., 0] = abs(directions[..., 0])  # this makes sure we sample on the half-sphere!
+
+        alpha = self._h.T / self._la.tensormul_T(self._G, directions)
+        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._bascoor == 'half_spherical')
+
+        if self._bascoor == 'half_spherical':
+            alpha_min, alpha_max = alpha_max
+            frac_dist = (norm - alpha_min) / (alpha_max - alpha_min)  # fraction of chord
+            if self._clipsphere:
+                # here we remove the first spherical dimension, since it can be computed from the others!
+                # can only be done since we take the absolute value above!!!
+                directions = directions[..., 1:]
+        else:
+            frac_dist = norm / alpha_max  # fraction of max distance from polytope boundary
+
+        result = self._la.cat([directions, frac_dist], dim=-1)
+
+        if pandalize:
+            columns = self.basis_id  # chage to basis_id!
+            if self._clipsphere and (self._bascoor == 'half_spherical'):
+                columns = columns.drop(columns[0])
+            result = pd.DataFrame(self._la.tonp(result), index=index, columns=columns)
+        return result
+
+    def _map_spherical_2_rounded(self, spherical_basis, pandalize=False):
+        index = None
+        if isinstance(spherical_basis, pd.DataFrame):
+            index = spherical_basis.index
+            columns = self.basis_id
+            if self._clipsphere:
+                columns = columns.drop(columns[-2])
+            spherical_basis = self._la.get_tensor(values=spherical_basis.loc[:, columns].values)
+
+        if self._clipsphere and (self._bascoor == 'half_spherical'):
+            lost_coordinate = self._la.sqrt(1.0 - self._la.norm(spherical_basis[..., :-1], 2, -1, keepdims=True) ** 2)
+            spherical_basis = self._la.cat([lost_coordinate, spherical_basis], dim=-1)
+
+        directions = spherical_basis[..., :-1]
+        frac_dist = spherical_basis[..., -1]
+
+        alpha = self._h.T / self._la.tensormul_T(self._G, directions)
+        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._bascoor == 'half_spherical')
+
+        if self._bascoor == 'half_spherical':
+            alpha_min, alpha_max = alpha_max
+            frac_dist = (frac_dist * (alpha_max - alpha_min)) + alpha_min  # fraction of chord
+        else:
+            frac_dist = frac_dist * alpha_max  # fraction of max distance from polytope boundary
+
+        result = directions * frac_dist
+        if pandalize:
+            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self._rounded_id)
+        return result
+
+    def to_net_basis(self, net_fluxes: pd.DataFrame, pandalize=False):
         index = None
         if isinstance(net_fluxes, pd.DataFrame):
             index = net_fluxes.index
-            net_fluxes = net_fluxes.loc[:, self.reaction_ids].values
-        net_fluxes = self._la.get_tensor(values=net_fluxes)
-        result = (self._T_1 @ (net_fluxes - self._tau.T).T).T
-        if self._bascoor == 'rounded':
-            result = (self._E_1 @ (result - self._epsilon.T).T).T
+            net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self.reaction_ids].values)
+
+        result = self._la.tensormul_T(self._T_1, net_fluxes - self._tau.T)
+
+        if self._bascoor != 'transformed':
+            result = self._la.tensormul_T(self._E_1, result - self._epsilon.T)
+            if self._bascoor == 'spherical':
+                self._to_spherical(result)
+
         if pandalize:
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
         return result
 
-    def to_fluxes(self, theta: pd.DataFrame, is_rounded=None, pandalize=False):
+    def to_net_fluxes(self, theta: pd.DataFrame, pandalize=False):
         index = None
         if isinstance(theta, pd.DataFrame):
             index = theta.index
-            theta = theta.loc[:, self.basis_id].values
-        theta = self._la.get_tensor(values=theta)
+            theta = self._la.get_tensor(values=theta.loc[:, self.basis_id].values)
 
-        if is_rounded is None:
-            is_rounded = self._bascoor == 'rounded'
-
-        if is_rounded:
-            A, b = self._to_fluxes_transform
-            fluxes = self._la.transax(A @ self._la.transax(theta) + b)
+        if self._bascoor == 'transformed':
+            fluxes = self._la.tensormul_T(self._T, theta) + self._tau.T
         else:
-            # this means that we pass in transformed coordinates not rounded ones (useful for rref comparison)
-            fluxes = self._la.transax(self._T @ self._la.transax(theta) + self._tau)
+            if self._bascoor in ['spherical', 'half_spherical']:
+                theta = self._map_spherical_2_rounded(theta)
+            A, b = self._to_fluxes_transform
+            fluxes = self._la.tensormul_T(A, theta) + b.T
+
         if pandalize:
             fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_ids)
         return fluxes
@@ -765,10 +841,9 @@ class PolytopeSamplingModel(object):
         distances = self._h / self._la.norm(self._G, ord=2, axis=1)  # the arguments are ord and axis
         radius = distances.min()
         # Sample random directions and scale them to a random length inside the hypersphere.
+        # self._la.sample_hypersphere()  # TODO!
         samples = self._la.randu(shape=(self.dimensionality, num_points))
-        length = self._la.randu(shape=(1, num_points)) ** (
-                1 / self.dimensionality
-        ) / self._la.norm(samples, 2, 0)
+        length = self._la.randu(shape=(1, num_points)) ** (1 / self.dimensionality) / self._la.norm(samples, 2, 0)
         samples = samples * self._la.diag(length) * radius
         return samples.T
 
@@ -929,9 +1004,9 @@ class FluxCoordinateMapper(object):
 
         if isinstance(fluxes, pd.DataFrame):
             samples_id = fluxes.index  # this means that the passed samples_id is ignored!
-            fluxes = fluxes.loc[:, self._F.A.columns].values
+            fluxes = self._la.get_tensor(values=fluxes.loc[:, self._F.A.columns].values)
 
-        fluxes = self._la.atleast_2d(self._la.get_tensor(values=fluxes))
+        fluxes = self._la.atleast_2d(fluxes)
 
         if samples_id is None:
             self._samples_id = fluxes.shape[0]
@@ -954,7 +1029,7 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(thermo_fluxes, pd.DataFrame):
             index = thermo_fluxes.index
-            thermo_fluxes = self._la.get_tensor(values=thermo_fluxes.values)
+            thermo_fluxes = self._la.get_tensor(values=thermo_fluxes.loc[:, self._Ft.A.columns].values)
 
         xch = thermo_fluxes[..., self._rev_idx]
         net = thermo_fluxes[..., self._fwd_idx]
@@ -1008,8 +1083,9 @@ class FluxCoordinateMapper(object):
             theta = self.map_fluxes_2_theta(thermo_fluxes, is_thermo=True)
 
         if self._J_lt is None:
+            # labelling fluxes w.r.t. thermo fluxes
             n = len(self.thermo_fluxes_id)
-            self._J_lt = self._la.get_tensor(shape=(thermo_fluxes.shape[0], n, n))# labelling fluxes w.r.t. thermo fluxes
+            self._J_lt = self._la.get_tensor(shape=(thermo_fluxes.shape[0], n, n))
             self._J_lt[...] = self._la.eye(n)[None, :, :]
             if len(self._only_rev) > 0:
                 self._J_lt[..., self._only_rev_idx, self._only_rev_idx] = -1.0
@@ -1027,6 +1103,7 @@ class FluxCoordinateMapper(object):
             self._J_lt[..., self._rev_idx, self._fwd_idx] = drev_dxch
 
         if self._J_tt is None:
+            # thermo fluxes w.r.t. theta
             n = 1
             if self._logxch:
                 n = thermo_fluxes.shape[0]
@@ -1048,9 +1125,10 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(thermo_fluxes, pd.DataFrame):
             index = thermo_fluxes.index
-            thermo_fluxes = thermo_fluxes.loc[:, self.thermo_fluxes_id].values
-        thermo_fluxes = self._la.get_tensor(values=thermo_fluxes)
+            thermo_fluxes = self._la.get_tensor(values=thermo_fluxes.loc[:, self.thermo_fluxes_id].values)
+
         fluxes = self._la.vecopy(thermo_fluxes)
+
         if len(self._fwd_id) > 0:
             xch = fluxes[..., self._rev_idx]
             net = fluxes[..., self._fwd_idx]
@@ -1092,11 +1170,11 @@ class FluxCoordinateMapper(object):
         if net_fluxes is None:
             n = net_basis_samples.shape[0]
             if return_type in ['fluxes', 'both']:
-                net_fluxes = self._sampler.to_fluxes(net_basis_samples, is_rounded=self._sampler._bascoor == 'rounded')
+                net_fluxes = self._sampler.to_net_fluxes(net_basis_samples, is_rounded=self._sampler._bascoor == 'rounded')
         elif net_basis_samples is None:
             n = net_fluxes.shape[0]
             if return_type in ['theta', 'both']:
-                net_basis_samples = self._sampler.to_basis(net_fluxes)
+                net_basis_samples = self._sampler.to_net_basis(net_fluxes)
         else:
             n = net_fluxes.shape[0]
 
@@ -1138,7 +1216,7 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(theta, pd.DataFrame):
             index = theta.index
-            theta = self._la.get_tensor(values=theta.values)
+            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
 
         if len(self._fwd_id) > 0:
             net_basis_variables = theta[..., :-len(self._fwd_id)]  # this selects the net-variables
@@ -1147,7 +1225,7 @@ class FluxCoordinateMapper(object):
                 xch_fluxes = self._sigmoid_xch(xch_fluxes)
         else:
             net_basis_variables = theta
-        thermo_fluxes = self._sampler.to_fluxes(net_basis_variables)  # should be in linalg form already
+        thermo_fluxes = self._sampler.to_net_fluxes(net_basis_variables)  # should be in linalg form already
         if len(self._fwd_id) > 0:
             thermo_fluxes = self._la.cat([thermo_fluxes, xch_fluxes], dim=-1)
         if pandalize:
@@ -1155,9 +1233,6 @@ class FluxCoordinateMapper(object):
         if return_thermo:
             return thermo_fluxes
         return self.map_thermo_2_fluxes(thermo_fluxes, pandalize=pandalize)
-
-    def check_theta(self, theta):
-        pass
 
     def map_fluxes_2_thermo(self, fluxes: pd.DataFrame, pandalize=False):
         index = None
@@ -1207,69 +1282,16 @@ class FluxCoordinateMapper(object):
             if self._logxch:
                 xch_fluxes = self._logit_xch(xch_fluxes)
             net_fluxes = thermo_fluxes[..., :-len(self._fwd_id)]
-            net_basis_samples = self._sampler.to_basis(net_fluxes)
+            net_basis_samples = self._sampler.to_net_basis(net_fluxes)
             basis_samples = self._la.cat([net_basis_samples, xch_fluxes], dim=1)
         else:
-            basis_samples = self._sampler.to_basis(thermo_fluxes)
+            basis_samples = self._sampler.to_net_basis(thermo_fluxes)
 
         if pandalize:
             basis_samples = pd.DataFrame(self._la.tonp(basis_samples), index=index, columns=self.theta_id)
         return basis_samples
 
 
-def coordinate_hit_and_run_cpp(  # this is a very fast sampler written in C++ and is useful when sampling from many different polytopes
-        model: Union[PolytopeSamplingModel, LabellingPolytope],
-        n=50000,
-        initial_points=None,
-        thinning_factor=24,  # TODO dont know whether this is sufficient
-        n_chains=3,
-        new_basis_points=False,
-        return_basis_samples=False,
-        return_psm=False,
-        linalg: LinAlg = None,
-        kernel_basis: str = 'svd',
-        basis_coordinates: str = 'rounded',
-        pandalize=False,
-):
-    result = {}
-    if isinstance(model, LabellingPolytope):
-        model = PolytopeSamplingModel(
-            model, kernel_basis=kernel_basis, basis_coordinates=basis_coordinates,
-        )
-        if return_psm:
-            result['psm'] = model
-
-    if model._la.backend != 'numpy':
-        seed = model._la._backwargs['seed']
-        model = model.to_linalg(linalg=LinAlg('numpy', seed=seed))
-
-    n_steps = n * thinning_factor
-    settings = pb.UniformSamplerSettings()
-    update_settings_function = lambda s, steps: fill_common_sampling_settings(
-        settings=s, num_samples=n, num_steps=steps, num_chains=n_chains, num_warmup_steps=2, max_threads=100
-    )
-    update_settings_function(settings, n_steps)
-
-    if initial_points is None:
-        initial_points = model.get_initial_points(settings.num_chains)
-
-    directions_transform = np.identity(model.dimensionality)
-    with contextlib.redirect_stdout(io.StringIO()):
-        chains = model.simulate(settings, initial_points, directions_transform)
-    basis_samples = sample_from_chains(chains, num_samples=n)
-    A, b = model.to_fluxes_transform
-    fluxes = pd.DataFrame(model.to_fluxes(basis_samples), columns=model.reaction_ids)
-    result['fluxes'] = fluxes
-    # TODO use linalg to convert stuff to right dtype
-    if return_basis_samples:
-        result['basis_samples'] = pd.DataFrame(basis_samples, columns=model.basis_id)
-    if new_basis_points:
-        new_points_idx = np.random.choice(n, settings.num_chains)
-        result['new_basis_points'] = basis_samples[new_points_idx, :].T
-    return result
-
-
-# @profile(profiler=prof2)
 def sample_polytope(
         model: Union[PolytopeSamplingModel, LabellingPolytope],
         n: int = 2000,
@@ -1388,14 +1410,14 @@ def sample_polytope(
             chains[k] = x
 
     basis_samples = model._la.view(chains, (n_chains * n_per_chain, K))[:n, :]
-    fluxes = model.to_fluxes(basis_samples)
+    fluxes = model.to_net_fluxes(basis_samples)
 
     if new_basis_points:
         new_points_idx = model._la.choice(n_chains, n)
         result['new_basis_points'] = basis_samples[new_points_idx, :].T
     if return_basis_samples:
         if basis_coordinates == 'transformed':
-            basis_samples = model.to_basis(fluxes)
+            basis_samples = model.to_net_basis(fluxes)
         if pandalize:
             basis_samples = pd.DataFrame(model._la.tonp(basis_samples), columns=model.basis_id)
         result['basis_samples'] = basis_samples
@@ -1492,15 +1514,28 @@ if __name__ == "__main__":
         model,
         kernel_basis='rref',
         logit_xch_fluxes=True,
-        basis_coordinates='transformed',
+        basis_coordinates='rounded',
         pr_verbose=False,
     )
 
     psm = fcm._sampler
     thermo = fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
-    theta = psm.to_basis(thermo, pandalize=True)
-    fluxes = psm.to_fluxes(theta, pandalize=True)
+    theta = psm.to_net_basis(thermo, pandalize=True)
+    fluxes = psm.to_net_fluxes(theta, pandalize=True)
 
+    fcm = FluxCoordinateMapper(
+        model,
+        kernel_basis='rref',
+        logit_xch_fluxes=True,
+        basis_coordinates='half_spherical',
+        pr_verbose=False,
+    )
+
+    print(fluxes)
+    ding = fcm._sampler.to_net_basis(fluxes)
+    print(ding)
+    dang = fcm._sampler.to_net_fluxes(ding, pandalize=True)
+    print(dang)
     # samples = sample_polytope(m._fcm._sampler, n=50, new_basis_points=True)
 
 

@@ -14,7 +14,7 @@ from line_profiler import line_profiler
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope
 from sbmfi.core.observation import BoundaryObservationModel, MDV_ObservationModel
-from sbmfi.inference.priors import _FluxPrior, UniFluxPrior, RatioPrior
+from sbmfi.inference.priors import _NetFluxPrior, UniFluxPrior, RatioPrior
 import pandas as pd
 from typing import Dict, Optional, Callable, Any, Tuple, Union
 from sbi.inference.posteriors.direct_posterior import DirectPosterior
@@ -89,7 +89,7 @@ class NeuralPolytopePosterior(NeuralPosterior):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _FluxPrior,
+            prior: _NetFluxPrior,
             boundary_observation_model: BoundaryObservationModel = None,
             x_shape=None,
             device='cpu',
@@ -214,7 +214,7 @@ class SNPE_P(_BaseBayes, SNPE_C):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _FluxPrior,
+            prior: _NetFluxPrior,
             boundary_observation_model: BoundaryObservationModel = None,
     ):
         # https://arxiv.org/abs/2210.04815
@@ -331,7 +331,7 @@ class SNPE_P(_BaseBayes, SNPE_C):
                     f'because of the difficult support of the the ratio-prior, '
                     f'its not currently possible to use {sample_with}'
                 )
-            elif isinstance(self._prior, _FluxPrior):
+            elif isinstance(self._prior, _NetFluxPrior):
                 npp_kwargs = dict(
                     model=self._model,
                     substrate_df=self._substrate_df,
@@ -351,7 +351,7 @@ class SNPE_P(_BaseBayes, SNPE_C):
             if isinstance(self._prior, RatioPrior):
                 # TODO construct a box-uniform proposal distribution!
                 raise NotImplementedError
-            elif isinstance(self._prior, _FluxPrior):
+            elif isinstance(self._prior, _NetFluxPrior):
                 proposal = UniFluxPrior(self._fcm)
             self._posterior = RejectionPosterior(
                 potential_fn=potential_fn,

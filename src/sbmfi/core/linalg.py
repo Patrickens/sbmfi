@@ -704,11 +704,10 @@ class LinAlg(object):
     def categorical(self, sample_shape, probs=None, logits=None):
         return self._BACKEND.categorical(sample_shape, probs, logits)
 
-    def sample_hypersphere(self, shape):
+    def sample_hypersphere(self, shape, radius=1.0):
         rnd = self.randu(shape)
         return rnd / self.norm(rnd, 2, -1, True)
 
-    # https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
     def _compute_xi(self, A, mu=0.0, std=1.0):
         return (A - mu) / std
 
@@ -724,12 +723,8 @@ class LinAlg(object):
         xi = self._compute_xi(A, mu, std)
         return 0.5 + self.erf(xi * _1_SQRT2) * 0.5
 
-    def norm_inv_cdf(self, u, mu=0.0, std=1.0, return_log_probs=False):
-        samples = mu + std * _SQRT2 * self.erfinv(2 * u - 1.0)
-        if return_log_probs:
-            log_norm_pdf = self.norm_log_pdf(samples, mu, std)
-            return samples, log_norm_pdf
-        return samples
+    def norm_inv_cdf(self, u, mu=0.0, std=1.0):
+        return mu + std * _SQRT2 * self.erfinv(2 * u - 1.0)
 
     def trunc_norm_pdf(self, A, lo, hi, mu=0.0, std=1.0):
         norm_pdf = self.norm_pdf(A, mu, std)
@@ -749,80 +744,53 @@ class LinAlg(object):
         beta  = self.norm_cdf(hi, mu, std)
         return (norm_cdf - alpha) / (beta - alpha)
 
-    def trunc_norm_inv_cdf(self, u, lo, hi, mu=0.0, std=1.0, return_log_probs=False):
+    def trunc_norm_inv_cdf(self, u, lo, hi, mu=0.0, std=1.0):
         alpha = self.norm_cdf(lo, mu, std)
         beta  = self.norm_cdf(hi, mu, std)
-        diff  = beta - alpha
         uu = alpha + u * (beta - alpha)
-        samples = self.norm_inv_cdf(uu, mu, std)
-        if return_log_probs:
-            log_norm_pdf = self.norm_log_pdf(samples, mu, std)
-            trunc_log_norm_pdf = log_norm_pdf - self.log(diff)
-            return samples, trunc_log_norm_pdf
-        return samples
+        return self.norm_inv_cdf(uu, mu, std)
 
-    def unif_inv_cdf(self, u, lo=0.0, hi=1.0, return_log_probs=False):
-        diff = hi - lo
-        samples = lo + u * diff
-        if return_log_probs:
-            log_1_diff = self.log(1.0 / diff)
-            log_probs = self.tile(log_1_diff, samples.shape[:-1])
-            return samples, log_probs
-        return samples
+    def unif_inv_cdf(self, u, lo=0.0, hi=1.0):
+        return lo + u * (hi - lo)
 
-    def sample_bounded_distribution(
-            self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='uniform', return_log_probs=False
-    ):
+    def unif_log_pdf(self, x, mu, lo=0.0, hi=1.0):
+        out_shape = tuple(np.maximum(x.shape, mu.shape))
+        return self.ones(out_shape) / (hi - lo)
+
+    def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='unif'):
         if not (lo.shape == hi.shape):
             raise ValueError(f'lo.shape: {lo.shape}, hi.shape: {hi.shape}')
         u = self.randu(shape=(*shape, *lo.shape))
-        if which == 'uniform':
-            return self.unif_inv_cdf(u, lo, hi, return_log_probs)
+        if which == 'unif':
+            return self.unif_inv_cdf(u, lo, hi)
         elif which == 'gauss':
             # truncated multivariate normal sampling
+            # https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
             # publication: Efficient Sampling Methods for Truncated Multivariate
             #   Normal and Student-t Distributions Subject to Linear
             #   Inequality Constraints
-            return self.trunc_norm_inv_cdf(u, lo, hi, mu, std, return_log_probs)
+            return self.trunc_norm_inv_cdf(u, lo, hi, mu, std)
         else:
             raise ValueError
 
-    def evaluate_bounded_distribution(self, x, lo, hi, mu=0.0, std=0.1, which='uniform', log=True):
+    def bounded_distribution_log_prob(self, x, lo, hi, mu=0.0, std=0.1, which='unif'):
         if not (lo.shape == hi.shape):  # TODO should work with float lo and hi
             raise ValueError
-
-        if which == 'uniform':
-            result = 1.0 / (hi - lo)
-            if x.shape != lo.shape:
-                outshape = x.shape[:-1]
-                if not isinstance(mu, float):
-                    outshape = (*outshape, *mu.shape[:-1])
-                outshape = (*outshape, 1)
-                # result = self.prod(self.tile(result, outshape), -1, keepdims=False)  # TODO why do we prod?
-                result = self.tile(result, outshape)
+        if which == 'unif':
+            return self.unif_log_pdf(x, mu, lo, hi)
         elif which == 'gauss':
-            if x.shape != lo.shape:
-                if not isinstance(std, float):
-                    # TODO not sure this is correct
-                    if std.shape != mu.shape:
-                        raise ValueError
-                xi = self.unsqueeze(x, -2) - mu / std
-            else:
-                xi = (x - mu) / std
-            A = (lo - mu) / std
-            B = (hi - mu) / std
-            varphi = self.exp(-0.5 * xi ** 2) * _ONEBYSQRT2PI
-            PsiA = 0.5 + 0.5 * self.erf(A / _SQRT2)
-            PsiB = 0.5 + 0.5 * self.erf(B / _SQRT2)
-            if x.shape != lo.shape:
-                result = self.prod((varphi / std) / self.unsqueeze((PsiB - PsiA), 0), -1, keepdims=False)
-            else:
-                result = (varphi / std) / (PsiB - PsiA)
+            return self.trunc_norm_log_pdf(x, lo, hi, mu, std)
         else:
             raise ValueError
-        if log:
-            return self.log(result)
-        return result
+
+    def proposal_log_probs(self, x, lo, hi, std=0.1, which='unif'):
+
+        A = self.unsqueeze(x, 1)
+        mu = self.unsqueeze(x, 0)
+        # print(mu.shape, A.shape, (A - mu).shape, hi.shape)
+        log_probs = self.bounded_distribution_log_prob(A, lo, hi, mu, std, which)
+        dim_sum_dim = tuple([-i for i in range(1, lo.ndim+1)])
+        log_probs = self.sum(log_probs, dim=dim_sum_dim)
 
     def multinomial(self, n, p):
         return self._BACKEND.multinomial(n, p)
@@ -848,45 +816,45 @@ class LinAlg(object):
     def eval_std_normal(self, x):
         return x ** 2 - _SQRT2PI
 
+    def cartesian(self, A, ):
+        pass
+
+    def min_pos_max_neg(self, alpha, return_max_neg=True, tol=1e15):
+        alpha_max = self.vecopy(alpha)
+        alpha_max[alpha_max < 0.0] = tol
+        alpha_max = self.min(alpha_max, -1)
+        if not return_max_neg:
+            return alpha_max
+        alpha_min = self.vecopy(alpha)
+        alpha_min[alpha_min > 0.0] = -tol
+        alpha_min = self.max(alpha_min, -1)
+        return alpha_min, alpha_max
+
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
-    l = LinAlg(backend='numpy')
+    l = LinAlg(backend='torch')
 
-    n_dim = 1
-    lo = np.array([0.0, 0.5])[:n_dim]
-    hi = np.array([1.0, 1.0])[:n_dim]
-    mu = np.array([0.2, 0.6])[:n_dim]
-    shape = (2, )
-    # ding,u = l.sample_bounded_distribution(
-    #     shape=(6, ),
-    #     lo=lo,
-    #     hi=hi,
-    #     mu=mu,
-    #     which='gauss',
-    #     return_log_probs=True
-    # )
-    u = l.randu(shape=(*shape, *lo.shape))
-    dang = l.trunc_norm_inv_cdf(u, lo, hi, mu, std=0.1, return_log_probs=True)
-    # print(ding)
-    # print(dang)
+    n_dim = 2
+    dim_slicer = slice(0, n_dim) if n_dim > 1 else 0
+    n_el = 2
 
+    lo = l.get_tensor(values=np.array([
+        [0.0, 0.5],
+        [0.0, 0.5],
+    ])[dim_slicer, :n_el])
+    hi = l.get_tensor(values=np.array([
+        [1.5, 1.0],
+        [1.5, 1.0],
+    ])[dim_slicer, :n_el])
+    mu = l.get_tensor(values=np.array([
+        [0.2, 0.55],
+        [0.2, 0.55],
+    ])[dim_slicer, :n_el])
+    shape = (3,)
+    std = l.get_tensor(values=np.array(0.1))
+    which = 'unif'
 
-    # ding = l.__dict__.keys()
-    # pickle.dump(l, open('linlg.p', 'wb'))
-    # l = pickle.load(open('linlg.p', 'rb'))
-    # l = LinAlg(backend='numpy')
-    # pickle.dump(l, open('linlg.p', 'wb'))
-    # from scipy.linalg import lu_factor
-
-
-    # pickle.dump(l, open('linalg.p', 'wb'))
-    # pickle.load(open('linalg.p', 'rb'))
-    # _DEVICE = 'cpu'
-    # a = abs(l.randn((20,20)))
-    # b = abs(l.randn(20))
-    # c = l.LU(a)
-    #
-    # cProfile.run('l.solve(c, b)')
-
+    dang = l.sample_bounded_distribution(shape=shape, lo=lo, hi=hi, mu=mu, std=std, which=which)
+    log_probs = l.proposal_log_probs(dang, lo, hi, std, which)
 
