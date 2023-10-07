@@ -1,8 +1,5 @@
-from sbi.inference.abc.smcabc import SMCABC
-from sbi.inference.posteriors.base_posterior import NeuralPosterior
-from sbmfi.inference.simulator import _BaseSimulator, DataSetSim
-from sbmfi.inference.priors import _BasePrior, UniFluxPrior, _NetFluxPrior
-from sbmfi.core.model import LabellingModel
+from sbmfi.core.simulator import _BaseSimulator, DataSetSim
+from sbmfi.inference.priors import _BasePrior, _NetFluxPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
 from sbmfi.core.model import LabellingModel
 import math
@@ -14,11 +11,9 @@ import multiprocessing as mp
 import psutil
 from typing import Dict
 from functools import partial
-import torch
 
 from sbi.inference.posteriors.base_posterior import NeuralPosterior
-from sbi.inference.posteriors.mcmc_posterior import MCMCPosterior
-from sbi.inference.abc.smcabc import SMCABC
+
 
 # from line_profiler import line_profiler
 # prof2 = line_profiler.LineProfiler()
@@ -44,7 +39,7 @@ class _BaseBayes(_BaseSimulator):
 
         self._sampler = self._fcm._sampler
         self._K = self._sampler.dimensionality
-        self._n_rev = len(self._fcm._fwd_id)
+        self._n_rev = self._fcm._nx
 
         self._x_meas = None
         self._x_meas_id = None
@@ -105,9 +100,8 @@ class _BaseBayes(_BaseSimulator):
     def simulate_true_data(self, n_obs=0, pandalize=True):
         if self._true_theta is None:
             raise ValueError('set true_theta')
-        fluxes = self._fcm.map_theta_2_fluxes(self._true_theta)
-        vv = self._la.tile(fluxes.T, (self._la._batch_size, )).T
-        true_data = self.simulate(vv, n_obs, pandalize=pandalize)
+        tt = self._la.tile(self._true_theta.T, (self._la._batch_size, )).T
+        true_data = self.simulate(tt, n_obs, pandalize=pandalize)
         if not pandalize:
             return true_data[[0]]
         true_data = true_data.iloc[[0]]
@@ -120,6 +114,9 @@ class _BaseBayes(_BaseSimulator):
             return_data=False,
             sum=True,  # for debugging its useful to have log_lik split out per observation model
     ):
+        if len(fluxes.shape) > 2:
+            raise ValueError('pass n_samples x n_fluxes array!')
+
         if not self._is_exact:
             raise ValueError(
                 'some observation models do not have a .log_prob, meaning that exact inference is impossible'
@@ -156,7 +153,7 @@ class _BaseBayes(_BaseSimulator):
 
     def log_prob(
             self,
-            value,
+            theta,
             return_data=False,
             evaluate_prior=False,
     ):
@@ -164,12 +161,12 @@ class _BaseBayes(_BaseSimulator):
             raise ValueError('set an observation first')
         # NB we do not evaluate the log_prob of the measured boundary fluxes, since it is a constant for _x_meas
 
-        vape = value.shape
-        theta = self._la.view(value, shape=(math.prod(vape[:-1]), vape[-1]))
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
 
         n_f = theta.shape[0]
-        k = len(self._obmods) + (
-            1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
+        k = len(self._obmods) + (1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
         n_meas = self._x_meas.shape[0]
         log_prob = self._la.get_tensor(shape=(n_f, n_meas, k))
         fluxes = self._fcm.map_theta_2_fluxes(theta)
@@ -193,7 +190,7 @@ class _BaseBayes(_BaseSimulator):
 
     def compute_distance(
             self,
-            value,
+            theta,
             n_obs=5,
             metric='rmse',
             epsilon=None,
@@ -205,8 +202,9 @@ class _BaseBayes(_BaseSimulator):
             raise ValueError('set an observation first')
         # NB we do not evaluate the log_prob of the measured boundary fluxes, since it is a constant for _x_meas
 
-        vape = value.shape
-        theta = self._la.view(value, shape=(math.prod(vape[:-1]), vape[-1]))
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
         data = self.__call__(theta, n_obs=n_obs, **kwargs)
         data = self._la.unsqueeze(data, 0)  # artificially add a chains dimension!
         if metric == 'rmse':
@@ -229,13 +227,13 @@ class _BaseBayes(_BaseSimulator):
 
     def evaluate_neural_density(
             self,
-            value,
+            theta,
             potential_fn,
             evaluate_prior=False,
             return_data=False,
     ):
-        vape = value.shape
-        theta = self._la.view(value, shape=(math.prod(vape[:-1]), vape[-1]))
+        vape = theta.shape
+        theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
         if return_data:
             raise NotImplementedError(
                 'its more efficient to sample all paramters and then use a DataSim to simulate all data'
@@ -283,16 +281,18 @@ class _BaseBayes(_BaseSimulator):
 
     def mvn_kernel_variance(
             self,
-            value,
+            theta,
             weights=None,
             samples_per_dim: int = 100,
             kernel_std_scale: float = 1.0,
             prev_cov=True,
             exclude_xch=True,
     ):
-        vape = value.shape
+        vape = theta.shape
         # shape into matrix with variables along rows and samples in columns
-        theta = self._la.view(value, shape=(math.prod(vape[:-1]), vape[-1])).T
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1])).T  # TODO why .T
+
         if exclude_xch:
             theta = theta[:self._K]
         else:
@@ -1280,25 +1280,33 @@ def check_stuff():
 if __name__ == "__main__":
     # from pta.sampling.uniform import sample_flux_space_uniform, UniformSamplingModel
     # from pta.sampling.tfs import TFSModel
-    import pickle, os
-    from sbmfi.models.small_models import spiro, multi_modal
+    import pickle
+    from sbmfi.models.small_models import spiro
     from sbmfi.inference.priors import UniFluxPrior
-    from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek, _bmid_ANTON
-    from sbmfi.core.util import _excel_polytope
-    from sbmfi.core.observation import MVN_BoundaryObservationModel
-    from sbmfi.settings import SIM_DIR
-    from sbmfi.core.polytopia import FluxCoordinateMapper, compute_volume
+
     # from sbmfi.inference.simulator import MCMC
-    from cdd import Fraction
-    from bokeh.plotting import show, output_file
-    from arviz import plot_density
-    from holoviews.operation.stats import univariate_kde
     # hv.extension('bokeh')
 
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
     np.set_printoptions(linewidth=500)
+
+    from sbmfi.models.small_models import spiro
+    from sbmfi.inference.priors import UniFluxPrior
+    import pickle
+
+    model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0, )
+    bb = kwargs['basebayes']
+    sdf = kwargs['substrate_df']
+    up = UniFluxPrior(model)
+    theta = up.sample((30,))
+
+    dss = DataSetSim(model, sdf, bb._obmods, num_processes=1)
+    data = dss(theta, 3)
+    pickle.dump(dss, open('dss.p', 'wb'))
+    dss = pickle.load(open('dss.p', 'rb'))
+    dss(theta, 3)
 
     # model, kwargs = build_e_coli_anton_glc(
     #     backend='torch',
@@ -1329,127 +1337,127 @@ if __name__ == "__main__":
     # smc.set_measurement(x_meas=kwargs['measurements'])
     # smc.set_true_theta(theta=kwargs['theta'])
 
-    a = False
-    if a:
-        which = 'lcms'
-        # which = 'tomek'
-        ding = SMC
-        run_kwargs = dict(
-            n_smc_steps=3,
-            n=50,
-            n_obs=5,
-            population_batch=7,
-            n0_multiplier=2,
-            distance_based_decay=True,
-            epsilon_decay=0.8,
-            kernel_variance_scale=1.0,
-            evaluate_prior=False,
-            potentype='approx',
-            return_data=True,
-            potential_kwargs={},
-            metric='rmse',
-            line_kernel='gauss',
-            xch_kernel='gauss',
-            xch_std=0.4,
-            return_all_populations=False,
-        )
-    else:
-        which = 'com'
-        # which = 'anton'
-        ding = MCMC
-        run_kwargs = dict(
-            n= 20,
-            n_burn = 10,
-            thinning_factor = 2,
-            n_chains = 1,
-            potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
-            n_cdf = 2,
-            # algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
-            chord_proposal = 'gauss',
-            chord_std = 1.0,
-            xch_proposal = 'gauss',
-            xch_std = 0.4,
-            return_data = True,
-            evaluate_prior = False,
-            potential_kwargs = {},
-            return_az = True,
-        )
-
-
-    model, kwargs = spiro(
-        backend='numpy',
-        batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
-        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=2, L_12_omega=1.0,
-        v5_reversible=True
-    )
-    # model, kwargs = build_e_coli_anton_glc(
-    #     backend='torch',
-    #     auto_diff=False,
-    #     build_simulator=True,
-    #     ratios=False,
-    #     batch_size=10,
-    #     which_measurements=which,
-    #     which_labellings=['20% [U]Glc', '[1]Glc'],
-    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    #     seed=1,
-    # )
-    sdf = kwargs['substrate_df']
-    dss = kwargs['basebayes']
-    simm = dss._obmods
-    bom = dss._bom
-    up = UniFluxPrior(model, cache_size=2000)
-    # from botorch.utils.sampling import sample_polytope
-
-    mcmc = ding(
-        model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom,
-        prior=up,
-    )
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    mcmc.set_true_theta(theta=kwargs['theta'])
-
-    post = mcmc.run(**run_kwargs)
-    # az.to_netcdf(post, 'MCMC_e_coli_glc_anton_obsmod.nc')
-    # print(prof2.print_stats())
-
-    # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod.nc")
-    # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\src\sbmfi\inference\MCMC_e_coli_glc_anton_obsmod.nc")
-
-    # if 'prior' in mcmc_data:
-    #     del mcmc_data.prior
-    # if 'prior_predictive' in mcmc_data:
-    #     del mcmc_data.prior_predictive
-
-    # make_model = True
-    # if make_model:
-    #     model, kwargs = build_e_coli_anton_glc(
-    #         backend='torch',
-    #         auto_diff=False,
-    #         build_simulator=True,
-    #         ratios=False,
-    #         batch_size=25,
-    #         which_measurements='anton',
-    #         which_labellings=['20% [U]Glc', '[1]Glc'],
-    #         measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    #         seed=1,
+    # a = False
+    # if a:
+    #     which = 'lcms'
+    #     # which = 'tomek'
+    #     ding = SMC
+    #     run_kwargs = dict(
+    #         n_smc_steps=3,
+    #         n=50,
+    #         n_obs=5,
+    #         population_batch=7,
+    #         n0_multiplier=2,
+    #         distance_based_decay=True,
+    #         epsilon_decay=0.8,
+    #         kernel_variance_scale=1.0,
+    #         evaluate_prior=False,
+    #         potentype='approx',
+    #         return_data=True,
+    #         potential_kwargs={},
+    #         metric='rmse',
+    #         line_kernel='gauss',
+    #         xch_kernel='gauss',
+    #         xch_std=0.4,
+    #         return_all_populations=False,
     #     )
-    #     sdf = kwargs['substrate_df']
-    #     dss = kwargs['basebayes']
-    #     simm = dss._obmods
-    #     bom = dss._bom
-    #     up = UniFluxPrior(model, cache_size=2000)
+    # else:
+    #     which = 'com'
+    #     # which = 'anton'
+    #     ding = MCMC
+    #     run_kwargs = dict(
+    #         n= 20,
+    #         n_burn = 10,
+    #         thinning_factor = 2,
+    #         n_chains = 1,
+    #         potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
+    #         n_cdf = 2,
+    #         # algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
+    #         chord_proposal = 'gauss',
+    #         chord_std = 1.0,
+    #         xch_proposal = 'gauss',
+    #         xch_std = 0.4,
+    #         return_data = True,
+    #         evaluate_prior = False,
+    #         potential_kwargs = {},
+    #         return_az = True,
+    #     )
     #
-    #     mcmc = MCMC(
-    #         model=model,
-    #         substrate_df=sdf,
-    #         mdv_observation_models=simm,
-    #         boundary_observation_model=bom,
-    #         prior=up,
-    #     )
-    #     mcmc.set_measurement(x_meas=kwargs['measurements'])
-    #     mcmc.set_true_theta(theta=kwargs['theta'])
-    #     mcmc.simulate_data(mcmc_data, n=60000)
+    #
+    # model, kwargs = spiro(
+    #     backend='numpy',
+    #     batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
+    #     v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=2, L_12_omega=1.0,
+    #     v5_reversible=True
+    # )
+    # # model, kwargs = build_e_coli_anton_glc(
+    # #     backend='torch',
+    # #     auto_diff=False,
+    # #     build_simulator=True,
+    # #     ratios=False,
+    # #     batch_size=10,
+    # #     which_measurements=which,
+    # #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    # #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    # #     seed=1,
+    # # )
+    # sdf = kwargs['substrate_df']
+    # dss = kwargs['basebayes']
+    # simm = dss._obmods
+    # bom = dss._bom
+    # up = UniFluxPrior(model, cache_size=2000)
+    # # from botorch.utils.sampling import sample_polytope
+    #
+    # mcmc = ding(
+    #     model=model,
+    #     substrate_df=sdf,
+    #     mdv_observation_models=simm,
+    #     boundary_observation_model=bom,
+    #     prior=up,
+    # )
+    # mcmc.set_measurement(x_meas=kwargs['measurements'])
+    # mcmc.set_true_theta(theta=kwargs['theta'])
+    #
+    # post = mcmc.run(**run_kwargs)
+    # # az.to_netcdf(post, 'MCMC_e_coli_glc_anton_obsmod.nc')
+    # # print(prof2.print_stats())
+    #
+    # # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod.nc")
+    # # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\src\sbmfi\inference\MCMC_e_coli_glc_anton_obsmod.nc")
+    #
+    # # if 'prior' in mcmc_data:
+    # #     del mcmc_data.prior
+    # # if 'prior_predictive' in mcmc_data:
+    # #     del mcmc_data.prior_predictive
+    #
+    # # make_model = True
+    # # if make_model:
+    # #     model, kwargs = build_e_coli_anton_glc(
+    # #         backend='torch',
+    # #         auto_diff=False,
+    # #         build_simulator=True,
+    # #         ratios=False,
+    # #         batch_size=25,
+    # #         which_measurements='anton',
+    # #         which_labellings=['20% [U]Glc', '[1]Glc'],
+    # #         measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    # #         seed=1,
+    # #     )
+    # #     sdf = kwargs['substrate_df']
+    # #     dss = kwargs['basebayes']
+    # #     simm = dss._obmods
+    # #     bom = dss._bom
+    # #     up = UniFluxPrior(model, cache_size=2000)
+    # #
+    # #     mcmc = MCMC(
+    # #         model=model,
+    # #         substrate_df=sdf,
+    # #         mdv_observation_models=simm,
+    # #         boundary_observation_model=bom,
+    # #         prior=up,
+    # #     )
+    # #     mcmc.set_measurement(x_meas=kwargs['measurements'])
+    # #     mcmc.set_true_theta(theta=kwargs['theta'])
+    # #     mcmc.simulate_data(mcmc_data, n=60000)
 
 

@@ -1,6 +1,5 @@
 from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU, ConvolutedEMU
 from sbmfi.core.util import _get_dictlist_idxs, _read_atom_map_str_rex, _find_biomass_rex, _strip_bigg_rex
-from collections import OrderedDict
 import numpy as np
 import pandas as pd
 from cobra import Reaction, DictList, Metabolite
@@ -51,7 +50,7 @@ class LabellingReaction(Reaction):
 
         self._pseudo = pseudo
 
-        self._atom_map = OrderedDict()  # {Met: (stoich, [tuple('atoms'),...] ) } required to be ordered for the
+        self._atom_map = {}  # {Met: (stoich, [tuple('atoms'),...] ) } required to be ordered for the
         self._rect_prod_map: np.array = None  # mapping all reactant atoms to (present) product atoms
         self._rho_min = 0.0  # minimal fraction of flux going in the reverse direction; has to do with Gibbs free energy change
         self._rho_max = 0.0
@@ -95,7 +94,7 @@ class LabellingReaction(Reaction):
                              'since this would not have an atom mapping')
         Reaction.__imul__(self, coefficient=coefficient) # TODO: test this; this used to be super!
         self.set_atom_map(
-            atom_map=OrderedDict([(met, (-stoich, atoms)) for met, (stoich, atoms) in self._atom_map.items()])
+            atom_map=dict([(met, (-stoich, atoms)) for met, (stoich, atoms) in self._atom_map.items()])
         )
         if self.rho_max > 0.0:
             print('watch out, thermo')
@@ -399,7 +398,7 @@ class LabellingReaction(Reaction):
         op = operator.lt if reactant else operator.gt
         return [met for met, (stoich, atoms) in self._atom_map.items() for atom in atoms if op(stoich, 0.0)]
 
-    def set_atom_map(self, atom_map: OrderedDict):
+    def set_atom_map(self, atom_map: dict):
         """
         The concatenated reactant labels map onto the concatenated product labels as follows
         [abcdef] -> [abdcef], thus: self._rect_prod_map = [0,1,3,2,4,5]
@@ -421,7 +420,7 @@ class LabellingReaction(Reaction):
                     metabolites_to_add={met: stoich for met, (stoich, atoms) in atom_map.items()}, combine=False,
                 )
 
-        map = OrderedDict()
+        map = {}
         for metabolite, (stoich, atoms) in atom_map.items():
             if not isinstance(metabolite, LabelledMetabolite):
                 raise ValueError(f'{self.id} atom_map contains non-LabelledMetabolite object: {metabolite.id}')
@@ -481,7 +480,7 @@ class LabellingReaction(Reaction):
             self._rect_prod_map = np.where(cumul_prod_atoms[:, None] == cumul_rect_atoms[None, :])[1]
 
         if not self._pseudo:
-            self._rev_reaction.set_atom_map(atom_map=OrderedDict([
+            self._rev_reaction.set_atom_map(atom_map=dict([
                 (met, (-stoich, atoms)) for met, (stoich, atoms) in self._atom_map.items()
             ]))
 
@@ -502,7 +501,7 @@ class LabellingReaction(Reaction):
             # for when we dont pass rho_max as an explicit argument
             self.rho_max = self._RHO_MAX
 
-        atom_map = OrderedDict()
+        atom_map = {}
 
         if is_biomass:
             # when setting biomass, it is important that all metabolites are already in LabelledMetabolite form!
@@ -589,9 +588,9 @@ class LabellingReaction(Reaction):
     def subtract_metabolites(self, metabolites: dict, combine: bool = True, reversibly: bool = True):
         # NB we need this for pta.tfs I believe, since remove_reactions is called a bunch of times
         Reaction.subtract_metabolites(self, metabolites=metabolites, combine=combine, reversibly=reversibly)
-        self._atom_map = OrderedDict()
+        self._atom_map = {}
         if not self._pseudo:
-            self._rev_reaction._atom_map = OrderedDict()
+            self._rev_reaction._atom_map = {}
             self._rev_reaction.subtract_metabolites(
                 metabolites={m: -s for m, s in metabolites.items()}, combine=combine, reversibly=reversibly
             )

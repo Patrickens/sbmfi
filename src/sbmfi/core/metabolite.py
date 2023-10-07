@@ -1,8 +1,6 @@
 from cobra import Metabolite, Object, DictList
 from sbmfi.lcmsanalysis.formula import Formula
 import numpy as np
-from collections import OrderedDict
-from itertools import product
 import re
 from abc import abstractmethod
 
@@ -141,7 +139,7 @@ class EMU_Metabolite(LabelledMetabolite):
         return state
 
     def _init_state(self):
-        self.emus = OrderedDict([(weight, DictList()) for weight in range(1, self.elements['C']+1)])
+        self.emus = dict([(weight, DictList()) for weight in range(1, self.elements['C']+1)])
         self.convolvers = DictList()
         if self.elements['C'] > 0:
             self_emu = EMU(metabolite=self, positions=np.arange(self.elements['C']))

@@ -3,7 +3,7 @@ from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
 from sbmfi.inference.priors import UniFluxPrior
-from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel
+from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel, MDV_ObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
 from sbmfi.settings import MODEL_DIR, SIM_DIR
@@ -161,9 +161,9 @@ def spiro(
         ('C', 3, 'M-H', 4.5, 0.02, None, 7e5),
         ('C', 4, 'M-H', 5.5, 0.02, None, 7e5),
 
-        ('D', 2, 'M-H', 12.0, 0.01, None, 1e5),
-        ('D', 0, 'M-H', 9.0, 0.01, None, 1e5),
-        ('D', 3, 'M-H', 13.0, 0.01, None, 1e5),
+        ('D', 2, 'M-H', 12.0, 0.001, None, 1e5),
+        ('D', 0, 'M-H', 9.0, 0.001, None, 1e5),
+        ('D', 3, 'M-H', 13.0, 0.001, None, 1e5),
 
         ('L|[1,2]', 0, 'M-H', 14.0, 0.01 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
         ('L|[1,2]', 1, 'M-H', 15.0, 0.01 * L_12_omega, L_12_omega, 4e4),
@@ -266,7 +266,7 @@ def spiro(
 
     measurements, basebay, theta = None, None, None
     if which_measurements is not None:
-        observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
+        observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
 
         if which_measurements == 'lcms':
             annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}

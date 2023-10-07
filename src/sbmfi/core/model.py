@@ -21,7 +21,6 @@ from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite  import LabelledMetabolite, ConvolutedEMU, EMU, IsoCumo
 from itertools import repeat
 from typing import Iterable, Union
-from collections import OrderedDict
 from abc import abstractmethod
 from copy import copy, deepcopy
 import pickle
@@ -81,7 +80,7 @@ class LabellingModel(Model):
         self.tolerance = 1e-9  # needed to have decent flux sampling results; default tol=1e-6
 
         # input labelling variables
-        self._input_labelling = OrderedDict()
+        self._input_labelling = {}
         self._labelling_id: str = None
         self._labelling_repo: dict = {}  # repository of all labellings that we encountered
 
@@ -95,6 +94,7 @@ class LabellingModel(Model):
         self._labelling_reactions = DictList()  # reactions for which all reactants and products are present and carry carbon
         self._chosen_rid = []
 
+        self._fcm_kwargs = {}
         self._initialize_state()  # sets even more attributes; function is reused when building the model
 
         self.groups = DictList() # TODO: no functionality has been implemented or tested for groups
@@ -201,8 +201,8 @@ class LabellingModel(Model):
     @property
     def input_labelling(self):
         """entity can be IsoCumo or EMU"""
-        return pd.Series(OrderedDict((isocumo.id, frac) for isocumo, frac in
-                                     self._input_labelling.items()), name=self._labelling_id, dtype=np.float64).round(4)
+        return pd.Series(dict((isocumo.id, frac) for isocumo, frac in self._input_labelling.items()),
+                         name=self._labelling_id, dtype=np.float64).round(4)
 
     @property
     def input_metabolites(self):
@@ -242,6 +242,8 @@ class LabellingModel(Model):
         if not self._is_built:
             raise ValueError('MUST BUILD')
         fluxes = self._fcm.frame_fluxes(fluxes, samples_id, trim)
+        if len(fluxes.shape) > 2:
+            raise ValueError('can only deal with 2D stratified fluxes!')
         if self._la._auto_diff:
             fluxes.requires_grad_(True)
         if fluxes.shape[0] != self._la._batch_size:
@@ -249,7 +251,7 @@ class LabellingModel(Model):
         self._fluxes = fluxes
 
     def set_input_labelling(self, input_labelling: pd.Series):
-        self._input_labelling = OrderedDict()
+        self._input_labelling = {}
         self._labelling_id = input_labelling.name
         for isotopomer_str, frac in input_labelling.items():
             if frac == 0.0:
@@ -273,7 +275,7 @@ class LabellingModel(Model):
             if not math.isclose(a=sum_met, b=1.0, abs_tol=1e-4):
                 raise ValueError(f'Input labeling fractions of metabolite {metabolite.id} do not sum up to 1.0')
             fractions[input_metabolites == metabolite] /= sum_met  # makes sum closer to 1
-        self._input_labelling = OrderedDict((key, frac) for key, frac in zip(isotopomers, fractions))
+        self._input_labelling = dict((key, frac) for key, frac in zip(isotopomers, fractions))
 
         input_reactions = DictList()
         for metabolite in set(self.input_metabolites):
@@ -354,7 +356,7 @@ class LabellingModel(Model):
         if not isinstance(reaction, LabellingReaction):
             raise ValueError('only meant for LabellingReaction')
 
-        fixed_atom_map = OrderedDict()
+        fixed_atom_map = {}
         for metabolite, (stoich, atoms) in atom_map.items():
             if not isinstance(metabolite, LabelledMetabolite):
                 raise ValueError('atom_map should only contain LabelledMetabolite')
@@ -557,7 +559,7 @@ class LabellingModel(Model):
                 self._measurements.remove(metabolite)
             if metabolite in self.input_metabolites:
                 print('removing input metabolite for which labelling is set!')
-                self._input_labelling = OrderedDict()
+                self._input_labelling = {}
             if not destructive:
                 # NB this is necessary for condensed reactions where a
                 #   metabolite appears in the atom_map but not in metabolites
@@ -694,6 +696,7 @@ class LabellingModel(Model):
             kernel_basis='svd',
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
+            clip_sphere=False,
             verbose=False,
     ):
         self._initialize_state()
@@ -706,6 +709,7 @@ class LabellingModel(Model):
             pr_verbose=verbose,
             linalg=self._la
         )
+        self._fcm_kwargs = self._fcm.fcm_kwargs
         self._set_state()
 
     @abstractmethod
@@ -740,37 +744,36 @@ class RatioMixin(LabellingModel):
 
     @property
     def ratio_reactions(self) -> DictList:
-        ratio_reactions = OrderedDict()  # the keys are an ordered set
+        ratio_reactions = {}  # the keys are an ordered set
         for vals in self._ratio_repo.values():
             for reac_id, coeff in {**vals['numerator'], **vals['denominator']}.items():
                 reac = self.labelling_reactions.get_by_id(id=reac_id)
                 ratio_reactions.setdefault(reac, None)
         return DictList(ratio_reactions.keys())
 
-    def compute_ratios(self, fluxes, tol=1e-10) -> pd.DataFrame:
+    def compute_ratios(self, fluxes, tol=1e-10, pandalize=True) -> pd.DataFrame:
         # TODO this is not the right place for this...
+        index = None
         if isinstance(fluxes, pd.DataFrame):
-            values = self._la.get_tensor(values=fluxes.loc[:, self.labelling_reactions.list_attr('id')].values.T)
-        else:
-            values = fluxes.T
+            index = fluxes.index
+            fluxes = self._la.get_tensor(values=fluxes.loc[:, self.labelling_reactions.list_attr('id')].values)
 
-        num = self._ratio_num_sum @ values
-        # num[abs(num) < tol] = 0.0
-        den = self._ratio_den_sum @ values
+        num = self._ratio_num_sum @ fluxes.T
+        den = self._ratio_den_sum @ fluxes.T
         den[den == 0.0] += tol
 
         with np.errstate(invalid='ignore'):
             ratios = self._la.divide(num, den).T
 
-        if isinstance(fluxes, pd.DataFrame):
-            return pd.DataFrame(self._la.tonp(ratios), index=fluxes.index, columns=self.ratios_id)
+        if pandalize:
+            return pd.DataFrame(self._la.tonp(ratios), index=index, columns=self.ratios_id)
         return ratios
 
     def _initialize_state(self):
         super(RatioMixin, self)._initialize_state()
         self._ratio_num_sum = self._la.get_tensor(shape=(0,))
         self._ratio_den_sum = self._la.get_tensor(shape=(0,))
-        self._ratio_repo = OrderedDict()  # repository of all flux-ratios (with names as keys) that we are interested in in a particular model
+        self._ratio_repo = {}  # repository of all flux-ratios (with names as keys) that we are interested in in a particular model
 
     @staticmethod
     def _sum_getter(key, ratio_repo: dict, linalg: LinAlg, index: pd.Index):
@@ -794,10 +797,10 @@ class RatioMixin(LabellingModel):
 
     @property
     def ratio_repo(self):
-        repo = OrderedDict()
+        repo = {}
         for ratio_id, vals in self._ratio_repo.items():
-            numerator = OrderedDict()
-            denominator = OrderedDict()
+            numerator = {}
+            denominator = {}
             for reac_id, coeff in {**vals['numerator'], **vals['denominator']}.items():
                 net_id = _rev_reactions_rex.sub('', reac_id)
                 if reac_id != net_id:
@@ -807,20 +810,20 @@ class RatioMixin(LabellingModel):
                     numerator[net_id] = coeff
             repo[ratio_id] = {
                 'numerator': numerator,
-                'denominator': OrderedDict({**numerator, **denominator}),
+                'denominator': {**numerator, **denominator},
             }
         return repo
 
-    def set_ratio_repo(self, ratio_repo: OrderedDict):
+    def set_ratio_repo(self, ratio_repo: dict):
         # condensed means that we pass the ratio_repo with disjoint sets for numerator and denominator
         # TODO only accept ratios defined in net-coordinate system
         # TODO update this with the self._always_rev attribute functionality
-        repo = OrderedDict()
+        repo = {}
         for ratio_id, vals in ratio_repo.items():
-            num = OrderedDict(vals['numerator'])
-            den = OrderedDict(vals['denominator'])
-            numerator = OrderedDict()
-            denominator = OrderedDict()
+            num = vals['numerator']
+            den = vals['denominator']
+            numerator = {}
+            denominator = {}
             for reac_id, coeff in {**num, **den}.items():
 
                 if reac_id not in self.reactions:
@@ -880,36 +883,36 @@ class EMU_Model(LabellingModel):
         odict = super(EMU_Model, self).__getstate__()
 
         odict['_ns'] = None
-        odict['_xemus'] = OrderedDict()
-        odict['_yemus'] = OrderedDict()
-        odict['_emu_indices'] = OrderedDict()
-        odict['_A_tot'] = OrderedDict()
-        odict['_LUA'] = OrderedDict()
-        odict['_B_tot'] = OrderedDict()
-        odict['_X'] = OrderedDict()
-        odict['_Y'] = OrderedDict()
-        odict['_dXdv'] = OrderedDict()
-        odict['_dYdv'] = OrderedDict()
+        odict['_xemus'] = {}
+        odict['_yemus'] = {}
+        odict['_emu_indices'] = {}
+        odict['_A_tot'] = {}
+        odict['_LUA'] = {}
+        odict['_B_tot'] = {}
+        odict['_X'] = {}
+        odict['_Y'] = {}
+        odict['_dXdv'] = {}
+        odict['_dYdv'] = {}
         return odict
 
     def _initialize_state(self):
         super(EMU_Model, self)._initialize_state()
         
         # state-objects
-        self._xemus = OrderedDict()  # the EMUs that make up the X matrices ordered by weight
-        self._yemus = OrderedDict()  # the EMUs that make up the Y matrices ordered by weight
-        self._emu_indices = OrderedDict()  # maps EMUs from X and Y to vector self._s
+        self._xemus = {}  # the EMUs that make up the X matrices ordered by weight
+        self._yemus = {}  # the EMUs that make up the Y matrices ordered by weight
+        self._emu_indices = {}  # maps EMUs from X and Y to vector self._s
 
         # state-variables
-        self._A_tot = OrderedDict()  # rhs matrix in the the EMU equation to be inverted
-        self._LUA = OrderedDict()  # LU factored A matrix for jacobian calculations
-        self._B_tot = OrderedDict()
-        self._X = OrderedDict()  # emu state matrix
-        self._Y = OrderedDict()  # emu input matrix
+        self._A_tot = {}  # rhs matrix in the the EMU equation to be inverted
+        self._LUA = {}  # LU factored A matrix for jacobian calculations
+        self._B_tot = {}
+        self._X = {}  # emu state matrix
+        self._Y = {}  # emu input matrix
 
         # jacobian stuff
-        self._dXdv = OrderedDict()
-        self._dYdv = OrderedDict()
+        self._dXdv = {}
+        self._dYdv = {}
 
     def _set_state(self):
         num_el_s = 0
@@ -1017,8 +1020,8 @@ class EMU_Model(LabellingModel):
                                         self._xemus[emu.weight].append(emu)
 
         both = sorted(list(set(self._xemus.keys()) | set(self._yemus.keys())))
-        self._xemus = OrderedDict([(weight, self._xemus[weight]) for weight in both])
-        self._yemus = OrderedDict([(weight, self._yemus[weight]) for weight in both])
+        self._xemus = dict([(weight, self._xemus[weight]) for weight in both])
+        self._yemus = dict([(weight, self._yemus[weight]) for weight in both])
 
     def _initialize_Y(self):
         # deepcopy is necessary, otherwise the previous labelling state is modified in place!
@@ -1085,6 +1088,7 @@ class EMU_Model(LabellingModel):
             kernel_basis='svd',
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
+            clip_sphere=False,
             verbose=False,
     ):
         super().build_simulator(free_reaction_id, kernel_basis, basis_coordinates, logit_xch_fluxes, verbose)
@@ -1173,7 +1177,7 @@ class EMU_Model(LabellingModel):
         bdx = self._yemus[weight].list_attr('id')
 
         def batch_corrector(values, index, columns=None):
-            batches = OrderedDict()
+            batches = {}
             for sid, sub_vals in zip(self._fcm.samples_id, values):
                 batches[sid] = pd.DataFrame(sub_vals, index=index, columns=columns)
             return pd.concat(batches.values(), keys=batches.keys())

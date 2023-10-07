@@ -1,4 +1,4 @@
-from sbmfi.core.polytopia import LabellingPolytope, PolytopeSamplingModel, compute_polytope_halfspaces, \
+from sbmfi.core.polytopia import LabellingPolytope, PolytopeSamplingModel, H_representation, \
     fast_FVA
 from sbmfi.estimate.priors import sampling_tasks
 from sbmfi.legacy.hr_sampler import volume_tasks, volume_worker
@@ -12,7 +12,7 @@ import multiprocessing as mp
 def make_flux_pol_from_vertices(vertices: np.array, verbose=False, kernel_type='svd', basis_coordinates='rounded'):
     cols = pd.Index(list(ascii_lowercase[:vertices.shape[1]]))
 
-    A, b = compute_polytope_halfspaces(vertices, number_type='float')
+    A, b = H_representation(vertices, number_type='float')
     A[abs(A) < 1e-12] = 0.0
     A = pd.DataFrame(A, columns=cols)
     A_ub = pd.DataFrame(np.eye(vertices.shape[1]), index=cols + '|ub', columns=cols)

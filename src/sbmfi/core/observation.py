@@ -3,7 +3,6 @@ import pandas as pd
 import math
 from typing import Iterable, Union, Dict, Tuple
 from itertools import product, cycle
-from collections import OrderedDict
 
 import scipy.linalg
 from cobra import Metabolite
@@ -12,7 +11,6 @@ from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.metabolite import EMU
 from sbmfi.core.polytopia import FluxCoordinateMapper, rref_and_project, LabellingPolytope
 from sbmfi.core.util import (
-    hdf_opener_and_closer,
     _bigg_compartment_ids,
     make_multidex,
 )
@@ -91,7 +89,7 @@ class MDV_ObservationModel(object):
 
     @property
     def scaling(self):
-        scaling = OrderedDict()
+        scaling = {}
         for ion_id, indices in self._ionindices.items():
             scaling[ion_id] = self._la.tonp(self._scaling[indices][0])
         return pd.Series(scaling, name='scaling')
@@ -606,8 +604,8 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             normalize=True,
             transformation=None,
             clip_min=0.0,
-    ) -> OrderedDict:
-        obsims = OrderedDict()
+    ) -> dict:
+        obsims = {}
         for labelling_id, (annotation_df, sigma_df, omega) in annotation_dfs.items():
             obsim = None
             if annotation_df is not None:
@@ -852,8 +850,8 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             parameters: TOF6546Alaa5minParameters = TOF6546Alaa5minParameters(),
             clip_min=750.0,
             transformation='ilr',
-    ) -> OrderedDict:
-        obsims = OrderedDict()
+    ) -> dict:
+        obsims = {}
         for labelling_id, annotation_df in annotation_dfs.items():
             obsim = None
             if annotation_df is not None:

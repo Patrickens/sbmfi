@@ -1,13 +1,11 @@
 import tables as pt
 import warnings
-import torch
 import psutil
 import math
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
 from typing import Iterable, Union, Dict, Tuple
-from collections import OrderedDict
 import tqdm
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.simulfuncs import (
@@ -20,9 +18,7 @@ from sbmfi.core.observation import (
     MDV_ObservationModel,
 )
 from sbmfi.core.util import (
-    _excel_polytope,
     hdf_opener_and_closer,
-    _bigg_compartment_ids,
     make_multidex,
     profile,
 )
@@ -59,7 +55,7 @@ class _BaseSimulator(object):
         if not substrate_df.index.unique().all():
             raise ValueError(f'non-unique identifiers for labelling! {substrate_df.index}')
 
-        self._obmods = OrderedDict()
+        self._obmods = {}
         self._obsize = {}
 
         has_log_prob = []
@@ -97,6 +93,10 @@ class _BaseSimulator(object):
         self._bom = boundary_observation_model
         self._did = None
 
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._model.build_simulator(**self._model._fcm_kwargs)
+
     @property
     def data_id(self):
         if self._did is None:
@@ -115,22 +115,46 @@ class _BaseSimulator(object):
     def theta_id(self):
         return self._fcm.theta_id
 
+    def _pandalize_data(self, data, index, n_obs, return_mdvs=False):
+        if return_mdvs:
+            columns = make_multidex({k: self._model.state_id for k in self._obmods}, 'labelling_id', 'mdv_id')
+            return pd.DataFrame(data, index=index, columns=columns)
+        else:
+            n_obshape = max(1, n_obs)
+            n_f = data.shape[0]
+            data = self._la.tonp(data).transpose(1, 0, 2).reshape((n_f * n_obshape, len(self.data_id)))
+            if index is None:
+                index = pd.RangeIndex(n_f)
+            if n_obs > 0:
+                obs_index = pd.RangeIndex(n_obshape)
+                index = make_multidex({k: obs_index for k in index}, 'samples_id', 'obs_i')
+            return pd.DataFrame(data, index=index, columns=self.data_id)
+
     def simulate(
             self,
-            fluxes,
+            theta,
             n_obs=3,
             return_mdvs=False, # whether to return mdvs, observation_average or noisy observations
             pandalize=False,
     ):
         index = None
-        if isinstance(fluxes, pd.DataFrame):
-            index = fluxes.index
-            fluxes = self._la.get_tensor(values=fluxes.loc[:, self._fcm.fluxes_id].values)
+        if isinstance(theta, pd.DataFrame):
+            index = theta.index
+            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
+
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+
+        fluxes = self._fcm.map_theta_2_fluxes(theta)
+
+        if len(fluxes.shape) > 2:
+            raise ValueError('pass n_samples x n_fluxes array!')
 
         n_obshape = max(1, n_obs)
         slicer = 0 if n_obs == 0 else slice(None)
         n_f = fluxes.shape[0]
-        self._model.set_fluxes(fluxes, index, trim=True)
+        self._model.set_fluxes(fluxes, index, trim=True)  # this is where wrongly shaped fluxes are caught!
 
         if return_mdvs:
             result = self._la.get_tensor(shape=(n_f, self._model._ns * len(self._obmods)))
@@ -151,17 +175,7 @@ class _BaseSimulator(object):
                 result[:, slicer, j:k] = obmod(mdv, n_obs=n_obs)
 
         if pandalize:
-            if return_mdvs:
-                columns = make_multidex({k: self._model.state_id for k in self._obmods}, 'labelling_id', 'mdv_id')
-                result = pd.DataFrame(result, index=index, columns=columns)
-            else:
-                result = self._la.tonp(result).transpose(1, 0, 2).reshape((n_f * n_obshape, len(self.data_id)))
-                if index is None:
-                    index = pd.RangeIndex(n_f)
-                if n_obs > 0:
-                    obs_index = pd.RangeIndex(n_obshape)
-                    index = make_multidex({k: obs_index for k in index}, 'samples_id', 'obs_i')
-                result = pd.DataFrame(result, index=index, columns=self.data_id)
+            return self._pandalize_data(result, index, n_obs, return_mdvs)
         return result
 
     def to_partial_mdvs(self, data, is_mdv=False, normalize=False, pandalize=True):
@@ -194,27 +208,6 @@ class _BaseSimulator(object):
             processed = pd.DataFrame(self._la.tonp(processed), index=index, columns=make_multidex(columns, name1='data_id'))
         return processed
 
-    def prepare_for_sbi(
-            self,
-            theta,
-            data,
-            randomize=True,
-            **kwargs # this allows to pass **result
-    ):
-        # cast to correct datatype and I guess do some other pre-processing?
-        # TODO think of device!
-        data = torch.as_tensor(data, dtype=torch.float32)
-        theta = torch.as_tensor(theta, dtype=torch.float32)
-        n_t = theta.shape[-1]
-        n_samples, n_obs, n_x = data.shape
-        theta = theta.unsqueeze(1).repeat((1, n_obs, 1)).view(n_obs * n_samples, n_t)
-        data = data.view(n_obs * n_samples, n_x)
-        if randomize:
-            ridx = torch.as_tensor(self._la.choice(n_samples, n_samples))
-            data = data[ridx]
-            theta = theta[ridx]
-        return theta, data
-
     def _verify_hdf(self, hdf: pt.file):
         substrate_df = pd.read_hdf(hdf.filename, key='substrate_df', mode=hdf.mode)
         if not self._substrate_df.equals(substrate_df):
@@ -236,7 +229,7 @@ class _BaseSimulator(object):
     def to_hdf(
             self,
             hdf,
-            result: OrderedDict,
+            result: dict,
             dataset_id: str,
             append=True,
             expectedrows_multiplier=10,
@@ -279,7 +272,7 @@ class _BaseSimulator(object):
             ptarray.append(array)
             dataset_shapes.append(ptarray.shape[0])
         if not all(np.array(dataset_shapes) == dataset_shapes[0]):
-            raise ValueError(f'unbalanced dataset: {dataset_shapes}')
+            raise ValueError(f'unbalanced dataset: {dataset_shapes}, its on you to fix things now, have fun!')
 
     @hdf_opener_and_closer(mode='r')
     def read_hdf(
@@ -343,29 +336,13 @@ class _BaseSimulator(object):
                 for i in labelling_idx], axis=1, keys=labelling_id
             ), validx
 
-    def sbi_data_from_hdf(
-            self,
-            hdf: str,
-            dataset_id: str,
-            n: int = None,
-            device=None,
-    ):
-        data, validx = self.read_hdf(hdf, dataset_id, what='data')
-        data = data[validx.all(-1)]
-        theta, validx = self.read_hdf(hdf, dataset_id, what='theta')
-        theta = theta[validx.all(-1)]
-
-        if n is not None:
-            if n > data.shape[0]:
-                raise ValueError(f'cannot sample {n} from dataset of lenghth {data.shape[0]}')
-            ridx = self._la.tonp(self._la.choice(n, data.shape[0]))
-            data = data[ridx]
-            theta = theta[ridx]
-        return self.prepare_for_sbi(theta, data, device)
-
-    def __call__(self, theta, n_obs=3, **kwargs):
-        fluxes = self._fcm.map_theta_2_fluxes(theta)
-        return self.simulate(fluxes, n_obs, **kwargs)
+    def __call__(self, theta, n_obs=3, pandalize=False, **kwargs):
+        vape = theta.shape
+        data = self.simulate(theta, n_obs, return_mdvs=False, pandalize=pandalize)
+        if pandalize:
+            return data
+        n_obshape = max(1, n_obs)
+        return self._la.view(data, shape=(*vape[:-1], n_obshape, vape[-1]))
 
 
 class DataSetSim(_BaseSimulator):
@@ -386,6 +363,13 @@ class DataSetSim(_BaseSimulator):
         self._mp_pool = None
         if num_processes > 0:
             self._mp_pool = self._get_mp_pool()
+
+    def __getstate__(self):
+        if self._mp_pool is not None:
+            self._mp_pool.close()
+            self._mp_pool.join()
+        self._mp_pool = None
+        return self.__dict__.copy()
 
     def _get_mp_pool(self):
         if (self._mp_pool is None) or (hasattr(self._mp_pool, '_state') and (self._mp_pool._state == 'CLOSE')):
@@ -417,18 +401,33 @@ class DataSetSim(_BaseSimulator):
 
     def simulate_set(
             self,
-            fluxes,
+            theta,
             n_obs=3,
             fluxes_per_task=None,
             what='data',
             break_i=-1,
             close_pool=True,
             show_progress=False,
-    ) -> OrderedDict:
-        # TODO perhaps also parse samples_id
+            save_fluxes=False,
+    ) -> {}:
+
+        if isinstance(theta, pd.DataFrame):
+            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
+
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+
+        fluxes = self._fcm.map_theta_2_fluxes(theta)
+
+        if fluxes.shape[0] <= self._la._batch_size:
+            raise ValueError('impossible')
+
         result = {}
+        if save_fluxes:
+            result['fluxes'] = fluxes
         result['validx'] = self._la.get_tensor(shape=(fluxes.shape[0], len(self._obmods)), dtype=np.bool_)
-        result['fluxes'] = fluxes # save before trimming
+        result['theta'] = theta  # save stratified theta!!
 
         fluxes = self._model._fcm.frame_fluxes(fluxes, trim=True)
 
@@ -445,7 +444,7 @@ class DataSetSim(_BaseSimulator):
 
         if (self._bomsize > 0) and (what != 'mdv'):
             slicer = 0 if n_obs == 0 else slice(None)
-            bo_fluxes = fluxes[:, self._bo_idx]  # TODO only works with torch now, since we sample from a torch distribution!
+            bo_fluxes = fluxes[:, self._bo_idx]
             result['data'][:, slicer, -self._bomsize:] = self._bom(bo_fluxes, n_obs=n_obs)
 
         if fluxes_per_task is None:
@@ -457,7 +456,7 @@ class DataSetSim(_BaseSimulator):
             fluxes, substrate_df=self._substrate_df, fluxes_per_task=fluxes_per_task, n_obs=n_obs, what=what
         )
         if show_progress:
-            pbar = tqdm.tqdm(total=fluxes.shape[0], ncols=100)
+            pbar = tqdm.tqdm(total=fluxes.shape[0] * self._substrate_df.shape[0], ncols=100)
 
         if self._num_processes == 0:
             init_observer(self._model, self._obmods, self._eps)
@@ -484,18 +483,42 @@ class DataSetSim(_BaseSimulator):
             pbar.close()
         return result
 
-    def __call__(self, theta, n_obs=5, fluxes_per_task=None, close_pool=False, show_progress=False, **kwargs):
-        fluxes = self._model._fcm.map_theta_2_fluxes(theta)
+    def __call__(
+            self, theta, n_obs=5, fluxes_per_task=None, close_pool=False, show_progress=False, pandalize=False,
+            **kwargs
+    ):
+        index = None
+        if isinstance(theta, pd.DataFrame):
+            index = theta.index
+
+        vape = theta.shape
         result = self.simulate_set(
-            fluxes, n_obs,
+            theta, n_obs,
             fluxes_per_task=fluxes_per_task,
             what='data',
             close_pool=close_pool,
             show_progress=show_progress,
-            **kwargs
+            save_fluxes=False,
         )
-        return result['data']
+
+        data = result['data']
+        n_obshape = max(n_obs, 1)
+
+        if pandalize:
+            return self._pandalize_data(data, index, n_obs)
+        return self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
 
 
 if __name__ == "__main__":
-    pass
+    from sbmfi.models.small_models import spiro
+    from sbmfi.inference.priors import UniFluxPrior
+    import pickle
+    model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0,)
+    bb = kwargs['basebayes']
+    sdf = kwargs['substrate_df']
+    dss = DataSetSim(model, sdf, bb._obmods, num_processes=1)
+    up = UniFluxPrior(model)
+    theta = up.sample((30,))
+
+    data = dss(theta, 3)
+    pickle.dump(dss, open('dss.p', 'wb'))

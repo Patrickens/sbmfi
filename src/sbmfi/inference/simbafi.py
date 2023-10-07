@@ -3,66 +3,31 @@ import pickle
 
 import tqdm
 from sbi.inference.snpe.snpe_c import SNPE_C
-from sbi.inference.snpe.snpe_base import NeuralInference
 from sbmfi.inference.bayesian import _BaseBayes, MCMC, SMC
-from sbmfi.core.util import profile
-from pyknos.nflows import distributions as distributions_
-from pyknos.nflows import flows, transforms
-from pyknos.nflows.nn import nets
 import torch
-from line_profiler import line_profiler
 from sbmfi.core.model import LabellingModel
-from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope
 from sbmfi.core.observation import BoundaryObservationModel, MDV_ObservationModel
-from sbmfi.inference.priors import _NetFluxPrior, UniFluxPrior, RatioPrior
+from sbmfi.inference.priors import _NetFluxPrior
+from sbmfi.core.simulator import _BaseSimulator
 import pandas as pd
-from typing import Dict, Optional, Callable, Any, Tuple, Union
-from sbi.inference.posteriors.direct_posterior import DirectPosterior
+from typing import Dict, Optional, Callable, Any, Union
 from torch.nn.utils.clip_grad import clip_grad_norm_
-from sbi.utils.sbiutils import get_simulations_since_round
-from torch import Tensor
 from torch.distributions import Distribution
-import torch.nn as nn
-from sbi.utils.sbiutils import (
-    standardizing_net,
-    standardizing_transform,
-    z_score_parser,
-)
-from sbi.utils.torchutils import create_alternating_binary_mask
-from sbi.utils.user_input_checks import check_data_device, check_embedding_net_device
 from functools import partial
-from sbi.neural_nets.flow import ContextSplineMap
-from torch import Tensor, nn, relu, tanh, tensor, uint8, optim
-from torch.utils import data
+from torch import Tensor, nn, optim
 from sbi.neural_nets.flow import build_maf, build_nsf
 from sbi.utils import (
-    batched_mixture_mv,
-    batched_mixture_vmv,
-    check_dist_class,
-    clamp_and_warn,
     del_entries,
-    repeat_rows,
 )
 from sbi.utils import (
-    RestrictedPrior,
-    check_estimator_arg,
-    handle_invalid_x,
-    nle_nre_apt_msg_on_invalid_x,
-    npe_msg_on_invalid_x,
     test_posterior_net_for_multi_d_x,
-    validate_theta_and_x,
-    warn_if_zscoring_changes_data,
     x_shape_from_simulation,
 )
 from copy import deepcopy
-from pyknos.mdn.mdn import MultivariateGaussianMDN as mdn
 from ray.air import session
 from sbi.inference.posteriors.direct_posterior import DirectPosterior
 from sbi.inference.posteriors.rejection_posterior import RejectionPosterior
-from sbi.inference.posteriors.vi_posterior import VIPosterior
-from sbi.inference.posteriors.mcmc_posterior import MCMCPosterior
 from sbi.inference.posteriors.base_posterior import NeuralPosterior
-from sbmfi.core.polytopia import sample_polytope
 from sbi import utils
 from sbi.inference.potentials import posterior_estimator_based_potential
 
@@ -77,6 +42,48 @@ def _fix_nn(
     neural_net.to(batch_y.dtype)
     return neural_net
 
+
+class SBI_HDF_Helper(_BaseSimulator):
+    def prepare_for_sbi(
+            self,
+            theta,
+            data,
+            randomize=True,
+            **kwargs # this allows to pass **result
+    ):
+        # cast to correct datatype and I guess do some other pre-processing?
+        # TODO think of device!
+        data = torch.as_tensor(data, dtype=torch.float32)
+        theta = torch.as_tensor(theta, dtype=torch.float32)
+        n_t = theta.shape[-1]
+        n_samples, n_obs, n_x = data.shape
+        theta = theta.unsqueeze(1).repeat((1, n_obs, 1)).view(n_obs * n_samples, n_t)
+        data = data.view(n_obs * n_samples, n_x)
+        if randomize:
+            ridx = torch.as_tensor(self._la.choice(n_samples, n_samples))
+            data = data[ridx]
+            theta = theta[ridx]
+        return theta, data
+
+    def sbi_data_from_hdf(
+            self,
+            hdf: str,
+            dataset_id: str,
+            n: int = None,
+            device=None,
+    ):
+        data, validx = self.read_hdf(hdf, dataset_id, what='data')
+        data = data[validx.all(-1)]
+        theta, validx = self.read_hdf(hdf, dataset_id, what='theta')
+        theta = theta[validx.all(-1)]
+
+        if n is not None:
+            if n > data.shape[0]:
+                raise ValueError(f'cannot sample {n} from dataset of lenghth {data.shape[0]}')
+            ridx = self._la.tonp(self._la.choice(n, data.shape[0]))
+            data = data[ridx]
+            theta = theta[ridx]
+        return self.prepare_for_sbi(theta, data, device)
 
 # prof = line_profiler.LineProfiler()
 
@@ -528,13 +535,11 @@ class SNPE_P(_BaseBayes, SNPE_C):
 
 
 if __name__ == "__main__":
-    from sbi.inference.base import infer
     from sbmfi.models.small_models import spiro
 
-    from sbmfi.inference.simulator import DataSetSim
+    from sbmfi.core.simulator import DataSetSim
     from sbmfi.inference.priors import UniFluxPrior
     import os
-    import scipy
     import numpy as np
 
     model, kwargs = spiro(

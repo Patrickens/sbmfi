@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import multiprocessing as mp  # TODO maybe dynamically change this import to torch.multiprocessing based on linalg?
-from collections import OrderedDict
 from typing import Iterable, Union, Dict, Tuple
 from sbmfi.core.model import LabellingModel, RatioMixin, EMU_Model
 from sbmfi.core.observation import MDV_ObservationModel, MDV_LogRatioTransform
@@ -24,7 +23,7 @@ def init_observer(
     _OBSMODS = mdv_observation_models
 
 
-def simulator_worker(task: OrderedDict, model=None) -> OrderedDict:
+def simulator_worker(task: dict, model=None) -> dict:
     start_stop, input_labelling, fluxes_chunk, type_jacobian = task.values()
 
     if model is not None:
@@ -84,7 +83,7 @@ def simulator_worker(task: OrderedDict, model=None) -> OrderedDict:
     # valid_idx = la.where(sum_1 & bounds)[0]
     validx_chunk = sum_1 & bounds
 
-    result = OrderedDict([
+    result = dict([
         ('start_stop', start_stop),
         ('input_labelling', input_labelling),
         ('mdv_chunk', mdv_chunk),
@@ -95,8 +94,8 @@ def simulator_worker(task: OrderedDict, model=None) -> OrderedDict:
     return result
 
 
-def obervervator_worker(task: OrderedDict, model=None):
-    simulator_task = OrderedDict(
+def obervervator_worker(task: dict, model=None):
+    simulator_task = dict(
         (k, task[k]) for k in ['start_stop', 'input_labelling', 'fluxes_chunk', 'type_jacobian']
     )
     result_chunk = simulator_worker(simulator_task, model=model)
@@ -131,7 +130,7 @@ def obervervator_worker(task: OrderedDict, model=None):
 
 
 def designer_worker(task):
-    simulator_task = OrderedDict(
+    simulator_task = dict(
         (k, task[k]) for k in ['start_stop', 'input_labelling', 'fluxes_chunk', 'type_jacobian']
     )
     result_chunk = simulator_worker(simulator_task)
@@ -181,12 +180,12 @@ def simulator_tasks(
         substrate_df: pd.DataFrame,
         fluxes_per_task: int,
         type_jacobian = None,
-) -> OrderedDict:
+) -> dict:
     for labelling_id, row in substrate_df.iterrows():
         input_labelling = row[row > 0.0]
         for i in range(0, fluxes.shape[0], fluxes_per_task):
             fluxes_chunk = fluxes[i: i + fluxes_per_task]
-            yield OrderedDict([
+            yield dict([
                 ('start_stop', (i, i + fluxes_chunk.shape[0])),
                 ('input_labelling', input_labelling),
                 ('fluxes_chunk', fluxes_chunk),

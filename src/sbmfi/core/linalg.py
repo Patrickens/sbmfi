@@ -830,6 +830,10 @@ class LinAlg(object):
         alpha_min = self.max(alpha_min, -1)
         return alpha_min, alpha_max
 
+    def scale(self, A, lo, hi, rev=False):
+        if rev:
+            return A * (hi - lo) + lo
+        return (A - lo) / (hi - lo)
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
