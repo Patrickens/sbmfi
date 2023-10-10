@@ -9,8 +9,8 @@ from PolyRound.api import PolyRoundApi
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.polytopia import LabellingPolytope, FluxCoordinateMapper, \
-    PolytopeSamplingModel, fast_FVA, rref_and_project, sample_polytope
-from typing import Iterable, Union
+    PolytopeSamplingModel, fast_FVA, rref_and_project, sample_polytope, project_polytope, compute_volume
+from typing import Iterable, Union, List
 from torch.distributions import constraints
 from torch.distributions import Distribution
 import math
@@ -19,20 +19,20 @@ import math
 
 def sampling_tasks(
         polytope: LabellingPolytope, # this is a basis polytope that will be modified using b_constraint_df and A_constraint_dct
-        transform_type = 'svd',
+        kernel_basis = 'svd',
         basis_coordinates = 'rounded',
-        to_basis_fn = None,
-        return_basis_samples=False,
         counts: Union[int, pd.Series] = 20,  # number of fluxes to sample from yielded polytope
         A_constraint_df: pd.DataFrame = None, # this should have a multiindex with level 1 being names, and 2 being constraint_names
         S_constraint_df: pd.DataFrame = None, # this should have a multiindex with level 1 being names, and 2 being constraint_names
         b_constraint_df: pd.DataFrame = None,
-        return_kwargs: bool = False,
+        # return_kwargs: bool = False,
         n_burn: int = 100,
         thinning_factor: int = 5,
         n_chains: int = 4,
         sampling_function = sample_polytope,
         linalg: LinAlg = None,
+        return_psm = False,
+        return_what = 'basis',
 ):
     if (A_constraint_df is None) and (S_constraint_df is None) and (b_constraint_df is None):
         raise ValueError
@@ -80,25 +80,51 @@ def sampling_tasks(
             'initial_points': None,
             'thinning_factor': thinning_factor,
             'n_chains': n_chains,
-            'new_rounded_points': False,
-            'return_basis_samples': return_basis_samples,
-            'transform_type': transform_type,
-            'basis_coordinates': basis_coordinates,
-            'to_basis_fn': to_basis_fn,
+            'new_initial_points': False,
+            'return_psm': return_psm,
+            'phi': None,
             'linalg': linalg,
-            'return_vsm': False,
+            'kernel_basis': kernel_basis,
+            'basis_coordinates': basis_coordinates,
+            'density': None,
+            'n_cdf': 1,
+            'return_arviz': False,
+            'return_what': return_what,
         }
 
         kwargs = {key: kwargs.get(key) for key in func_kwargs}
 
-        if return_kwargs:
-            yield kwargs
-        else:
-            yield tuple(kwargs.values())  # because cannot pickle dict_values...
+        yield kwargs
+        # if return_kwargs:
+        #     yield kwargs
+        # else:
+        #     yield tuple(kwargs.values())  # because cannot pickle dict_values... god I hate dict_keys and dict_values
 
+
+def volume_tasks(
+        models: Union[PolytopeSamplingModel, LabellingPolytope],
+        n: int = -1,
+        n0_multiplier: int = 5,
+        thinning_factor: int = 1,
+        epsilon: float = 1.0,
+        enumerate_vertices: bool = False,
+        return_all_ratios: bool = False,
+        quadratic_program: bool = False,
+):
+    for i, model in enumerate(models):
+        yield {
+            'model': model,
+            'n': n,
+            'n0_multiplier': n0_multiplier,
+            'thinning_factor': thinning_factor,
+            'epsilon': epsilon,
+            'enumerate_vertices': enumerate_vertices,
+            'return_all_ratios': return_all_ratios,
+            'quadratic_program': quadratic_program,
+        }
 
 class _CannonicalPolytopeSupport(_Dependent):  #
-    _VTOL = 1e-13
+    _VTOL = 1e-6
     def __init__(
             self,
             fcm: FluxCoordinateMapper,
@@ -132,7 +158,7 @@ class _CannonicalPolytopeSupport(_Dependent):  #
         return valid.view(*vape[:-1], self._A.shape[0])
 
 
-class _SphereSupport(_CannonicalPolytopeSupport):
+class _SphereSupport(_Dependent):
     def __init__(
             self,
             fcm: FluxCoordinateMapper,
@@ -141,11 +167,31 @@ class _SphereSupport(_CannonicalPolytopeSupport):
         self._vtol = validation_tol
         self._nx = fcm._nx
         self._logxch = fcm._logxch
+        self._constraint_id = fcm.theta_id
         if not self._logxch and (self._nx > 0):
-            self._rho_bounds = torch.tensor(fcm._rho_bounds)
+            self._rho_bounds = torch.Tensor(fcm._rho_bounds)
+
+        polytope = fcm.make_theta_polytope()
+        super().__init__(is_discrete=False, event_dim=polytope.A.shape[1])
+
+    def to(self, *args, **kwargs):
+        if not self._logxch and (self._nx > 0):
+            self._rho_bounds = self._rho_bounds.to(*args, **kwargs)
 
     def check(self, value: torch.Tensor) -> torch.Tensor:
-        print('here')
+        ball = value
+        if self._nx > 0:
+            ball = value[..., :-self._nx]
+        sphere = ball[..., :-1]
+        distance = ball[..., [-1]]
+        dist_check = (distance > 0.0) & (distance < 1.0)
+        norm = torch.norm(sphere, p=2, dim=-1, keepdim=True)
+        norm_check = (norm > 1.0 - self._vtol) & (norm < 1.0 + self._vtol)
+        if (self._nx > 0) and not self._logxch:
+            xch_vars = value[..., -self._nx:]
+            xch_check = (xch_vars > self._rho_bounds[:, 0]) & (xch_vars < self._rho_bounds[:, 1])
+            return torch.cat([norm_check, dist_check, xch_check], dim=-1)
+        return torch.cat([norm_check, dist_check], dim=-1)
 
 
 class _BasePrior(Distribution):
@@ -237,7 +283,10 @@ class _BasePrior(Distribution):
         result = self.sample((n, ))
         return pd.DataFrame(self._la.tonp(result), columns=self.theta_id)
 
-    def _run_tasks(self, tasks, fn=sample_polytope, break_i=-1, close_pool=True, format=True, scramble=True):
+    def _run_tasks(
+            self, tasks, fn=sample_polytope, break_i=-1, close_pool=True, scramble=True,
+            what='basis', return_results=False
+    ):
         if self._num_processes > 0:
             if hasattr(self._mp_pool, '_state') and self._mp_pool._state == 'CLOSE':
                 self._mp_pool = mp.Pool(self._num_processes)
@@ -251,13 +300,24 @@ class _BasePrior(Distribution):
                 if (break_i > -1) and (i > break_i):
                     break
 
-        net_basis_samples = self._la.cat([torch.as_tensor(r['basis_samples']) for r in results])
-        if 'new_rounded_points' in results[0]:
-            self._rounded_points = results[0]['new_rounded_points']
-        if scramble:
-            scramble_indices = self._la.randperm(net_basis_samples.shape[0])
-            net_basis_samples = net_basis_samples[scramble_indices]
-        return net_basis_samples
+        if fn == sample_polytope:
+            whatensor = self._la.cat([torch.as_tensor(r[what]) for r in results])
+            if 'new_initial_points' in results[0]:
+                self._initial_points = results[0]['new_initial_points']
+            if scramble:
+                scramble_indices = self._la.randperm(whatensor.shape[0])
+                whatensor = whatensor[scramble_indices]
+
+            if return_results:
+                log_det_E = [r['log_det_E'] for r in results]
+                if 'psm' in results[0]:
+                    psms = [r['psm'] for r in results]
+                return whatensor, {'log_det_E': log_det_E, 'psms': psms}
+            return whatensor
+        elif fn == compute_volume:
+            return pd.DataFrame(results)
+        else:
+            return results
 
 
 class _NetFluxPrior(_BasePrior):
@@ -368,7 +428,7 @@ class TruncNormXchFluxPrior(_XchFluxPrior):
         pass
 
 
-class UniFluxPrior(_NetFluxPrior):
+class UniformNetPrior(_NetFluxPrior):
     def __init__(
             self,
             model,
@@ -376,7 +436,7 @@ class UniFluxPrior(_NetFluxPrior):
             cache_size: int = 20000,
             **kwargs,
     ):
-        super(UniFluxPrior, self).__init__(model, cache_size, 0)
+        super(UniformNetPrior, self).__init__(model, cache_size, **kwargs)
         if (self._fcm._nx > 0) and (xch_prior is None):
             xch_prior = UniXchFluxPrior(self._fcm)
         self._xch_prior = xch_prior
@@ -384,9 +444,9 @@ class UniFluxPrior(_NetFluxPrior):
     def _fill_caches(self, n=20000, **kwargs):
         # this one is without pool always
         task = dict(
-            model=self._fcm._sampler, initial_points=self._basis_points, n=n, n_burn=200, new_rounded_points=True,
+            model=self._fcm._sampler, initial_points=self._basis_points, n=n, n_burn=200, new_initial_points=True,
         )
-        theta = self._run_tasks(tasks=[task], format=True, scramble=True)
+        theta = self._run_tasks(tasks=[task], scramble=True)
         if self._fcm._nx > 0:
             xch_basis_samples = self._xch_prior.sample((n, ))
             theta = self._la.cat([theta, xch_basis_samples], dim=-1)
@@ -405,7 +465,7 @@ class UniFluxPrior(_NetFluxPrior):
         return torch.zeros((*value.shape[:-1], 1))
 
 
-class ProjectionPrior(_NetFluxPrior):
+class ProjectionPrior(UniformNetPrior):
     # TODO I noticed that for the biomass flux, it is rarely sampled over 0.3, thus here we
     #  sample boundary fluxes in a projected polytope and then constrain and sample just like with ratios
 
@@ -415,12 +475,13 @@ class ProjectionPrior(_NetFluxPrior):
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
             projected_fluxes: Iterable,
+            xch_prior: _XchFluxPrior = None,
             projection_pol: LabellingPolytope = None,
             cache_size: int = 20000,
             num_processes: int = 0,
             number_type='float',
     ):
-        super(ProjectionPrior, self).__init__(model, cache_size, num_processes)
+        super(ProjectionPrior, self).__init__(model, xch_prior, cache_size, num_processes=num_processes)
 
         if projection_pol is None:
             pol = self._fcm._Fn
@@ -429,41 +490,41 @@ class ProjectionPrior(_NetFluxPrior):
             pol = LabellingPolytope.from_Polytope(spol, pol)
             P = pd.DataFrame(0.0, index=projected_fluxes, columns=pol.A.columns)
             P.loc[projected_fluxes, projected_fluxes] = np.eye(len(projected_fluxes))
-            self._projection_pol = rref_and_project(
-                pol, P=P, number_type=number_type, settings=self._fcm._sampler._pr_settings
-            )
+            try:
+                self._projection_pol = rref_and_project(pol, P=P, number_type=number_type, settings=settings)
+            except:
+                self._projection_pol = project_polytope(pol, P=P, number_type=number_type)
+            else:
+                raise ValueError('somethings off')
         else:
             if not projection_pol.A.columns.isin(projected_fluxes).all():
                 raise ValueError(f'wrong projection pol: {projection_pol.A.columns}, '
                                  f'wrt projected fluxes {projected_fluxes}')
             self._projection_pol = projection_pol
 
+        self._volumes = None
         self._boundary_psm = PolytopeSamplingModel(self._projection_pol)
-        self._projection_rounded_points = None
+        self._projection_initial_points = None
         self._projection_fva = fast_FVA(self._projection_pol)
 
     def log_prob(self, value):
         if self._validate_args:
             self._validate_sample(value)
-        thermo_fluxes = self._fcm.map_theta_2_fluxes(value, return_thermo=True, pandalize=True)
-        projected_fluxes = thermo_fluxes.loc[:, ]
-        b_constraint_df = pd.concat([-projected_fluxes, projected_fluxes], axis=1)
-        sampling_generator = sampling_tasks(
-            self._fcm._Fn, b_constraint_df=b_constraint_df, counts=None,
-            return_basis_samples=True, return_kwargs=self._num_processes == 0, to_basis_fn=self._fcm.to_basis_fn
-        )
-        # volume_task_generator = volume_tasks(sampling_generator)
-        # results = self.run_tasks(volume_task_generator, fn=compute_volume)
-        # voldf = pd.DataFrame(results)
+
         raise NotImplementedError
 
-    def _fill_caches(self, n=100, n_flux=10, rel_tol=0.01, break_i=-1, close_pool=True):
+    def _fill_caches(
+            self, n=100, n_flux=10, rel_tol=0.01, break_i=-1, close_pool=True, scramble=False,
+            what_volume='polytope', enumerate_vertices=True,
+    ):
         boundary_result = sample_polytope(
-            self._boundary_psm, n=n, initial_points=self._projection_rounded_points, new_rounded_points=True, pandalize=True
+            self._boundary_psm, n=n, initial_points=self._projection_initial_points, new_initial_points=True,
+            return_what='basis',
         )
-        self._projection_rounded_points = boundary_result['new_rounded_points']
-        lb = boundary_result['fluxes']
-        ub = lb.copy()
+        self._projection_initial_points = boundary_result['new_initial_points']
+        boundary_samples = self._boundary_psm.to_net_fluxes(boundary_result['basis'], pandalize=True)
+        lb = boundary_samples.copy()
+        ub = boundary_samples.copy()
         lb.columns += '|lb'
         ub.columns += '|ub'
 
@@ -475,11 +536,42 @@ class ProjectionPrior(_NetFluxPrior):
             ub = ub.clip(lower=self._projection_fva['min'].values, upper=self._projection_fva['max'].values, axis=1)
 
         b_constraint_df = pd.concat([-lb, ub], axis=1)  # NB this dataframe contains all the bounds for the b vector
+
+        kernel_basis = 'rref' if enumerate_vertices else 'svd'
+        basis_coordinates = 'transformed' if enumerate_vertices else 'rounded'
         sampling_task_generator = sampling_tasks(
-            self._fcm._Fn, b_constraint_df=b_constraint_df, counts=n_flux,
-            return_basis_samples=True, return_kwargs=self._num_processes == 0,
+            self._fcm._Fn, b_constraint_df=b_constraint_df, counts=n_flux, return_what='net_fluxes',
+            return_psm=True, kernel_basis=kernel_basis, basis_coordinates=basis_coordinates,
         )
-        self._run_tasks(sampling_task_generator, break_i=break_i, close_pool=close_pool, format=True)
+
+        net_fluxes = self._run_tasks(
+            sampling_task_generator, break_i=break_i, close_pool=close_pool and what_volume is None, scramble=True,
+            what='net_fluxes', return_results=True,
+        )
+
+        net_fluxes, results = net_fluxes
+        if what_volume is None:
+            pass
+        else:
+            if what_volume == 'polytope':
+                volume_task_generator = volume_tasks(results['psms'], enumerate_vertices=enumerate_vertices)
+                volume_df = self._run_tasks(volume_task_generator, fn=compute_volume, break_i=break_i, close_pool=close_pool)
+                volume_df = pd.concat([boundary_samples, volume_df], axis=1)
+            elif what_volume == 'log_det_E':
+                boundary_samples['log_det_E'] = results['log_det_E']
+                volume_df = boundary_samples
+
+            if self._volumes is None:
+                self._volumes = volume_df
+            else:
+                self._volumes = pd.concat([self._volumes, volume_df], axis=0, ignore_index=True)
+
+        theta = self._fcm._sampler.to_net_basis(net_fluxes)
+        if self._fcm._nx > 0:
+            xch_basis_samples = self._xch_prior.sample((n * n_flux, ))
+            theta = self._la.cat([theta, xch_basis_samples], dim=-1)
+
+        self._theta_cache = theta
 
 
 
@@ -494,87 +586,20 @@ if __name__ == "__main__":
     # fcm = FluxCoordinateMapper(model)
     # pickle.dump(fcm, open('spiro_fcm.p', 'wb'))
 
-    model, kwargs = spiro(backend='torch', add_biomass=True, ratios=False, build_simulator=True, v2_reversible=False, v5_reversible=False)
-
+    model, kwargs = spiro(
+        backend='numpy', add_biomass=True, ratios=False, build_simulator=True, v2_reversible=True, v5_reversible=False,
+        basis_coordinates='transformed', kernel_basis='rref',
+    )
+    up = ProjectionPrior(model, projected_fluxes=kwargs['measured_boundary_fluxes'][1:], cache_size=100, number_type='fraction', num_processes=1)
     # TruncNormXchFluxPrior._rando_mu_sigma(model._fcm)
 
-    up = UniFluxPrior(model)
     # # pp = ProjectionPrior(model, projected_fluxes=kwargs['measured_boundary_fluxes'])
-    aa = up.sample(sample_shape=(5,5,6,))
-    supp = up.support
+    aa = up.sample(sample_shape=(5, ))
+    aa = up.sample(sample_shape=(5, ))
+    print(up._volumes)
 
-    inn = supp.check(aa)
-
-
-    # lp = up.log_prob(aa)
-    # model, kwargs = build_e_coli_anton_glc(build_simulator=False)
-    # model.reactions.get_by_id('EX_glc__D_e').bounds = (-15.0, 0.0)
-    # model.reactions.get_by_id('biomass_rxn').bounds = (0.05, 1000.0)
-    # model.reactions.get_by_id('EX_ac_e').bounds = (0.0, 1000.0)
-    # model.build_simulator(free_reaction_id=['biomass_rxn', 'EX_glc__D_e', 'EX_ac_e'])
+    print(up.sample_pandalize(2))
+    # print(aa)
+    # supp = up.support
     #
-    # fcm = FluxCoordinateMapper(model=model, basis_coordinates='transformed', transform_type='rref')
-    # pickle.dump(fcm, open('fcm.p', 'wb'))
-    # fcm = pickle.load(open('fcm.p', 'rb'))
-    # pp = ProjectionPrior(fcm, projected_fluxes=['biomass_rxn', 'EX_glc__D_e', 'EX_ac_e'])
-    # t,f = pp.sample_dataframes(n=20, n_flux=20)
-    # prior_u = UniFluxPrior(fcm=fcm, num_processes=0)
-    # tdf, fdf = prior_u.sample_dataframes(50000)
-
-    # _make_voldf()
-
-    # model, kwargs = build_e_coli_tomek()
-    # free_rid = ['EX_ac_e', model.biomass_id,'EX_glc__D_e']
-    # model.reactions.get_by_id('EX_glc__D_e').bounds = (-12.0, 0.0)
-    # model.reactions.get_by_id(model.biomass_id).bounds = (0.05, 1000.0)
-    # model.reactions.get_by_id('EX_ac_e').bounds = (0.0, 1000.0)
-    # fcm = FluxCoordinateMapper(model, transform_type='rref', free_reaction_id=['EX_ac_e'])
-    #
-    # pp = ProjectionPrior(fcm, projected_fluxes=free_rid)
-    # pickle.dump((fcm, pp._projection_pol), open('proj.p', 'wb'))
-    # fcm, projection_pol = pickle.load(open('proj.p', 'rb'))
-    # pp = ProjectionPrior(fcm, projected_fluxes=projection_pol.A.columns, projection_pol=projection_pol)
-    # t,f = pp.sample_dataframes(n=100)
-
-    # model, kwargs = build_e_coli_anton_glc(build_simulator=False)
-    # model.reactions.get_by_id('EX_glc__D_e').bounds = (-12.0, 0.0)
-    # model.reactions.get_by_id('biomass_rxn').bounds = (0.05, 1000.0)
-    # model.reactions.get_by_id('EX_ac_e').bounds = (0.0, 1000.0)
-    # model.build_simulator(free_reaction_id=['EX_ac_e'])
-    # ubmp = ProjectionPrior(fcm=fcm, projected_fluxes=['biomass_rxn', 'EX_glc__D_e', 'EX_ac_e'], num_processes=0)
-
-    # model, kwargs = build_e_coli_anton_glc(build_simulator=False)
-    # model.reactions.get_by_id('EX_glc__D_e').bounds = (-15.0, 0.0)
-    # model.reactions.get_by_id('biomass_rxn').bounds = (0.05, 1000.0)
-    # model.reactions.get_by_id('EX_ac_e').bounds = (0.0, 1000.0)
-    # model.build_simulator(free_reaction_id=['biomass_rxn', 'EX_glc__D_e', 'EX_ac_e'])
-    #
-    # fcm = FluxCoordinateMapper(model=model)
-    # pickle.dump(fcm, open('fcm.p', 'wb'))
-    # fcm = pickle.load(open('fcm.p', 'rb'))
-    #
-    # ubmp = ProjectionPrior(fcm=fcm, projected_fluxes=['biomass_rxn', 'EX_glc__D_e', 'EX_ac_e'], num_processes=2)
-    # t, f = ubmp.sample_dataframes(n=10, n_flux=25, rel_tol=0.05)
-
-
-    # model, kwargs = spiro()
-    # fcm = FluxCoordinateMapper(model=model, free_reaction_id=['d_out', 'h_out'])
-    # ubmp = ProjectionPrior(fcm=fcm, projected_fluxes=['d_out', 'h_out'], num_processes=0)
-    # t, f = ubmp.sample_dataframes(n=20, n_flux=25, rel_tol=0.05)  # REL_TOL == 0.0 is essential, otherwise sampled support is outside polytope
-
-    # prior_u = UniFluxPrior(fcm=fcm)
-    # tdf, fdf = prior_u.sample_dataframes(50000)
-
-
-    # tfs = pickle.load(open("C:\python_projects\pysumo\chapriors\e_coli_tomek_gluc_aero_tfs.p", 'rb'))
-    # tp = ThermoPrior(fcm, tfs, coordinates='labelling')
-    # t,f = tp.sample_dataframes(n=100, break_i=1, abs_xch_flux_tol=0.00)
-
-
-    #
-    # val = torch.rand((4,1,5,6, len(fcm.theta_id)))
-    # tp.log_prob(val)
-
-    # tp = ThermoPrior(fcm, tfs, num_processes=0)
-    # t, f = tp.sample_dataframes(n=20, coordinates='labelling')
-    # _make_voldf()
+    # inn = supp.check(aa.view(2,3,6))

@@ -135,7 +135,7 @@ class ThermoPrior(_NetFluxPrior):
             cache_size: int = 20000,
             num_processes: int = 0,
     ):
-        super(ThermoPrior, self).__init__(model, cache_size, num_processes)
+        super(ThermoPrior, self).__init__(model, cache_size, num_processes=num_processes)
         self._coords = coordinates
         self._tfs_model = tfs_model
         self._fulabel_pol = None

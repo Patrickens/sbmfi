@@ -2,7 +2,7 @@ import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniFluxPrior
+from sbmfi.inference.priors import UniformNetPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel, MDV_ObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
@@ -176,6 +176,11 @@ def spiro(
     formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
     annotation_df['formula'] = annotation_df['met_id'].map(formap)
 
+    biomass_id = 'bm' if add_biomass else None
+    measured_boundary_fluxes = ['d_out', 'h_out']
+    if add_biomass:
+        measured_boundary_fluxes.append(biomass_id)
+
     model = simulator_factory(
         id_or_file_or_model='spiro',
         backend=backend,
@@ -189,6 +194,7 @@ def spiro(
         ratios=ratios,
         build_simulator=build_simulator,
         seed=seed,
+        free_reaction_id=measured_boundary_fluxes,
         kernel_basis=kernel_basis,
         basis_coordinates=basis_coordinates,
         logit_xch_fluxes=logit_xch_fluxes,
@@ -259,10 +265,7 @@ def spiro(
     if (batch_size == 1) and build_simulator:
         model.set_fluxes(fluxes=fluxes)
 
-    biomass_id = 'bm' if add_biomass else None
-    measured_boundary_fluxes = ['d_out', 'h_out']
-    if add_biomass:
-        measured_boundary_fluxes.append(biomass_id)
+
 
     measurements, basebay, theta = None, None, None
     if which_measurements is not None:
@@ -286,7 +289,7 @@ def spiro(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
-        up = UniFluxPrior(model._fcm, cache_size=1000)
+        up = UniformNetPrior(model._fcm, cache_size=1000)
 
         basebay = _BaseBayes(model, substrate_df, obsmods, up, bom)
 

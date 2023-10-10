@@ -215,12 +215,12 @@ class NumpyBackend(object):
         return np.concatenate(As, axis=dim)
 
     @staticmethod
-    def max(A, dim=None):
-        return A.max(dim)
+    def max(A, dim=None, keepdims=False):
+        return A.max(dim, keepdims=keepdims)
 
     @staticmethod
-    def min(A, dim=None):
-        return A.min(dim)
+    def min(A, dim=None, keepdims=False):
+        return A.min(dim, keepdims=keepdims)
 
     @staticmethod
     def view(A, shape):
@@ -458,16 +458,17 @@ class TorchBackend(object):
     @staticmethod
     def cat(As, dim):
         return torch.cat(As, dim)
+
     @staticmethod
-    def max(A, dim=None):
+    def max(A, dim=None, keepdims=False):
         if dim is not None:
-            return A.max(dim).values
+            return A.max(dim, keepdims=keepdims).values
         return A.max()
 
     @staticmethod
-    def min(A, dim=None):
+    def min(A, dim=None, keepdims=False):
         if dim is not None:
-            return A.min(dim).values
+            return A.min(dim, keepdims=keepdims).values
         return A.min()
 
     @staticmethod
@@ -795,11 +796,11 @@ class LinAlg(object):
     def multinomial(self, n, p):
         return self._BACKEND.multinomial(n, p)
 
-    def max(self, A, dim=None):
-        return self._BACKEND.max(A, dim)
+    def max(self, A, dim=None, keepdims=False):
+        return self._BACKEND.max(A, dim, keepdims)
 
-    def min(self, A, dim=None):
-        return self._BACKEND.min(A, dim)
+    def min(self, A, dim=None, keepdims=False):
+        return self._BACKEND.min(A, dim, keepdims)
 
     def logsumexp(self, A, dim=0):
         return self._BACKEND.logsumexp(A, dim)
@@ -819,15 +820,15 @@ class LinAlg(object):
     def cartesian(self, A, ):
         pass
 
-    def min_pos_max_neg(self, alpha, return_max_neg=True, tol=1e15):
+    def min_pos_max_neg(self, alpha, return_max_neg=True, tol=1e15, keepdims=False):
         alpha_max = self.vecopy(alpha)
         alpha_max[alpha_max < 0.0] = tol
-        alpha_max = self.min(alpha_max, -1)
+        alpha_max = self.min(alpha_max, -1, keepdims)
         if not return_max_neg:
             return alpha_max
         alpha_min = self.vecopy(alpha)
         alpha_min[alpha_min > 0.0] = -tol
-        alpha_min = self.max(alpha_min, -1)
+        alpha_min = self.max(alpha_min, -1, keepdims)
         return alpha_min, alpha_max
 
     def scale(self, A, lo, hi, rev=False):

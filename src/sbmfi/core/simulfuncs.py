@@ -78,7 +78,8 @@ def simulator_worker(task: dict, model=None) -> dict:
     # NB filter failed simulations (metabolite not summing to 1 or values outside of [0, 1]
     sum_1 = la.isclose(
         MODEL._sum @ mdv_chunk.T,
-        la.ones(fluxes_chunk.shape[0], dtype=mdv_chunk.dtype), atol=_EPSILON).T.all(1)
+        la.ones(fluxes_chunk.shape[0], dtype=mdv_chunk.dtype), atol=_EPSILON
+    ).T.all(1)
     bounds = (mdv_chunk < 1.0 + _EPSILON).all(1) & (mdv_chunk > 0.0 - _EPSILON).all(1)
     # valid_idx = la.where(sum_1 & bounds)[0]
     validx_chunk = sum_1 & bounds

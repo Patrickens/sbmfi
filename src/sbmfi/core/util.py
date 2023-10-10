@@ -1,24 +1,15 @@
 import numpy as np
 import tables as pt
-import cvxpy as cp
 import math, re
 np.seterr(all='raise')
-from cobra import DictList, Reaction
 from cobra.io import save_json_model
-from cobra.util.solver import linear_reaction_coefficients
-from collections import OrderedDict
 from PolyRound.api import Polytope, PolyRoundApi
 from sbmfi.core.metabolite import LabelledMetabolite
-from sbmfi.core.linalg import LinAlg
 import pandas as pd
-from sympy import Matrix, nsimplify
-import pypoman
 import functools
 import traceback
-import cdd
 import line_profiler
 from typing import Dict
-import inspect
 # poetry add git+https://github.com/GeomScale/dingo.git
 # poetry install git+https://github.com/GeomScale/dingo.git
 # TODO mail this dude for postdoc in Barca: https://torres-sanchez.xyz/
@@ -117,14 +108,17 @@ def _cell_color(x):
     return 'background-color : ' + color
 
 
-def _excel_polytope(pol: Polytope, file, concat=True):
+def excel_polytope(pol: Polytope, file, concat=True):
     # debugging functions to manually check system
-
+    # TODO also store the affine transformations! Only useful if we keep the index names, which PolyRound does not currently do
     ew = pd.ExcelWriter(path=file, engine='xlsxwriter')
     pol.b.name = 'b'
     if concat:
         blank = pd.Series(0, index=pol.b.index, name='blank')
         Ab = pd.concat([pol.A, blank, pol.b], axis=1)
+
+        # blank2 = pd.Series(0, index=pol.b.index, name='blank')
+        # Ttau = pd.concat([pol.transformation.T, pol.transformation.T])
         try:
             Abs = Ab.style.applymap(lambda x: _cell_color(x))
             Abs.to_excel(ew, sheet_name='Ab')
@@ -175,4 +169,4 @@ def generate_nat_labelled_isotop_state(metabolite: 'LabelledMetabolite', min_abu
 
 if __name__ == "__main__":
     import pickle, os
-    from sbmfi.models.build_models import build_e_coli_anton_glc
+    from sbmfi.models.small_models import spiro

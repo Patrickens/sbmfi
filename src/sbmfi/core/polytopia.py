@@ -12,20 +12,11 @@ from sympy.core.numbers import One
 import pypoman
 import cvxpy as cp
 import cdd
-
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
     _rev_reactions_rex, _xch_reactions_rex
 from sbmfi.core.linalg import NumpyBackend, LinAlg
 from sbmfi.core.reaction import LabellingReaction
-
-# from pta import UniformSamplingModel
-# from pta.sampling.uniform import pb
-# from pta.sampling.commons import (
-#     SamplingResult, split_chains, apply_to_chains, fill_common_sampling_settings, sample_from_chains
-# )
 import copy
-import multiprocessing as mp
-
 from PolyRound.api import PolyRoundApi, Polytope, PolyRoundSettings
 from PolyRound.static_classes.lp_utils import ChebyshevFinder
 from PolyRound.static_classes.rounding.maximum_volume_ellipsoid import MaximumVolumeEllipsoidFinder
@@ -216,17 +207,31 @@ def compute_polytope_vertices(A, b, number_type='fraction'):
     return vertices
 
 
-def V_representation(polytope: Polytope, number_type='fraction'):
+def simplify_vertices(vertices: pd.DataFrame, tolerance=1e-10):
+    vertices = vertices.drop_duplicates()
+    diff = (vertices.values[None, ...] - vertices.values[:, None, ...])
+    norm_tol = np.linalg.norm(diff, 2, 2) < tolerance
+    n = vertices.shape[0]
+    norm_tol[np.tril_indices(n)] = False
+    rows, cols = np.where(norm_tol)
+    selecta = np.ones(n, dtype=bool)
+    selecta[cols] = False
+    return vertices.loc[selecta]
+
+
+def V_representation(polytope: Polytope, number_type='fraction', vertices_tol=1e-10):
     if polytope.S is not None:
         raise ValueError('must be in cannonical form!')
     vertices = compute_polytope_vertices(A=polytope.A.values, b=polytope.b.values, number_type=number_type)
     # # TODO try bretl, somehow give it some equality constraints...
     # vertices = compute_polytope_vertices(A=polytope.A.values, b=polytope.b.values, number_type='float')
     # pypoman.duality.compute_polytope_vertices(A=self.A.values, b=self.b.values)
-    v_rep = pd.DataFrame(vertices, columns=polytope.A.columns)
+    vertices = pd.DataFrame(vertices, columns=polytope.A.columns)
     if number_type == 'fraction':
-        v_rep = v_rep.applymap(lambda x: float(x))
-    return v_rep
+        vertices = vertices.applymap(lambda x: float(x))
+    if vertices_tol > 0.0:
+        vertices = simplify_vertices(vertices, vertices_tol)
+    return vertices
 
 
 def H_representation(vertices: List[np.array], number_type='fraction'):
@@ -267,10 +272,11 @@ def H_representation(vertices: List[np.array], number_type='fraction'):
 
 
 def project_polytope(
-        polytope, P: pd.DataFrame,
+        polytope,
+        P: pd.DataFrame,
         p: pd.Series = None,
         return_vertices=False,
-        tolerance=1e-10,
+        vertices_tol=1e-10,
         number_type='fraction'
 ):
     # computes the projection/ infinite shadow of the labelling-polytope onto the exchange flux dimensions
@@ -290,10 +296,12 @@ def project_polytope(
     vertices, _ = project_polyhedron(proj=proj, ineq=ineq, eq=eq, number_type=number_type)
     print('got vertices')
     vertices = pd.DataFrame(vertices, columns=P.index).drop_duplicates()  # TODO maybe clean up a bit
+    if vertices_tol > 0.0:
+        vertices = simplify_vertices(vertices, vertices_tol)
     if return_vertices:
         return vertices
     A, b = pypoman.duality.compute_polytope_halfspaces(vertices.values)  # NOTE could also be done with scipy ConvHull
-    A[abs(A) < tolerance] = 0.0
+    A[abs(A) < vertices_tol] = 0.0
     # TODO make A have the right columns and come up with some index names
     return LabellingPolytope(A=pd.DataFrame(A, columns=P.index), b=pd.Series(b), mapper=None)
 
@@ -303,6 +311,7 @@ def rref_and_project(
         P: pd.DataFrame,
         settings: PolyRoundSettings = PolyRoundSettings(),
         number_type='fraction',
+        vertices_tol=1e-10,
 ):
     if not P.index.isin(polytope.A.columns).all():
         raise ValueError('projection fluxes not in polytope')
@@ -314,7 +323,7 @@ def rref_and_project(
     polytope.transformation.columns = cols
     polytope.apply_transformation(transformation)
     polytope.A.columns = transformation.columns
-    return project_polytope(polytope, P, tolerance=settings.numerics_threshold, number_type=number_type)
+    return project_polytope(polytope, P, vertices_tol=settings.numerics_threshold, number_type=number_type)
 
 
 def thermo_2_net_polytope(polytope: LabellingPolytope, verbose=True):
@@ -756,7 +765,7 @@ class PolytopeSamplingModel(object):
             directions[..., 0] = abs(directions[..., 0])  # this makes sure we sample on the half-sphere!
 
         alpha = self._h.T / self._la.tensormul_T(self._G, directions)
-        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._bascoor == 'semi_spherical')
+        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._bascoor == 'semi_spherical', keepdims=True)
 
         if self._bascoor == 'semi_spherical':
             alpha_min, alpha_max = alpha_max
@@ -832,8 +841,8 @@ class PolytopeSamplingModel(object):
 
         if self._bascoor != 'transformed':
             result = self._la.tensormul_T(self._E_1, result - self._epsilon.T)
-            if self._bascoor == 'spherical':
-                self._to_spherical(result)
+            if self._bascoor in ['spherical', 'semi_spherical']:
+                result = self._map_rounded_2_spherical(result)
 
         if pandalize:
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
@@ -916,7 +925,7 @@ class FluxCoordinateMapper(object):
         self._n_lr = len(self.labelling_fluxes_id)
 
         self._sampler = PolytopeSamplingModel(
-            self._Fn, pr_verbose, kernel_basis, basis_coordinates, clip_sphere, linalg, **kwargs
+            self._Fn, pr_verbose, kernel_basis, basis_coordinates, clip_sphere, self._la, **kwargs
         )
 
         self._fwd_id = pd.Index(self._Ft.mapper.keys())
@@ -1268,7 +1277,7 @@ def sample_polytope(
         initial_points = None,
         thinning_factor = 3,
         n_chains: int = 4,
-        new_rounded_points=False,
+        new_initial_points=False,
         return_psm = False,
         phi: float = None,
         linalg: LinAlg = None,
@@ -1277,6 +1286,7 @@ def sample_polytope(
         density=None,
         n_cdf=5,
         return_arviz=False,
+        return_what='basis',
 ):
     # TODO just use the function MCMC from sbmfi.estimate.simulator!
     r"""
@@ -1312,6 +1322,9 @@ def sample_polytope(
         raise ValueError('c`est ne pas possiblementenete')
 
     K = model.dimensionality
+
+    if initial_points is not None:
+        n_burn = 0
 
     n_per_chain = math.ceil(n / n_chains)
     n_tot = n_burn + n_per_chain * thinning_factor
@@ -1408,39 +1421,64 @@ def sample_polytope(
 
     rounded_samples = model._la.view(chains, (n_chains * n_per_chain, K))[:n, :]
 
-    if new_rounded_points:
+    if new_initial_points:
         new_points_idx = model._la.choice(n_chains, n)
-        result['new_rounded_points'] = rounded_samples[new_points_idx, :].T
+        result['new_initial_points'] = rounded_samples[new_points_idx, :]
 
     if return_arviz:
         raise NotImplementedError
 
-    result['basis_samples'] = model._map_rounded_2_basis(rounded_samples)
+    if return_what == 'rounded':
+        result['rounded'] = rounded_samples
+    else:
+        basis_samples = model._map_rounded_2_basis(rounded_samples)
+        if return_what == 'net_fluxes':
+            result['net_fluxes'] = model.to_net_fluxes(basis_samples)
+        elif return_what == 'basis':
+            result['basis'] = basis_samples
     return result
 
 def compute_volume(
-        psm: PolytopeSamplingModel,
+        model: Union[PolytopeSamplingModel, LabellingPolytope],
         n: int = -1,
+        n0_multiplier: int = 5,
         thinning_factor: int = 1,
         epsilon: float = 1.0,
         enumerate_vertices: bool = False,
         return_all_ratios: bool = False,
-        quadratic_program = True,
+        quadratic_program: bool = True,
+        verbose: bool = False,
 ):
+    psm = model
+    if isinstance(model, LabellingPolytope):
+        kernel_basis = 'rref' if enumerate_vertices else 'svd'
+        psm = PolytopeSamplingModel(model, kernel_basis=kernel_basis, basis_coordinates='transformed')
+
     if any([_xch_reactions_rex.search(rid) is not None for rid in psm.reaction_ids]):
         raise ValueError('This is a thermodynamic model that includes xch fluxes which lie in a hyper-rectangle, '
                          'it is much faster to compute the volume of the net polytope and the huper-rectangle separately!')
-    if psm.basis_coordinates != 'rounded':
-        raise NotImplementedError('only defined for rounded basis!')
 
     K = psm.dimensionality
 
     if n < 0:  # this is taken from the paper
         n = min(int(400 * epsilon ** -2 * K * np.log(K)), 100000)
 
-    # TODO there are difference between the phi_max found by pta samplers and my samplers
-    #  but it seems that its random whose is bigger
-    if quadratic_program:
+    if enumerate_vertices:
+        if not ((psm.kernel_basis == 'rref') and (psm.basis_coordinates == 'transformed')):
+            raise ValueError('only works with rref, pass polytope or rref volumemodel')
+        F_trans = PolyRoundApi.simplify_polytope(psm.basis_polytope, normalize=False)
+        if F_trans.S is not None:
+            F_trans, _, _ = transform_polytope_keep_transform(F_trans, kernel_basis='rref')
+        vertices = V_representation(F_trans)
+        n_vertices = vertices.shape[0]
+        if verbose:
+            print('vertices done')
+        vertices = psm._la.get_tensor(values=vertices.values)
+        rounded_vertices = psm._la.tensormul_T(psm._E_1, vertices - psm._epsilon.T)
+        phis = psm._la.norm(rounded_vertices, 2, 1)
+        phi_max = psm._la.max(phis)
+
+    elif quadratic_program:
         np_psm = psm.to_linalg(linalg=LinAlg(backend='numpy'))
         K = psm.dimensionality
         cp_vars = np_psm._F_round.generate_cvxpy_LP()
@@ -1456,11 +1494,14 @@ def compute_volume(
         # problem = cp.Problem(cp.Maximize(cp.quad_form(cp_vars['v'], Q)), constraints=cp_vars['constraints'])
         # problem = cp.Problem(cp.Maximize(ones @ cp.abs(cp_vars['v'])), constraints=cp_vars['constraints'])
         raise NotImplementedError
+
     else:
-        sampling_result = sample_polytope(model=psm, n=n * 5, thinning_factor=thinning_factor * 2)
-        basis_samples = sampling_result['basis_samples']
-        phis = np.linalg.norm(basis_samples, ord=2, axis=1)
-        phi_max = phis.max().item()  # this is the radius of the max ball that almost fully encloses the polytope
+        sampling_result = sample_polytope(
+            model=psm, n=n * n0_multiplier, thinning_factor=thinning_factor, return_what='basis'
+        )
+        basis_samples = sampling_result['basis']
+        phis = psm._la.norm(basis_samples, 2, 1)
+        phi_max = psm._la.max(phis)  # this is the radius of the max ball that almost fully encloses the polytope
 
     beta = math.ceil(K * np.log(phi_max))
     ball_phis = np.array([np.exp(i / K) for i in range(0, beta + 1)])
@@ -1469,37 +1510,30 @@ def compute_volume(
         log_B0_vol=np.log(np.pi ** (K / 2) / (scipy.special.gamma(K / 2 + 1))),
         K=K, N=n, phi_max=phi_max, beta=beta, log_det_E=psm.log_det_E,
     )
-
     if enumerate_vertices:
-        if (psm.kernel_basis != 'rref') or (psm.basis_coordinates != 'transformed'):
-            raise ValueError('only works with rref, pass polytope or rref volumemodel')
-        F_trans = PolyRoundApi.simplify_polytope(psm.basis_polytope, normalize=False)
-        if F_trans.S is not None:
-            F_trans, _, _ = transform_polytope_keep_transform(F_trans, kernel_basis='rref')
-        vertices = V_representation(F_trans)
-        result['n_vertices'] = vertices.shape[0]
-        print('vertices done')
+        result['n_vertices'] = n_vertices
 
     ratios = np.zeros(ball_phis.size -1 )
+
     for i, phi_i_1 in enumerate(ball_phis[1:]):
-        samples = sample_polytope(psm, n=n, thinning_factor=thinning_factor, phi=phi_i_1)['basis_samples']
+        samples = sample_polytope(psm, n=n, thinning_factor=thinning_factor, phi=phi_i_1, return_what='rounded')['rounded']
         sample_phis = psm._la.norm(samples, 2, 1)
-        n_ball_i = (sample_phis <= ball_phis[i]).sum().item()
+        n_ball_i = (sample_phis <= ball_phis[i]).sum()
         ratios[i] = n / n_ball_i
-        # n_ball_i_1 = (sample_phis <= phi_i_1).sum().item()
 
     if return_all_ratios:
         result['ratios'] = ratios
 
     result['log_ratio'] = np.log(ratios).sum()
-    print('VOLDONE')
+    if verbose:
+        print('VOLDONE')
     return result
 
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
-    from sbmfi.inference.priors import UniFluxPrior
+    from sbmfi.inference.priors import UniformNetPrior
     import pandas as pd
 
     pd.set_option('display.max_rows', 500)
@@ -1518,36 +1552,51 @@ if __name__ == "__main__":
     # m, k = spiro(build_simulator=True, backend='torch')
     # m, k = build_e_coli_anton_glc(build_simulator=True)
 
-    model, kwargs=spiro(v2_reversible=True, v5_reversible=True, build_simulator=True)
-    model, kwargs=build_e_coli_tomek()
+    model, kwargs=spiro(backend='torch', v2_reversible=True, v5_reversible=True, build_simulator=True)
+    # model, kwargs=build_e_coli_tomek()
 
     # fluxes = kwargs['fluxes'].to_frame().T
     fcm = FluxCoordinateMapper(
         model,
         kernel_basis='rref',
         logit_xch_fluxes=True,
-        basis_coordinates='rounded',
+        basis_coordinates='transformed',
         pr_verbose=False,
     )
-    res = compute_volume(fcm._sampler, quadratic_program=True)
-    # res = sample_polytope(fcm._sampler)
-    # print(res['basis_samples'])
+    compute_volume(fcm._sampler, enumerate_vertices=True)
+    # pol = fcm._Fn
+    # settings = fcm._sampler._pr_settings
+    # spol = PolyRoundApi.simplify_polytope(pol, settings=settings, normalize=False)
+    # pol = LabellingPolytope.from_Polytope(spol, pol)
     #
-    # psm = fcm._sampler
-    # thermo = fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
-    # theta = psm.to_net_basis(thermo, pandalize=True)
-    # fluxes = psm.to_net_fluxes(theta, pandalize=True)
+    # canon, T, T_1, tau = transform_polytope_keep_transform(pol, settings, kernel_basis='rref')
+    # verts = V_representation(canon)
+    # # print(verts)
     #
-    # fcm = FluxCoordinateMapper(
-    #     model,
-    #     kernel_basis='rref',
-    #     logit_xch_fluxes=True,
-    #     basis_coordinates='semi_spherical',
-    #     pr_verbose=False,
-    # )
+    # projected_fluxes = kwargs['measured_boundary_fluxes'][1:]
+    # P = pd.DataFrame(0.0, index=projected_fluxes, columns=pol.A.columns)
+    # P.loc[projected_fluxes, projected_fluxes] = np.eye(len(projected_fluxes))
+    # projpol = project_polytope(pol, P=P, number_type='float',return_vertices=True)
+    # # projection_pol = rref_and_project(pol, P=P, number_type='float', settings=settings)
     #
-    # print(fluxes)
-    # ding = fcm._sampler.to_net_basis(fluxes)
-    # print(ding)
-    # dang = fcm._sampler.to_net_fluxes(ding, pandalize=True)
-    # print(dang)
+    # # res = compute_volume(fcm._sampler, quadratic_program=True)
+    # # res = sample_polytope(fcm._sampler, n=20, n_burn=0)['basis_samples']
+    # #
+    # # psm = fcm._sampler
+    # # thermo = fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
+    # # theta = psm.to_net_basis(thermo, pandalize=True)
+    # # fluxes = psm.to_net_fluxes(theta, pandalize=True)
+    # #
+    # # fcm = FluxCoordinateMapper(
+    # #     model,
+    # #     kernel_basis='rref',
+    # #     logit_xch_fluxes=True,
+    # #     basis_coordinates='semi_spherical',
+    # #     pr_verbose=False,
+    # # )
+    # #
+    # # print(fluxes)
+    # # ding = fcm._sampler.to_net_basis(fluxes)
+    # # print(ding)
+    # # dang = fcm._sampler.to_net_fluxes(ding, pandalize=True)
+    # # print(dang)

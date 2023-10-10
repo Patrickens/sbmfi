@@ -1076,7 +1076,7 @@ if __name__ == "__main__":
     from sbmfi.models.build_models import build_e_coli_anton_glc
     from sbmfi.core.polytopia import coordinate_hit_and_run_cpp
     import pickle
-    from sbmfi.inference.priors import UniFluxPrior
+    from sbmfi.inference.priors import UniformNetPrior
 
     import pandas as pd
 

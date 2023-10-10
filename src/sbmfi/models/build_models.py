@@ -5,9 +5,9 @@ from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservationModel, ClassicalObservationModel, MDV_ObservationModel
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
-from sbmfi.core.util import make_multidex, _excel_polytope
+from sbmfi.core.util import make_multidex, excel_polytope
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniFluxPrior
+from sbmfi.inference.priors import UniformNetPrior
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os
@@ -2027,7 +2027,7 @@ def build_e_coli_anton_glc(
     thermo_fluxes, theta = None, None
     if annotation_df is not None:
         bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, _bmid_ANTON)
-        up = UniFluxPrior(model)
+        up = UniformNetPrior(model)
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
         thermo_fluxes = read_anton_fluxes()
@@ -2199,6 +2199,7 @@ def simulator_factory(
         device='cpu',
         ratios=True,
         seed=None,
+        free_reaction_id=None,
         kernel_basis='svd',
         basis_coordinates='rounded',
         logit_xch_fluxes=False,
@@ -2241,6 +2242,7 @@ def simulator_factory(
         model.set_measurements(measurement_list=measurements)
     if build_simulator:
         model.build_simulator(
+            free_reaction_id=free_reaction_id,
             kernel_basis=kernel_basis,
             basis_coordinates=basis_coordinates,
             logit_xch_fluxes=logit_xch_fluxes

@@ -280,7 +280,6 @@ class _BaseSimulator(object):
             hdf:   str,
             dataset_id: str,
             what:  str,
-            labelling_id: Union[str, Iterable[str]] = None,
             start: int = None,
             stop:  int = None,
             step:  int = None,
@@ -288,24 +287,22 @@ class _BaseSimulator(object):
     ) -> Union[np.array, pd.DataFrame]:
         if (dataset_id not in hdf.root):
             raise ValueError(f'{dataset_id} not in hdf')
-        elif (what not in hdf.root[dataset_id]):
+        elif (what != 'substrate_df') and (what not in hdf.root[dataset_id]):
             raise ValueError(f'{what} not in {dataset_id}')
 
         self._verify_hdf(hdf)
 
+        if (what == 'substrate_df') or pandalize:
+            substrate_df = pd.read_hdf(hdf.filename, key='substrate_df', mode=hdf.mode)
+            if what == 'substrate_df':
+                return substrate_df
+
         xcsarr = hdf.root[dataset_id][what].read(start, stop, step) # .squeeze()  # TODO why did we squeeze before?
-        validx = hdf.root[dataset_id]['validx'].read(start, stop, step)
 
         if not pandalize:
-            return xcsarr, validx
+            return self._la.get_tensor(values=xcsarr)
 
-        substrate_df = pd.read_hdf(hdf.filename, key='substrate_df', mode=hdf.mode)
-        labelling_ids = substrate_df.index.rename('labelling_id')
-        if labelling_id is None:
-            labelling_idx = np.arange(len(labelling_ids))
-        else:
-            labelling_idx = labelling_ids.get_loc(labelling_id)
-        labelling_id = labelling_ids[labelling_idx]
+        labelling_id = substrate_df.index.rename('labelling_id')
 
         if start is None:
             start = 0
@@ -315,26 +312,25 @@ class _BaseSimulator(object):
             stop = xcsarr.shape[0]
 
         samples_id = pd.RangeIndex(start, stop, step, name='samples_id')
-        validx = pd.DataFrame(validx[:, labelling_idx], index=samples_id, columns=labelling_id)
 
         if what in ('fluxes', 'theta'):
             xcs_id = pd.Index(hdf.root[f'{what}_id'].read().astype(str), name=f'{what}_id')
-            return pd.DataFrame(xcsarr, index=samples_id, columns=xcs_id), validx
+            return pd.DataFrame(xcsarr, index=samples_id, columns=xcs_id)
 
         elif what == 'validx':
-            return validx, validx
+            return pd.DataFrame(xcsarr, index=samples_id, columns=labelling_id)
 
         elif what == 'data':
             i_obs = (*range(xcsarr.shape[1]), )
             dataframes = [pd.DataFrame(xcsarr[:, i, :], index=samples_id, columns=self.data_id) for i in i_obs]
             dataframe = pd.concat(dataframes, keys=i_obs, names=['i_obs', 'samples_id'])
-            return dataframe.swaplevel(0, 1, 0).sort_values(by=['samples_id', 'i_obs'], axis=0).loc[:, labelling_id], validx
+            return dataframe.swaplevel(0, 1, 0).sort_values(by=['samples_id', 'i_obs'], axis=0).loc[:, labelling_id]
 
         elif what == 'mdv':
             return pd.concat([
                 pd.DataFrame(xcsarr[:, i], index=samples_id, columns=self._model.state_id)
-                for i in labelling_idx], axis=1, keys=labelling_id
-            ), validx
+                for i in range(len(labelling_id))], axis=1, keys=labelling_id
+            )
 
     def __call__(self, theta, n_obs=3, pandalize=False, **kwargs):
         vape = theta.shape
@@ -511,14 +507,16 @@ class DataSetSim(_BaseSimulator):
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniFluxPrior
+    from sbmfi.inference.priors import UniformNetPrior
     import pickle
     model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0,)
     bb = kwargs['basebayes']
     sdf = kwargs['substrate_df']
-    dss = DataSetSim(model, sdf, bb._obmods, num_processes=1)
-    up = UniFluxPrior(model)
-    theta = up.sample((30,))
+    dss = DataSetSim(model, sdf, bb._obmods)
+    up = UniformNetPrior(model)
+    # theta = up.sample((30,))
+    #
+    # result = dss.simulate_set(theta)
+    # dss.to_hdf('spriro.h5', result=result, dataset_id='niks', append=True)
 
-    data = dss(theta, 3)
-    pickle.dump(dss, open('dss.p', 'wb'))
+    theta = dss.read_hdf('spriro.h5', what='theta', dataset_id='niks')

@@ -1196,7 +1196,7 @@ def check_stuff():
     dss = kwargs['datasetsim']
     simm = dss._obmods
     bom = dss._bom
-    up = UniFluxPrior(model, cache_size=2000)
+    up = UniformNetPrior(model, cache_size=2000)
     # from botorch.utils.sampling import sample_polytope
     mcmc = SMC(
         model=model,
@@ -1282,7 +1282,7 @@ if __name__ == "__main__":
     # from pta.sampling.tfs import TFSModel
     import pickle
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniFluxPrior
+    from sbmfi.inference.priors import UniformNetPrior
 
     # from sbmfi.inference.simulator import MCMC
     # hv.extension('bokeh')
@@ -1293,13 +1293,13 @@ if __name__ == "__main__":
     np.set_printoptions(linewidth=500)
 
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniFluxPrior
+    from sbmfi.inference.priors import UniformNetPrior
     import pickle
 
     model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0, )
     bb = kwargs['basebayes']
     sdf = kwargs['substrate_df']
-    up = UniFluxPrior(model)
+    up = UniformNetPrior(model)
     theta = up.sample((30,))
 
     dss = DataSetSim(model, sdf, bb._obmods, num_processes=1)
