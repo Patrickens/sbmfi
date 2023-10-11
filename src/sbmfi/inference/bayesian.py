@@ -1278,35 +1278,32 @@ def check_stuff():
 
 
 if __name__ == "__main__":
-    # from pta.sampling.uniform import sample_flux_space_uniform, UniformSamplingModel
-    # from pta.sampling.tfs import TFSModel
-    import pickle
-    from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniformNetPrior
-
-    # from sbmfi.inference.simulator import MCMC
-    # hv.extension('bokeh')
-
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
     np.set_printoptions(linewidth=500)
 
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniformNetPrior
+    from sbmfi.models.build_models import build_e_coli_anton_glc
+    from sbmfi.inference.priors import UniformNetPrior, ProjectionPrior
+    from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope, fast_FVA
     import pickle
 
-    model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0, )
-    bb = kwargs['basebayes']
-    sdf = kwargs['substrate_df']
-    up = UniformNetPrior(model)
-    theta = up.sample((30,))
+    model, kwargs = build_e_coli_anton_glc(backend='torch', which_measurements=None)
+    projected_fluxes = kwargs['measured_boundary_fluxes']
+    model.reactions.get_by_id('EX_glc__D_e').bounds = (-12.0, 0.0)
 
-    dss = DataSetSim(model, sdf, bb._obmods, num_processes=1)
-    data = dss(theta, 3)
-    pickle.dump(dss, open('dss.p', 'wb'))
-    dss = pickle.load(open('dss.p', 'rb'))
-    dss(theta, 3)
+    fcm = FluxCoordinateMapper(model, kernel_basis='svd', basis_coordinates='rounded', free_reaction_id=projected_fluxes)
+
+    # up = ProjectionPrior(fcm, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=0)
+    # projection_pol = up._projection_pol
+    # pickle.dump(projection_pol, open('anton_glc_projection_pol.p', 'wb'))
+
+    projection_pol = pickle.load(open('anton_glc_projection_pol.p', 'rb'))
+    up = ProjectionPrior(model, projection_pol=projection_pol, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=3)
+    up._fill_caches(n=5000, enumerate_vertices=True)
+    pickle.dump(up, open('anton_glc_projection_prior_w_volumes.p', 'wb'))
+    # up = pickle.load(open('anton_glc_projection_prior_w_volumes.p', 'rb'))
 
     # model, kwargs = build_e_coli_anton_glc(
     #     backend='torch',

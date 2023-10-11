@@ -294,7 +294,6 @@ def project_polytope(
     else:
         eq = (polytope.S.values, polytope.h.values)
     vertices, _ = project_polyhedron(proj=proj, ineq=ineq, eq=eq, number_type=number_type)
-    print('got vertices')
     vertices = pd.DataFrame(vertices, columns=P.index).drop_duplicates()  # TODO maybe clean up a bit
     if vertices_tol > 0.0:
         vertices = simplify_vertices(vertices, vertices_tol)
@@ -311,7 +310,7 @@ def rref_and_project(
         P: pd.DataFrame,
         settings: PolyRoundSettings = PolyRoundSettings(),
         number_type='fraction',
-        vertices_tol=1e-10,
+        round=4,
 ):
     if not P.index.isin(polytope.A.columns).all():
         raise ValueError('projection fluxes not in polytope')
@@ -323,6 +322,8 @@ def rref_and_project(
     polytope.transformation.columns = cols
     polytope.apply_transformation(transformation)
     polytope.A.columns = transformation.columns
+    if round > 0:
+        polytope.A = polytope.A.round(round)
     return project_polytope(polytope, P, vertices_tol=settings.numerics_threshold, number_type=number_type)
 
 
@@ -577,7 +578,7 @@ def round_polytope_keep_ellipsoid(polytope: Polytope, settings: PolyRoundSetting
     E = blank_polytope.transformation
     epsilon = blank_polytope.shift.to_frame()
 
-    E.columns = 'B_' + cols
+    E.columns = 'R_' + cols
     E.index = cols
 
     polytope.apply_shift(epsilon.values)
@@ -666,13 +667,13 @@ class PolytopeSamplingModel(object):
             pr_verbose = False,
             kernel_basis ='svd',
             basis_coordinates = 'rounded',
-            clip_sphere=False,
             linalg: LinAlg = None,
+            hemi_sphere=False,
             **kwargs
     ):
         if kernel_basis not in ['rref', 'svd']:
             raise ValueError(f'{kernel_basis} not a valid basis kernel basis')
-        if basis_coordinates not in ['transformed', 'rounded', 'spherical', 'semi_spherical']:
+        if basis_coordinates not in ['transformed', 'rounded', 'ball', 'cylinder']:
             raise ValueError(f'{basis_coordinates} not a valid basis coordinate system')
         if polytope.A.columns.str.contains(_xch_reactions_rex).any() or \
                 polytope.A.columns.str.contains(_rev_reactions_rex).any():
@@ -687,7 +688,9 @@ class PolytopeSamplingModel(object):
         self._bascoor = basis_coordinates  # if coordinates in ['rounded', 'transform']
 
         normalize = kernel_basis != 'rref'
-        F_simp = PolyRoundApi.simplify_polytope(polytope, settings=self._pr_settings, normalize=normalize)
+        F_simp = polytope
+        if F_simp.S is not None:
+            F_simp = PolyRoundApi.simplify_polytope(polytope, settings=self._pr_settings, normalize=normalize)
         F_trans = LabellingPolytope.from_Polytope(F_simp, polytope)
         if F_simp.S is not None:
             F_trans, self._T, self._T_1, self._tau = transform_polytope_keep_transform(
@@ -707,18 +710,25 @@ class PolytopeSamplingModel(object):
             self._basis_id = self._T_1.index
         elif basis_coordinates == 'rounded':
             self._basis_id = self._E_1.index
-        elif basis_coordinates in ['spherical', 'semi_spherical']:
-            basis_str = 'S' if basis_coordinates == 'spherical' else 'SS'
-            start = 1 if clip_sphere else 0
+        elif basis_coordinates == 'ball':
+            basis_str = 'B' if not hemi_sphere else 'HB'
             self._basis_id = pd.Index(
-                [f'{basis_str}_{self._kerbas}_{i}' for i in range(start, self._F_round.A.shape[-1])] + ['R'])
+                [f'{basis_str}_{self._kerbas}_{i}' for i in range(self._F_round.A.shape[-1])] + ['R']
+            )
+        elif basis_coordinates == ['cylinder']:
+            basis_str = 'C' if not hemi_sphere else 'HC'
+            self._basis_id = pd.Index(
+                ['phi'] + [f'{basis_str}_{self._kerbas}_{i}' for i in range(1, self._F_round.A.shape[-1])] + ['R']
+            )
 
         self._reaction_ids = polytope.A.columns.tolist()
-        self._clipsphere = clip_sphere
 
         if linalg == None:
             linalg = LinAlg(backend='numpy')
 
+        if hemi_sphere:
+            print('hemi_sphere: need to think this one through, currently the R dimension goes above 1!')
+        self._hemi = hemi_sphere
         self._la = linalg
         new = self.to_linalg(linalg)
         self.__dict__.update(new.__dict__)
@@ -747,10 +757,10 @@ class PolytopeSamplingModel(object):
     def dimensionality(self) -> int:
         return self._G.shape[1]
 
-    def _map_spherical_2_polar(self, spherical, pandalize=False):
+    def _map_ball_2_polar(self, ball, pandalize=False):
         raise NotImplementedError
 
-    def _map_rounded_2_spherical(self, rounded, pandalize=False):
+    def _map_rounded_2_ball(self, rounded, pandalize=False):
         if rounded.shape[-1] < 2:
             raise ValueError('only works for systems with at least 2 free dimensions!')
         index = None
@@ -761,19 +771,15 @@ class PolytopeSamplingModel(object):
         norm = self._la.norm(rounded, 2, -1, keepdims=True)
         directions = rounded / norm
 
-        if self._bascoor == 'semi_spherical':
+        if self._hemi:
             directions[..., 0] = abs(directions[..., 0])  # this makes sure we sample on the half-sphere!
 
         alpha = self._h.T / self._la.tensormul_T(self._G, directions)
-        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._bascoor == 'semi_spherical', keepdims=True)
+        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._hemi, keepdims=True)
 
-        if self._bascoor == 'semi_spherical':
+        if self._hemi:
             alpha_min, alpha_max = alpha_max
             frac_dist = (norm - alpha_min) / (alpha_max - alpha_min)  # fraction of chord
-            if self._clipsphere:
-                # here we remove the first spherical dimension, since it can be computed from the others!
-                # can only be done since we take the absolute value above!!!
-                directions = directions[..., 1:]
         else:
             frac_dist = norm / alpha_max  # fraction of max distance from polytope boundary
 
@@ -783,26 +789,20 @@ class PolytopeSamplingModel(object):
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
         return result
 
-    def _map_spherical_2_rounded(self, spherical, pandalize=False):
+    def _map_ball_2_rounded(self, ball, pandalize=False):
         index = None
-        if isinstance(spherical, pd.DataFrame):
-            index = spherical.index
+        if isinstance(ball, pd.DataFrame):
+            index = ball.index
             columns = self.basis_id
-            if self._clipsphere:
-                columns = columns.drop(columns[-2])
-            spherical = self._la.get_tensor(values=spherical.loc[:, columns].values)
+            ball = self._la.get_tensor(values=ball.loc[:, columns].values)
 
-        if self._clipsphere and (self._bascoor == 'semi_spherical'):
-            lost_coordinate = self._la.sqrt(1.0 - self._la.norm(spherical[..., :-1], 2, -1, keepdims=True) ** 2)
-            spherical = self._la.cat([lost_coordinate, spherical], dim=-1)
-
-        directions = spherical[..., :-1]
-        frac_dist = spherical[..., -1]
+        directions = ball[..., :-1]
+        frac_dist = ball[..., -1]
 
         alpha = self._h.T / self._la.tensormul_T(self._G, directions)
-        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._bascoor == 'semi_spherical')
+        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._bascoor == 'hemi_ball')
 
-        if self._bascoor == 'semi_spherical':
+        if self._hemi:
             alpha_min, alpha_max = alpha_max
             frac_dist = (frac_dist * (alpha_max - alpha_min)) + alpha_min  # fraction of chord
         else:
@@ -813,7 +813,36 @@ class PolytopeSamplingModel(object):
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self._rounded_id)
         return result
 
-    def _map_rounded_2_basis(self, rounded, pandalize=False):
+    def _map_ball_2_cylinder(self, ball, pandalize=False):
+        index = None
+        if isinstance(ball, pd.DataFrame):
+            index = ball.index
+        if ball.shape[-1] < 3:
+            raise ValueError('not possible for polytopes K<3')
+        output = self._la.vecopy(ball)
+        for i in reversed(range(2, ball.shape[-1] - 1)):
+            output[..., :i] /= self._la.sqrt(1.0 - output[..., [i]] ** 2)
+        atan = self._la.arctan2(output[..., [0]], output[..., [1]])
+        cylinder = self._la.cat([atan, output[..., 2:]], dim=-1)
+        if pandalize:
+            cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=None)  # TODO
+        return cylinder
+
+    def _map_cylinder_2_ball(self, cylinder, pandalize=False):
+        index = None
+        if isinstance(cylinder, pd.DataFrame):
+            index = cylinder.index
+        dim0 = self._la.sin(cylinder[..., [0]])
+        dim1 = self._la.cos(cylinder[..., [0]])
+
+        ball = self._la.cat([dim0, dim1, cylinder[..., 1:]], dim=-1)
+        for i in range(2, ball.shape[-1] - 1):
+            ball[..., :i] *= self._la.sqrt(1.0 - ball[..., [i]] ** 2)
+        if pandalize:
+            ball = pd.DataFrame(self._la.tonp(ball), index=index, columns=None)  # TODO
+        return ball
+
+    def _map_rounded_2_basis(self, rounded, pandalize=False):  # this is useful for rounded HR sampling of the polytope
         index = None
         if isinstance(rounded, pd.DataFrame):
             index = rounded.index
@@ -823,8 +852,14 @@ class PolytopeSamplingModel(object):
             if pandalize:
                 rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
             return rounded
-        if self._bascoor in ['spherical', 'semi_spherical']:
-            return self._map_rounded_2_spherical(rounded, pandalize)
+        if self._bascoor == 'ball':
+            return self._map_rounded_2_ball(rounded, pandalize)
+        if self._bascoor == 'cylinder':
+            ball = self._map_rounded_2_ball(rounded)
+            cylinder = self._map_ball_2_cylinder(ball)
+            if pandalize:
+                cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=self.basis_id)
+            return cylinder
         if self._bascoor == 'transformed':
             transformed = self._la.tensormul_T(self._E_1, rounded - self._epsilon.T)
             if pandalize:
@@ -841,8 +876,10 @@ class PolytopeSamplingModel(object):
 
         if self._bascoor != 'transformed':
             result = self._la.tensormul_T(self._E_1, result - self._epsilon.T)
-            if self._bascoor in ['spherical', 'semi_spherical']:
-                result = self._map_rounded_2_spherical(result)
+            if self._bascoor != 'rounded':
+                result = self._map_rounded_2_ball(result)
+                if self._bascoor != 'ball':
+                    result = self._map_ball_2_cylinder(result)
 
         if pandalize:
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
@@ -857,8 +894,10 @@ class PolytopeSamplingModel(object):
         if self._bascoor == 'transformed':
             fluxes = self._la.tensormul_T(self._T, theta) + self._tau.T
         else:
-            if self._bascoor in ['spherical', 'semi_spherical']:
-                theta = self._map_spherical_2_rounded(theta)
+            if self._bascoor == 'cylinder':
+                theta = self._map_cylinder_2_ball(theta)
+            if self._bascoor == 'ball':
+                theta = self._map_ball_2_rounded(theta)
             A, b = self._to_fluxes_transform
             fluxes = self._la.tensormul_T(A, theta) + b.T
 
@@ -907,9 +946,9 @@ class FluxCoordinateMapper(object):
             kernel_basis ='svd',  # basis for null-space of simplified polytope
             basis_coordinates = 'rounded',  # which variables will be considered free (basis or simplified)
             logit_xch_fluxes = False,  # whether to logit exchange fluxes
-            clip_sphere=False,
             free_reaction_id = None,
             linalg: LinAlg = None,
+            hemi_sphere=False,
             **kwargs
     ):
         # this is if we rebuild model and set new free reactions
@@ -925,7 +964,7 @@ class FluxCoordinateMapper(object):
         self._n_lr = len(self.labelling_fluxes_id)
 
         self._sampler = PolytopeSamplingModel(
-            self._Fn, pr_verbose, kernel_basis, basis_coordinates, clip_sphere, self._la, **kwargs
+            self._Fn, pr_verbose, kernel_basis, basis_coordinates, self._la, hemi_sphere=hemi_sphere, **kwargs
         )
 
         self._fwd_id = pd.Index(self._Ft.mapper.keys())
@@ -975,7 +1014,7 @@ class FluxCoordinateMapper(object):
             'basis_coordinates': self._sampler.basis_coordinates,
             'logit_xch_fluxes': self._logxch,
             'verbose': self._sampler._pr_settings.verbose,
-            'clip_sphere': self._sampler._clipsphere,
+            'hemi_sphere': self._sampler._hemi,
         }
 
     @property
@@ -1539,64 +1578,20 @@ if __name__ == "__main__":
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
-    # from PolyRound.api import PolyRoundApi
-    # PolyRoundApi.simplify_transform_and_round()
-    # n = 5
-    # m, k = spiro(build_simulator=False, v2_reversible=True, batch_size=n, backend='torch')
 
-
-    # t, f = pickle.load(open('tf.p', 'rb')
-    # fcm = FluxCoordinateMapper(m, linalg=LinAlg('numpy'))
-    # pickle.dump(fcm._Fn, open('ff.p', 'wb'))
-
-    # m, k = spiro(build_simulator=True, backend='torch')
-    # m, k = build_e_coli_anton_glc(build_simulator=True)
-
-    model, kwargs=spiro(backend='torch', v2_reversible=True, v5_reversible=True, build_simulator=True)
-    # model, kwargs=build_e_coli_tomek()
-
-    # fluxes = kwargs['fluxes'].to_frame().T
+    model, kwargs=spiro(backend='torch', v2_reversible=True, v5_reversible=True, build_simulator=False, which_measurements=None)
     fcm = FluxCoordinateMapper(
         model,
         kernel_basis='rref',
         logit_xch_fluxes=True,
-        basis_coordinates='transformed',
+        basis_coordinates='ball',
         pr_verbose=False,
+        hemi_sphere=True,
     )
-    compute_volume(fcm._sampler, enumerate_vertices=True)
-    # pol = fcm._Fn
-    # settings = fcm._sampler._pr_settings
-    # spol = PolyRoundApi.simplify_polytope(pol, settings=settings, normalize=False)
-    # pol = LabellingPolytope.from_Polytope(spol, pol)
-    #
-    # canon, T, T_1, tau = transform_polytope_keep_transform(pol, settings, kernel_basis='rref')
-    # verts = V_representation(canon)
-    # # print(verts)
-    #
-    # projected_fluxes = kwargs['measured_boundary_fluxes'][1:]
-    # P = pd.DataFrame(0.0, index=projected_fluxes, columns=pol.A.columns)
-    # P.loc[projected_fluxes, projected_fluxes] = np.eye(len(projected_fluxes))
-    # projpol = project_polytope(pol, P=P, number_type='float',return_vertices=True)
-    # # projection_pol = rref_and_project(pol, P=P, number_type='float', settings=settings)
-    #
-    # # res = compute_volume(fcm._sampler, quadratic_program=True)
-    # # res = sample_polytope(fcm._sampler, n=20, n_burn=0)['basis_samples']
-    # #
-    # # psm = fcm._sampler
-    # # thermo = fcm.map_fluxes_2_thermo(fluxes, pandalize=True)
-    # # theta = psm.to_net_basis(thermo, pandalize=True)
-    # # fluxes = psm.to_net_fluxes(theta, pandalize=True)
-    # #
-    # # fcm = FluxCoordinateMapper(
-    # #     model,
-    # #     kernel_basis='rref',
-    # #     logit_xch_fluxes=True,
-    # #     basis_coordinates='semi_spherical',
-    # #     pr_verbose=False,
-    # # )
-    # #
-    # # print(fluxes)
-    # # ding = fcm._sampler.to_net_basis(fluxes)
-    # # print(ding)
-    # # dang = fcm._sampler.to_net_fluxes(ding, pandalize=True)
-    # # print(dang)
+    psm = fcm._sampler
+    ball = sample_polytope(psm, n=20, n_burn=0, thinning_factor=1, return_what='basis')['basis']
+    print(ball)
+    cyl = psm._map_ball_2_cylinder(ball)
+    print(cyl)
+    ball = psm._map_cylinder_2_ball(cyl)
+    print(ball)

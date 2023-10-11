@@ -230,6 +230,10 @@ class NumpyBackend(object):
     def logsumexp(A, dim=0, keepdims=False):
         return scipy.special.logsumexp(A, dim, keepdims=keepdims)
 
+    @staticmethod
+    def atan2( x, y):
+        return
+
     def zeros(self, shape, dtype=None):
         if dtype is None:
             dtype = self._def_dtype
@@ -532,7 +536,7 @@ class LinAlg(object):
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
         'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
-        'argsort', 'unique', 'cov', 'split',
+        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos',
     ]
 
     def __getstate__(self):

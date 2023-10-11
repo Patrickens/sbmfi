@@ -329,7 +329,6 @@ class LabellingModel(Model):
         user_chosen = DictList()
         zero_facet = DictList()
         boundary = DictList()
-        input = DictList()
         fwd = DictList()
         rev = DictList()
         for reaction in self.labelling_reactions - bm:  # self.labelling_reactions is triggered here
@@ -339,7 +338,7 @@ class LabellingModel(Model):
             elif (abs(reaction.upper_bound - reaction.lower_bound) < self._tolerance) or \
                     (reaction.id in self._only_rev and (abs(revr.upper_bound - revr.lower_bound) < self._tolerance)):
                 zero_facet.append(reaction)
-            elif (reaction.id in free_reaction_id):
+            elif (reaction.id in free_reaction_id) or (self._only_rev.get(reaction.id) in free_reaction_id):
                 user_chosen.append(reaction)
             elif reaction.boundary:
                 # TODO make input reactions work!
@@ -347,10 +346,10 @@ class LabellingModel(Model):
             else:
                 fwd.append(reaction)
 
-        user_chosen.sort(key=lambda x: free_reaction_id.index(x.id))
+        user_chosen.sort(key=lambda x: free_reaction_id.index(_rev_reactions_rex.sub('', x.id)))
         self._chosen_rid = user_chosen.list_attr('id')
         self._zero_faced_rid = zero_facet.list_attr('id')
-        self._labelling_reactions = fwd + boundary + input + bm + user_chosen + zero_facet + rev
+        self._labelling_reactions = fwd + boundary + bm + user_chosen + zero_facet + rev
 
     def _fix_metabolite_reference_mess(self, reaction, atom_map):
         if not isinstance(reaction, LabellingReaction):
@@ -696,7 +695,7 @@ class LabellingModel(Model):
             kernel_basis='svd',
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
-            clip_sphere=False,
+            hemi_sphere=False,
             verbose=False,
     ):
         self._initialize_state()
@@ -707,7 +706,8 @@ class LabellingModel(Model):
             free_reaction_id=free_reaction_id,
             logit_xch_fluxes=logit_xch_fluxes,
             pr_verbose=verbose,
-            linalg=self._la
+            linalg=self._la,
+            hemi_sphere=hemi_sphere,
         )
         self._fcm_kwargs = self._fcm.fcm_kwargs
         self._set_state()
@@ -1088,10 +1088,10 @@ class EMU_Model(LabellingModel):
             kernel_basis='svd',
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
-            clip_sphere=False,
+            hemi_sphere=False,
             verbose=False,
     ):
-        super().build_simulator(free_reaction_id, kernel_basis, basis_coordinates, logit_xch_fluxes, verbose)
+        super().build_simulator(free_reaction_id, kernel_basis, basis_coordinates, logit_xch_fluxes, hemi_sphere, verbose)
         self._initialize_emu_split()
 
         for reaction in self.labelling_reactions + self.pseudo_reactions:

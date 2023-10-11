@@ -187,7 +187,7 @@ def spiro(
         auto_diff=auto_diff,
         metabolite_kwargs=metabolite_kwargs,
         reaction_kwargs=reaction_kwargs,
-        input_labelling=substrate_df.loc['C'],
+        input_labelling=substrate_df.iloc[0],
         ratio_repo=ratio_repo,
         measurements=annotation_df['met_id'].unique(),
         batch_size=batch_size,
@@ -264,8 +264,6 @@ def spiro(
     fluxes = pd.Series(fluxes, name='v')
     if (batch_size == 1) and build_simulator:
         model.set_fluxes(fluxes=fluxes)
-
-
 
     measurements, basebay, theta = None, None, None
     if which_measurements is not None:
