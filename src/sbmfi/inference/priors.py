@@ -164,9 +164,12 @@ class _BallSupport(_Dependent):
         self._vtol = validation_tol
         self._nx = fcm._nx
         self._logxch = fcm._logxch
+        self._hemi = fcm._sampler._hemi
         self._constraint_id = fcm.theta_id
         if not self._logxch and (self._nx > 0):
             self._rho_bounds = torch.Tensor(fcm._rho_bounds)
+            self._rho_bounds[:, 0] -= self._vtol
+            self._rho_bounds[:, 1] += self._vtol
 
         polytope = fcm.make_theta_polytope()
         super().__init__(is_discrete=False, event_dim=polytope.A.shape[1])
@@ -184,6 +187,8 @@ class _BallSupport(_Dependent):
         dist_check = (distance > 0.0) & (distance < 1.0)
         norm = torch.norm(sphere, p=2, dim=-1, keepdim=True)
         norm_check = (norm > 1.0 - self._vtol) & (norm < 1.0 + self._vtol)
+        if self._hemi:
+            dist_check = self._la.cat([dist_check, sphere[..., [0]] > 0.0 - self._vtol], dim=-1)
         if (self._nx > 0) and not self._logxch:
             xch_vars = value[..., -self._nx:]
             xch_check = (xch_vars > self._rho_bounds[:, 0]) & (xch_vars < self._rho_bounds[:, 1])
@@ -191,40 +196,32 @@ class _BallSupport(_Dependent):
         return torch.cat([norm_check, dist_check], dim=-1)
 
 
-class _CylinderSupport(_Dependent):
+class _CylinderSupport(_BallSupport):
     def __init__(
             self,
             fcm: FluxCoordinateMapper,
             validation_tol=_CannonicalPolytopeSupport._VTOL,
     ):
-        self._vtol = validation_tol
-        self._nx = fcm._nx
-        self._logxch = fcm._logxch
-        self._constraint_id = fcm.theta_id
-        if not self._logxch and (self._nx > 0):
-            self._rho_bounds = torch.Tensor(fcm._rho_bounds)
-
-        polytope = fcm.make_theta_polytope()
-        super().__init__(is_discrete=False, event_dim=polytope.A.shape[1])
-
-    def to(self, *args, **kwargs):
-        if not self._logxch and (self._nx > 0):
-            self._rho_bounds = self._rho_bounds.to(*args, **kwargs)
+        super().__init__(fcm=fcm, validation_tol=validation_tol)
 
     def check(self, value: torch.Tensor) -> torch.Tensor:
         cylinder = value
         if self._nx > 0:
-            ball = value[..., :-self._nx]
-        sphere = ball[..., :-1]
-        distance = ball[..., [-1]]
+            cylinder = value[..., :-self._nx]
+        phi = cylinder[..., 1]
+        if self._hemi:
+            check_phi = (phi > 0.0 - self._vtol) & (phi < math.pi + self._vtol)
+        else:
+            check_phi = (phi > -math.pi - self._vtol) & (phi < math.pi + self._vtol)
+        distance = cylinder[..., [-1]]
         dist_check = (distance > 0.0) & (distance < 1.0)
-        norm = torch.norm(sphere, p=2, dim=-1, keepdim=True)
-        norm_check = (norm > 1.0 - self._vtol) & (norm < 1.0 + self._vtol)
+        unif = cylinder[..., 1:-1]
+        unif_check = (unif > -1.0 - self._vtol) & (unif < -1.0 + self._vtol)
         if (self._nx > 0) and not self._logxch:
             xch_vars = value[..., -self._nx:]
             xch_check = (xch_vars > self._rho_bounds[:, 0]) & (xch_vars < self._rho_bounds[:, 1])
-            return torch.cat([norm_check, dist_check, xch_check], dim=-1)
-        return torch.cat([norm_check, dist_check], dim=-1)
+            return torch.cat([check_phi, unif_check, dist_check, xch_check], dim=-1)
+        return torch.cat([check_phi, unif_check, dist_check], dim=-1)
 
 
 class _BasePrior(Distribution):

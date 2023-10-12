@@ -363,7 +363,7 @@ class _BaseBayes(_BaseSimulator):
         sphere_sample = self._sphere_samples[ii]
         A_dist = self._A_dist[ii]
 
-        pol_dist = self._la.transax(self._sampler._h - self._sampler._G @ theta[..., :self._K].T)  # TODO
+        # pol_dist = self._la.transax(self._sampler._h - self._sampler._G @ theta[..., :self._K].T)  # TODO
         pol_dist = self._sampler._h - self._la.tensormul_T(self._sampler._G, theta[..., :self._K])
         pol_dist[pol_dist < 0.0] = 0.0
         allpha = pol_dist / A_dist
@@ -1299,10 +1299,10 @@ if __name__ == "__main__":
     # projection_pol = up._projection_pol
     # pickle.dump(projection_pol, open('anton_glc_projection_pol.p', 'wb'))
 
-    projection_pol = pickle.load(open('anton_glc_projection_pol.p', 'rb'))
-    up = ProjectionPrior(model, projection_pol=projection_pol, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=3)
-    up._fill_caches(n=5000, enumerate_vertices=True)
-    pickle.dump(up, open('anton_glc_projection_prior_w_volumes.p', 'wb'))
+    # projection_pol = pickle.load(open('anton_glc_projection_pol.p', 'rb'))
+    # up = ProjectionPrior(model, projection_pol=projection_pol, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=3)
+    # up._fill_caches(n=5000, enumerate_vertices=True)
+    # pickle.dump(up, open('anton_glc_projection_prior_w_volumes.p', 'wb'))
     # up = pickle.load(open('anton_glc_projection_prior_w_volumes.p', 'rb'))
 
     # model, kwargs = build_e_coli_anton_glc(

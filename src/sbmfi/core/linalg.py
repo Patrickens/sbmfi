@@ -536,7 +536,7 @@ class LinAlg(object):
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
         'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
-        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos',
+        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign',
     ]
 
     def __getstate__(self):
@@ -824,15 +824,19 @@ class LinAlg(object):
     def cartesian(self, A, ):
         pass
 
-    def min_pos_max_neg(self, alpha, return_max_neg=True, tol=1e15, keepdims=False):
-        alpha_max = self.vecopy(alpha)
-        alpha_max[alpha_max < 0.0] = tol
-        alpha_max = self.min(alpha_max, -1, keepdims)
-        if not return_max_neg:
-            return alpha_max
-        alpha_min = self.vecopy(alpha)
-        alpha_min[alpha_min > 0.0] = -tol
-        alpha_min = self.max(alpha_min, -1, keepdims)
+    def min_pos_max_neg(self, alpha, return_what=1, tol=1e15, keepdims=False):
+        if return_what > -1:
+            alpha_max = self.vecopy(alpha)
+            alpha_max[alpha_max < 0.0] = tol
+            alpha_max = self.min(alpha_max, -1, keepdims)
+            if return_what == 1:
+                return alpha_max
+        if return_what < 1:
+            alpha_min = self.vecopy(alpha)
+            alpha_min[alpha_min > 0.0] = -tol
+            alpha_min = self.max(alpha_min, -1, keepdims)
+            if return_what == -1:
+                return alpha_min
         return alpha_min, alpha_max
 
     def scale(self, A, lo, hi, rev=False):

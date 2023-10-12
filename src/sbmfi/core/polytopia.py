@@ -715,7 +715,7 @@ class PolytopeSamplingModel(object):
             self._basis_id = pd.Index(
                 [f'{basis_str}_{self._kerbas}_{i}' for i in range(self._F_round.A.shape[-1])] + ['R']
             )
-        elif basis_coordinates == ['cylinder']:
+        elif basis_coordinates == 'cylinder':
             basis_str = 'C' if not hemi_sphere else 'HC'
             self._basis_id = pd.Index(
                 ['phi'] + [f'{basis_str}_{self._kerbas}_{i}' for i in range(1, self._F_round.A.shape[-1])] + ['R']
@@ -772,18 +772,32 @@ class PolytopeSamplingModel(object):
         directions = rounded / norm
 
         if self._hemi:
-            directions[..., 0] = abs(directions[..., 0])  # this makes sure we sample on the half-sphere!
+            # this makes sure we sample on the half-sphere!
+            signs = self._la.sign(directions[..., [0]])
+            directions = directions * signs
 
-        alpha = self._h.T / self._la.tensormul_T(self._G, directions)
-        alpha_max = self._la.min_pos_max_neg(alpha, return_max_neg=self._hemi, keepdims=True)
+        allpha = self._h.T / self._la.tensormul_T(self._G, directions)
 
         if self._hemi:
-            alpha_min, alpha_max = alpha_max
-            frac_dist = (norm - alpha_min) / (alpha_max - alpha_min)  # fraction of chord
+            alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0, keepdims=True)
+            first_el = directions[..., [0]]
+            alpha = (rounded[..., [0]] - (alpha_min * first_el)) / first_el
+            alpha_frac = alpha / (alpha_max - alpha_min)
+            print(alpha_frac)
+            # v0 = alpha_min * directions[..., [1]]
+            # print(self._la.cat([signs, (rounded[..., [1]] - v0) / directions[..., [1]], alpha_max - alpha_min], dim=-1))
+            # dr = self._h.T - self._la.tensormul_T(self._G, v0)
+            # alpha = dr / ds
+            # print(alpha)
+            # # alpha = norm * signs
+            # frac_dist = (alpha - alpha_min) / (alpha_max - alpha_min)  # fraction of chord
+            # res = self._la.cat([alpha_min, alpha_max, alpha, alpha-alpha_min, alpha_max-alpha_min, frac_dist], dim=-1)
+            # print(pd.DataFrame(self._la.tonp(res), columns=['amin','amax','norm','normin','amxmn','fracdist']))
         else:
-            frac_dist = norm / alpha_max  # fraction of max distance from polytope boundary
+            alpha_max = self._la.min_pos_max_neg(allpha, return_what=1, keepdims=True)
+            alpha_frac = norm / alpha_max  # fraction of max distance from polytope boundary
 
-        result = self._la.cat([directions, frac_dist], dim=-1)
+        result = self._la.cat([directions, alpha_frac], dim=-1)
 
         if pandalize:
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
@@ -1590,8 +1604,8 @@ if __name__ == "__main__":
     )
     psm = fcm._sampler
     ball = sample_polytope(psm, n=20, n_burn=0, thinning_factor=1, return_what='basis')['basis']
-    print(ball)
-    cyl = psm._map_ball_2_cylinder(ball)
-    print(cyl)
-    ball = psm._map_cylinder_2_ball(cyl)
-    print(ball)
+    # print(ball)
+    # cyl = psm._map_ball_2_cylinder(ball)
+    # print(cyl)
+    # ball = psm._map_cylinder_2_ball(cyl)
+    # print(ball)
