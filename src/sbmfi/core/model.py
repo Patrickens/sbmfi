@@ -238,6 +238,12 @@ class LabellingModel(Model):
         )
         return self._labelling_reactions
 
+    @property
+    def flux_coordinate_mapper(self) -> FluxCoordinateMapper:
+        if not self._is_built:
+            raise ValueError('build the simulator first!')
+        return self._fcm
+
     def set_fluxes(self, fluxes: Union[pd.DataFrame, np.array], samples_id=None, trim=True):
         if not self._is_built:
             raise ValueError('MUST BUILD')
@@ -696,6 +702,7 @@ class LabellingModel(Model):
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
             hemi_sphere=False,
+            scale_bound=None,
             verbose=False,
     ):
         self._initialize_state()
@@ -708,6 +715,7 @@ class LabellingModel(Model):
             pr_verbose=verbose,
             linalg=self._la,
             hemi_sphere=hemi_sphere,
+            scale_bound=scale_bound,
         )
         self._fcm_kwargs = self._fcm.fcm_kwargs
         self._set_state()
@@ -1089,9 +1097,12 @@ class EMU_Model(LabellingModel):
             basis_coordinates='rounded',
             logit_xch_fluxes=True,
             hemi_sphere=False,
+            scale_bound=None,
             verbose=False,
     ):
-        super().build_simulator(free_reaction_id, kernel_basis, basis_coordinates, logit_xch_fluxes, hemi_sphere, verbose)
+        super().build_simulator(
+            free_reaction_id, kernel_basis, basis_coordinates, logit_xch_fluxes, hemi_sphere, scale_bound, verbose
+        )
         self._initialize_emu_split()
 
         for reaction in self.labelling_reactions + self.pseudo_reactions:

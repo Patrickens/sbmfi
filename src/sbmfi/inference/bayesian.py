@@ -379,7 +379,7 @@ class _BaseBayes(_BaseSimulator):
             # in case there are exchange fluxes, construct them here
             current_xch = theta[..., -self._n_rev:]
             if self._fcm.logit_xch_fluxes:
-                current_xch = self._fcm._sigmoid_xch(current_xch)
+                current_xch = self._fcm._expit_xch(current_xch)
             xch_fluxes = self._la.sample_bounded_distribution(
                 shape=net_basis_points.shape[:-1], lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
                 mu=current_xch, which=xch_proposal, std=xch_std,

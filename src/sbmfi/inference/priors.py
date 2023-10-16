@@ -209,10 +209,11 @@ class _CylinderSupport(_BallSupport):
         if self._nx > 0:
             cylinder = value[..., :-self._nx]
         phi = cylinder[..., 1]
-        if self._hemi:
-            check_phi = (phi > 0.0 - self._vtol) & (phi < math.pi + self._vtol)
-        else:
-            check_phi = (phi > -math.pi - self._vtol) & (phi < math.pi + self._vtol)
+        # if self._hemi:  # TODO check if the scaling works and then we can remove this
+        #     check_phi = (phi > 0.0 - self._vtol) & (phi < math.pi + self._vtol)
+        # else:
+        #     check_phi = (phi > -math.pi - self._vtol) & (phi < math.pi + self._vtol)
+        check_phi = (phi > -math.pi - self._vtol) & (phi < math.pi + self._vtol)
         distance = cylinder[..., [-1]]
         dist_check = (distance > 0.0) & (distance < 1.0)
         unif = cylinder[..., 1:-1]
@@ -234,18 +235,10 @@ class _BasePrior(Distribution):
         # prior sampling variables
         self._ic = cache_size  # current index in the cache
         if isinstance(model, LabellingModel):
-            if not model._is_built:
-                raise ValueError('First build the model; choose kernel basis and basis coordinate system!')
-            if model._la.backend != 'torch':
-                linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
-                model = FluxCoordinateMapper(
-                    model,
-                    linalg=linalg,
-                    free_reaction_id=model.labelling_reactions.list_attr('id'),
-                    **model._fcm.fcm_kwargs
-                )
-            else:
-                model = model._fcm
+            model = model.flux_coordinate_mapper
+        if model._la.backend != 'torch':
+            linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
+            model = model.to_linalg(linalg)
 
         self._fcm = model
         self._la = model._la
@@ -312,6 +305,7 @@ class _BasePrior(Distribution):
             self._fill_caches(**self._cache_fill_kwargs)
             self._ic = 0
             jc = n
+
         sample = self._theta_cache[self._ic: jc].view(self._extended_shape(sample_shape))
         self._ic = jc
         return sample
@@ -405,30 +399,24 @@ class _XchFluxPrior(Distribution):
         # we do not have a support for these priors, since they are checked by the support of
         #   UniFluxPrior anyways
         if isinstance(model, LabellingModel):
-            if not model._is_built:
-                raise ValueError('First build the model; choose whether to logit exchange fluxes!')
-            if model._la.backend != 'torch':
-                linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
-                model = FluxCoordinateMapper(
-                    model,
-                    linalg=linalg,
-                    free_reaction_id=model.labelling_reactions.list_attr('id'),
-                    **model._fcm.fcm_kwargs
-                )
-            else:
-                model = model._fcm
+            model = model.flux_coordinate_mapper
+        if model._la.backend != 'torch':
+            linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
+            model = model.to_linalg(linalg)
 
         if model._nx == 0:
             raise ValueError('no boundary fluxes')
 
+        self._fcm = model
         self._la = model._la
-        self._xch_id = model.xch_basis_id
         self._logxch = model._logxch
+        self._bound = model._bound
         self._rho_bounds = model._rho_bounds
         super().__init__(event_shape=torch.Size((model._nx, )), validate_args={})
-    
+
+    @property
     def theta_id(self) -> pd.Index:
-        return self._xch_id
+        return self._fcm.xch_basis_id
     
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
         raise NotImplementedError
@@ -438,47 +426,45 @@ class _XchFluxPrior(Distribution):
 
     @constraints.dependent_property(is_discrete=False, event_dim=1)
     def support(self):
-        return constraints.interval(self._rho_bounds[:, 0], self._rho_bounds[:, 1])
+        if not self._logxch:
+            return constraints.interval(self._rho_bounds[:, 0], self._rho_bounds[:, 1])
 
 
-class UniXchFluxPrior(_XchFluxPrior):
+class HyperRectangleXchFluxPrior(_XchFluxPrior):
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
+            mu_sigma: pd.DataFrame=None,  # for truncated normal sampling
     ):
+        self._which = 'unif'
+        self._mu = 0.0
+        self._std = 0.0
         super().__init__(model)
+        if mu_sigma is not None:
+            self._which = 'gauss'
+            raise NotImplementedError('this should signal that we sample from a truncated normal!')
 
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
-        xch_fluxes = self._la.sample_bounded_distribution(
-            shape=sample_shape, lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1]
+        bounded_samples = self._la.sample_bounded_distribution(
+            shape=sample_shape,
+            lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1],
+            mu=self._mu, std=self._std
         )
+        if self._logxch :
+            return self._fcm._logit_xch(xch_fluxes=bounded_samples)
+        elif self._bound is not None:
+            return self._fcm._bound_scale_xch(bounded_samples, to_bound=True)
+        return bounded_samples
+
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         if self._logxch:
-            xch_fluxes = self._la._logit_xch(xch_fluxes)
-        return xch_fluxes
-
-    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+            value = self._fcm._expit_xch(value)
+        elif self._bound is not None:
+            value = self._fcm._bound_scale_xch(value, to_bound=False)
         # we do not check any support here, since that has been done in UniFluxPrior
+        if self._which == 'gauss':
+            raise ValueError
         return torch.zeros((*value.shape[:-1], 1))
-
-
-class TruncNormXchFluxPrior(_XchFluxPrior):
-    def __init__(
-            self,
-            model: Union[FluxCoordinateMapper, LabellingModel],
-            mu_sigma: pd.DataFrame,
-    ):
-        super().__init__(model)
-        fva = fast_FVA(model._Fn)
-
-    @staticmethod
-    def _rando_mu_sigma(fcm):
-        fva = fast_FVA(model._Fn)
-
-    def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
-        pass
-
-    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        pass
 
 
 class UniformNetPrior(_NetFluxPrior):
@@ -491,7 +477,7 @@ class UniformNetPrior(_NetFluxPrior):
     ):
         super(UniformNetPrior, self).__init__(model, cache_size, **kwargs)
         if (self._fcm._nx > 0) and (xch_prior is None):
-            xch_prior = UniXchFluxPrior(self._fcm)
+            xch_prior = HyperRectangleXchFluxPrior(self._fcm)
         self._xch_prior = xch_prior
 
     @property
@@ -502,8 +488,11 @@ class UniformNetPrior(_NetFluxPrior):
         # this one is without pool always
         task = dict(
             model=self._fcm._sampler, initial_points=self._basis_points, n=n, n_burn=200, new_initial_points=True,
+            thinning_factor=5, n_chains=4, return_what='basis'
         )
-        theta = self._run_tasks(tasks=[task], scramble=True)
+        func_kwargs = inspect.getfullargspec(sample_polytope).args
+        kwargs = {key: task.get(key) for key in func_kwargs}
+        theta = self._run_tasks(tasks=[tuple(kwargs.values())], scramble=True)
         if self._fcm._nx > 0:
             xch_basis_samples = self._xch_prior.sample((n, ))
             theta = self._la.cat([theta, xch_basis_samples], dim=-1)
@@ -516,7 +505,7 @@ class UniformNetPrior(_NetFluxPrior):
             self._validate_sample(value)
         # place-holder until we can compute polytope volumes
 
-        if (self._fcm._nx > 0) and not isinstance(self._xch_prior, UniXchFluxPrior):
+        if (self._fcm._nx > 0) and not isinstance(self._xch_prior, HyperRectangleXchFluxPrior):
             xch_fluxes = value[..., -self._fcm._nx:]
             return self._xch_prior.log_prob(xch_fluxes)
         return torch.zeros((*value.shape[:-1], 1))
@@ -643,27 +632,39 @@ if __name__ == "__main__":
     # fcm = FluxCoordinateMapper(model)
     # pickle.dump(fcm, open('spiro_fcm.p', 'wb'))
     #
-    # model, kwargs = spiro(
-    #     backend='numpy', add_biomass=True, ratios=False, build_simulator=True, v2_reversible=True, v5_reversible=False,
-    #     basis_coordinates='transformed', kernel_basis='rref',
-    # )
+    model, kwargs = spiro(
+        backend='numpy', add_biomass=True, ratios=False, build_simulator=False, v2_reversible=True, v5_reversible=True,
+        basis_coordinates='transformed', kernel_basis='rref',
+    )
+    fcm = FluxCoordinateMapper(
+        model,
+        kernel_basis='svd',
+        basis_coordinates='rounded',
+        logit_xch_fluxes=False,
+        scale_bound=2.0,
+    )
+    xchp = HyperRectangleXchFluxPrior(fcm)
+    s = xchp.sample((10,))
+    print(xchp._la.scale(torch.tensor(0.0), lo=-2.0, hi=2.0))
+    print(pd.DataFrame(s.numpy(), columns=xchp.theta_id))
+    # print(fcm.theta_id)
+    # up = UniformNetPrior(fcm, cache_size=50)
+    # up.sample((20, ))
     # projected_fluxes = kwargs['measured_boundary_fluxes'][1:]
-    # fcm = FluxCoordinateMapper(model, kernel_basis='svd', basis_coordinates='rounded',
-    #                            free_reaction_id=projected_fluxes)
     # up = ProjectionPrior(model, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction',
     #                      num_processes=0)
     # up._fill_caches(n=10, )
     # pickle.dump(up, open('spiro_projection_prior_w_volumes.p', 'wb'))
     # up = pickle.load(open('spiro_projection_prior_w_volumes.p', 'rb'))
 
-    model, kwargs = build_e_coli_anton_glc(backend='torch', which_measurements=None)
-    projected_fluxes = kwargs['measured_boundary_fluxes']
-    model.reactions.get_by_id('EX_glc__D_e').bounds = (-12.0, 0.0)
-    for rid in projected_fluxes:
-        r = model.reactions.get_by_id(rid)
-        print(r.bounds, r)
-    fcm = FluxCoordinateMapper(model, kernel_basis='svd', basis_coordinates='rounded', free_reaction_id=projected_fluxes)
-    up = ProjectionPrior(model, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=0)
-    up._fill_caches(n=5000, )
-    pickle.dump(up, open('anton_glc_projection_prior_w_volumes.p', 'wb'))
-    up = pickle.load(open('anton_glc_projection_prior_w_volumes.p', 'rb'))
+    # model, kwargs = build_e_coli_anton_glc(backend='torch', which_measurements=None)
+    # projected_fluxes = kwargs['measured_boundary_fluxes']
+    # model.reactions.get_by_id('EX_glc__D_e').bounds = (-12.0, 0.0)
+    # for rid in projected_fluxes:
+    #     r = model.reactions.get_by_id(rid)
+    #     print(r.bounds, r)
+    # fcm = FluxCoordinateMapper(model, kernel_basis='svd', basis_coordinates='rounded', free_reaction_id=projected_fluxes)
+    # up = ProjectionPrior(model, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=0)
+    # up._fill_caches(n=5000, )
+    # pickle.dump(up, open('anton_glc_projection_prior_w_volumes.p', 'wb'))
+    # up = pickle.load(open('anton_glc_projection_prior_w_volumes.p', 'rb'))
