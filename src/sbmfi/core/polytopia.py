@@ -731,7 +731,6 @@ class PolytopeSamplingModel(object):
         self._bound = scale_bound if scale_bound is None else abs(scale_bound)
         self._la = linalg
         new = self.to_linalg(linalg)
-        print(new._F_round.transformation)
         self.__dict__.update(new.__dict__)
 
     @property
@@ -1292,7 +1291,6 @@ class FluxCoordinateMapper(object):
                 xch_fluxes = self._bound_scale_xch(xch_fluxes, to_bound=False)
         else:
             net_basis_variables = theta
-        print(net_basis_variables.shape, 234)
         thermo_fluxes = self._sampler.to_net_fluxes(net_basis_variables)  # should be in linalg form already
         if self._nx > 0:
             thermo_fluxes = self._la.cat([thermo_fluxes, xch_fluxes], dim=-1)

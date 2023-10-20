@@ -219,7 +219,7 @@ class _CylinderSupport(_BallSupport):
         unif = cylinder[..., 1:-1]
         unif_check = (unif > -1.0 - self._vtol) & (unif < -1.0 + self._vtol)
         if (self._nx > 0) and not self._logxch:
-            xch_vars = value[..., -self._nx:]
+            xch_vars = torch.atleast_2d(value[..., -self._nx:])
             xch_check = (xch_vars > self._rho_bounds[:, 0]) & (xch_vars < self._rho_bounds[:, 1])
             return torch.cat([check_phi, unif_check, dist_check, xch_check], dim=-1)
         return torch.cat([check_phi, unif_check, dist_check], dim=-1)
@@ -430,7 +430,7 @@ class _XchFluxPrior(Distribution):
             return constraints.interval(self._rho_bounds[:, 0], self._rho_bounds[:, 1])
 
 
-class HyperRectangleXchFluxPrior(_XchFluxPrior):
+class UniXchFluxPrior(_XchFluxPrior):
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
@@ -477,7 +477,7 @@ class UniformNetPrior(_NetFluxPrior):
     ):
         super(UniformNetPrior, self).__init__(model, cache_size, **kwargs)
         if (self._fcm._nx > 0) and (xch_prior is None):
-            xch_prior = HyperRectangleXchFluxPrior(self._fcm)
+            xch_prior = UniXchFluxPrior(self._fcm)
         self._xch_prior = xch_prior
 
     @property
@@ -488,7 +488,7 @@ class UniformNetPrior(_NetFluxPrior):
         # this one is without pool always
         task = dict(
             model=self._fcm._sampler, initial_points=self._basis_points, n=n, n_burn=200, new_initial_points=True,
-            thinning_factor=5, n_chains=4, return_what='basis'
+            thinning_factor=3, n_chains=6, return_what='basis'
         )
         func_kwargs = inspect.getfullargspec(sample_polytope).args
         kwargs = {key: task.get(key) for key in func_kwargs}
@@ -505,7 +505,7 @@ class UniformNetPrior(_NetFluxPrior):
             self._validate_sample(value)
         # place-holder until we can compute polytope volumes
 
-        if (self._fcm._nx > 0) and not isinstance(self._xch_prior, HyperRectangleXchFluxPrior):
+        if (self._fcm._nx > 0) and not isinstance(self._xch_prior, UniXchFluxPrior):
             xch_fluxes = value[..., -self._fcm._nx:]
             return self._xch_prior.log_prob(xch_fluxes)
         return torch.zeros((*value.shape[:-1], 1))
@@ -643,7 +643,7 @@ if __name__ == "__main__":
         logit_xch_fluxes=False,
         scale_bound=2.0,
     )
-    xchp = HyperRectangleXchFluxPrior(fcm)
+    xchp = UniXchFluxPrior(fcm)
     s = xchp.sample((10,))
     print(xchp._la.scale(torch.tensor(0.0), lo=-2.0, hi=2.0))
     print(pd.DataFrame(s.numpy(), columns=xchp.theta_id))

@@ -4,199 +4,344 @@ from normflows.flows.neural_spline.autoregressive import MaskedPiecewiseRational
 from normflows.utils.splines import rational_quadratic_spline
 # from sbi.neural_nets.flow import build_maf, build_nsf
 from functools import partial
-from pyknos.nflows.nn import nets
-from pyknos.nflows import flows, transforms
-from pyknos.nflows.transforms import Transform
+from pyknos.nflows.transforms import PointwiseAffineTransform
 from torch import Tensor, nn, relu, tanh, tensor, uint8
 from typing import Optional
 from sbi.utils.torchutils import create_alternating_binary_mask
 from normflows.distributions.base import BaseDistribution, Uniform, UniformGaussian
-from normflows.flows import CircularAutoregressiveRationalQuadraticSpline
+from normflows.flows import Permute, LULinearPermute
+from sbmfi.inference.normflow_circular import CircularAutoregressiveRationalQuadraticSpline, CircularCoupledRationalQuadraticSpline, EmbeddingConditionalNormalizingFlow
 from sbmfi.core.polytopia import FluxCoordinateMapper
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.simulator import _BaseSimulator
+from sbmfi.inference.bayesian import _BaseBayes
 from sbmfi.inference.priors import _BasePrior
 import math
 import numpy as np
 import tqdm
+from typing import Dict, Union, Any
+from ray import tune
+import os
+from sbmfi.settings import SIM_DIR
+import shutil
+from pathlib import Path
+import ray
+from ray import tune
+from ray.air.checkpoint import Checkpoint
+from ray.tune.schedulers import ASHAScheduler
+from ray.tune.stopper import TrialPlateauStopper
+from ray.tune import Callback
 
-
-class MFA_Flow(Transform):
-    def __init__(
-            self,
-            fcm: FluxCoordinateMapper,
-    ):
-        if fcm._sampler.basis_coordinates not in ['spherical', 'semi_spherical']:
-            raise ValueError
-
-        self._cylinder = CylinderFlow(
-            num_input_channels=len(fcm.theta_id) - 1,
-        )
-        self._fcm = fcm
-
-    def forward(self, inputs, context=None):
-        if self._fcm._nx > 0:
-            pass
-
-    def inverse(self, inputs, context=None):
-        pass
-
-
-def build_ball_flows(
-    batch_x: Tensor,
-    batch_y: Tensor,
-    z_score_x: Optional[str] = "independent",
-    z_score_y: Optional[str] = "independent",
-    hidden_features: int = 50,
-    num_transforms: int = 5,
-    num_bins: int = 10,
-    embedding_net: nn.Module = nn.Identity(),
-    tail_bound: float = 3.0,
-    hidden_layers_spline_context: int = 1,
-    num_blocks: int = 2,
-    dropout_probability: float = 0.0,
-    use_batch_norm: bool = False,
-    **kwargs,
-):
-    from sbi.neural_nets.flow import build_nsf
-    conditioner = partial(
-        nets.ResidualNet,
-        hidden_features=hidden_features,
-        context_features=y_numel,
-        num_blocks=num_blocks,
-        activation=relu,
-        dropout_probability=dropout_probability,
-        use_batch_norm=use_batch_norm,
-    )
-    def mask_in_layer(i):
-        return create_alternating_binary_mask(features=x_numel, even=(i % 2 == 0))
-    transform_list = []
-    for i in range(num_transforms):
-        block = [
-            transforms.PiecewiseRationalQuadraticCouplingTransform(
-                mask=mask_in_layer(i) if x_numel > 1 else tensor([1], dtype=uint8),
-                transform_net_create_fn=conditioner,
-                num_bins=num_bins,
-                tails="linear",
-                tail_bound=tail_bound,
-                apply_unconditional_transform=False,
-            )
-        ]
-        # Add LU transform only for high D x. Permutation makes sense only for more than
-        # one feature.
-        if x_numel > 1:
-            block.append(
-                transforms.LULinear(x_numel, identity_init=True),
-            )
-        transform_list += block
-
-class MFA_Uniform(BaseDistribution):
-    """
-    Multivariate uniform distribution
-    """
-
-    def __init__(self, low: torch.Tensor, high: torch.Tensor):
-        """Constructor
-
-        Args:
-          shape: Tuple with shape of data, if int shape has one dimension
-          low: Lower bound of uniform distribution
-          high: Upper bound of uniform distribution
-        """
-        super().__init__()
-        self.low = torch.as_tensor(low)
-        self.high = torch.as_tensor(high)
-        self.log_prob_val = - torch.sum(torch.log(self.high - self.low))
-
-    def forward(self, num_samples=1, context=None):
-        eps = torch.rand(
-            (num_samples,) + self.low.shape, dtype=self.low.dtype, device=self.low.device
-        )
-        z = self.low + (self.high - self.low) * eps
-        log_p = self.log_prob_val * torch.ones(num_samples, device=self.low.device)
-        return z, log_p
-
-    def log_prob(self, z, context=None):
-        log_p = self.log_prob_val * torch.ones(z.shape[0], device=z.device)
-        out_range = torch.logical_or(z < self.low, z > self.high)
-        ind_inf = torch.any(torch.reshape(out_range, (z.shape[0], -1)), dim=-1)
-        log_p[ind_inf] = -np.inf
-        return log_p
-
-
-def fuckin_aboot(
-        simulator: _BaseSimulator = None,
+def flow_constructor(
         fcm: FluxCoordinateMapper = None,
-        # prior_flow just makes a normalizing flow that matches samples from a prior
-        #   thus not needing to fuck around with context = conditioning on data
+        simulator: _BaseSimulator = None,
+        embedding_net=None,
         prior_flow=True,
         autoregressive=True,
+        num_blocks=4,
+        num_hidden_channels=20,
         num_bins=10,
         dropout_probability=0.0,
+        use_batch_norm=False,
         num_transforms = 3,
+        init_identity=True,
+        permute=None,
+        p=None,
 ):
+    # prior_flow just makes a normalizing flow that matches samples from a prior
+    #   thus not needing to fuck around with context = conditioning on data
     if not prior_flow and (simulator is None):
         raise ValueError('need model to determine context features brøh')
 
     if simulator is not None:
         fcm = simulator._model.flux_coordinate_mapper
 
-    if not ((fcm._sampler.basis_coordinates == 'cylinder') and ((fcm._bound is None) or (fcm.logit_xch_fluxes))):
+    if not ((fcm._sampler.basis_coordinates == 'cylinder') and (fcm._bound is not None)):
         raise ValueError('needs to have cylinder base_coordinates and a tail_bound or logit ya schmuckington')
 
     n_theta = len(fcm.theta_id)
 
-    base_bounds = np.ones((n_theta, 2), dtype=np.double)
-    base_bounds[0, :] = math.pi
-    base_bounds[:, 0] *= -1
-    if fcm._nx > 0:
-        base_bounds[-fcm._nx:, :] = torch.as_tensor(fcm._rho_bounds)
+    if (fcm._nx > 0) and fcm.logit_xch_fluxes:
+        ndim = len(fcm.theta_id)
+        ind = list(range(ndim-fcm._nx, ndim))
+        scale = torch.ones(ndim)
+        scale[-fcm._nx:] *= fcm._bound
+        base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
+    else:
+        base = Uniform(shape=len(fcm.theta_id), low=-fcm._bound, high=fcm._bound)
 
-    base = MFA_Uniform(low=base_bounds[:, 0], high=base_bounds[:, 1])
-    ncc = None if prior_flow else len(simulator.data_id)
+    if prior_flow:
+        ncc = None
+    else:
+        ncc = len(simulator.data_id)
+        if embedding_net is not None:
+            test_y = torch.zeros(ncc)
+            embedded_y = embedding_net(test_y)
+            ncc = embedded_y.numel
+            assert ncc <= len(simulator.data_id)
 
     transforms = []
     for i in range(num_transforms):
-        transforms.extend([
-            CircularAutoregressiveRationalQuadraticSpline(
-                num_input_channels=n_theta,
-                num_blocks=4,
-                num_hidden_channels=20,
-                ind_circ=[0],
-                num_context_channels=ncc,
-                num_bins=num_bins,
-                tail_bound=fcm._bound if fcm._bound else 1.0,
-                activation=nn.ReLU,
-                dropout_probability=dropout_probability,
+        common_kwargs = dict(
+            num_input_channels=n_theta,
+            num_blocks=num_blocks,
+            num_hidden_channels=num_hidden_channels,
+            ind_circ=[0],
+            num_context_channels=ncc,
+            num_bins=num_bins,
+            tail_bound=fcm._bound,
+            activation=nn.ReLU,
+            dropout_probability=dropout_probability,
+            use_batch_norm=use_batch_norm,
+            init_identity=init_identity,
+        )
+        if autoregressive:
+            transform = CircularAutoregressiveRationalQuadraticSpline(
+                **common_kwargs,
                 permute_mask=True,
-                init_identity=True,
-            ),
-            normflows.flows.LULinearPermute(n_theta),
-        ])
-    flow = normflows.NormalizingFlow(q0=base, flows=transforms)
+            )
+        else:
+            transform = CircularCoupledRationalQuadraticSpline(
+                **common_kwargs,
+                reverse_mask=False,
+                mask=None,
+            )
+
+        if permute == 'lu':
+            perm = LULinearPermute(num_channels=n_theta, identity_init=init_identity)
+        elif permute == 'shuffle':
+            perm = Permute(num_channels=n_theta, mode='shuffle')
+
+        transform_sequence = [transform]
+        if permute is not None:
+            transform_sequence = [transform, perm]
+
+        transforms.extend(transform_sequence)
+
+    if permute is not None:
+        transforms = transforms[:-1]
+
+    flow = EmbeddingConditionalNormalizingFlow(q0=base, flows=transforms, embedding_net=embedding_net, p=p)
     return flow
 
-def train_prior_flow(
+
+
+class MFA_Flow(tune.Trainable):
+    def _prior_flow_step(self):
+        theta = self._prior.sample((self._batch_size,))
+        loss = self._flow.forward_kld(theta)
+        if ~(torch.isnan(loss) | torch.isinf(loss)):
+            loss.backward()
+            self._optimizer.step()
+        return {'forward_kld': loss.to('cpu').data.numpy().item()}
+
+    def _posterior_flow_step(self):
+        raise NotImplementedError
+
+    def _get_data_loaders(self):
+        pass
+
+
+    def save_checkpoint(self, checkpoint_dir: str) -> Optional[Dict]:
+        pass
+
+    def setup(self, config: Dict, prior=None, simulator=None):
+        self._prior = prior
+        self._simulator = simulator
+
+        # TODO load data and use a batch to parametrize z-scoring
+        embedding = config.get('data_embedding')
+        embedding_net = None
+        if embedding == 'z_score_trainable':
+            embedding_net = PointwiseAffineTransform  # TODO shift and scale are registered as buffers????
+            # register as parameters
+            raise NotImplementedError
+        # TODO come up with other embedding nets?
+
+        prior_flow = config.get('prior_flow', True)
+
+        self._flow = flow_constructor(
+            fcm=prior._fcm,
+            simulator=simulator,
+            embedding_net=embedding_net,
+            prior_flow=prior_flow,
+            autoregressive=config.get('autoregressive', True),
+            num_blocks=config.get('num_blocks', 2),
+            num_hidden_channels=config.get('num_hidden_channels', 10),
+            num_bins=config.get('num_bins', 10),
+            dropout_probability=config.get('dropout_probability', 0.1),
+            use_batch_norm=config.get('use_batch_norm', False),
+            num_transforms=config.get('num_transforms', 2),
+            init_identity=config.get('init_identity', True),
+        )
+
+        self._optimizer = torch.optim.Adam(
+            self._flow.parameters(),
+            lr=config.get('learning_rate', 1e-3),
+            weight_decay=config.get('weight_decay', 1e-5)
+        )
+
+        self._batch_size = config.get('batch_size', 512)
+
+        if prior_flow:
+            self.step = self._prior_flow_step
+        else:
+            self.step = self._posterior_flow_step
+
+
+class Kanker(MFA_Flow):
+    def __init__(
+            self,
+            prior: _BasePrior,
+            simulator: _BaseSimulator = None,
+    ):
+        self._prior = prior
+        self._flow = flow_constructor(prior._fcm)
+        self._simulator = simulator
+        self.step = self._prior_flow_step
+        self._optimizer = torch.optim.Adam(
+            self._flow.parameters(),
+            lr=1e-3,
+            weight_decay=1e-5,
+        )
+        self._batch_size = 512
+
+
+class CVStopper(TrialPlateauStopper):
+
+    def __init__(
+            self,
+            metric: str,
+            std: float = 0.01,
+            num_results: int = 4,
+            grace_period: int = 4,
+            metric_threshold: Optional[float] = None,
+            mode: Optional[str] = None,
+            max_kld = 5.0,
+    ):
+        super().__init__(metric, std, num_results, grace_period, metric_threshold, mode)
+        self._cv = self._std
+        self._max_kld = max_kld
+
+    def __call__(self, trial_id: str, result: Dict):
+        metric_result = result.get(self._metric)
+
+        if metric_result  > self._max_kld:
+            return True
+
+        self._trial_results[trial_id].append(metric_result)
+        self._iter[trial_id] += 1
+
+        # If still in grace period, do not stop yet
+        if self._iter[trial_id] < self._grace_period:
+            return False
+
+        # If not enough results yet, do not stop yet
+        if len(self._trial_results[trial_id]) < self._num_results:
+            return False
+
+        # If metric threshold value not reached, do not stop yet
+        if self._metric_threshold is not None:
+            if self._mode == "min" and metric_result > self._metric_threshold:
+                return False
+            elif self._mode == "max" and metric_result < self._metric_threshold:
+                return False
+
+        # Calculate stdev of last `num_results` results
+        try:
+            current_std = np.std(self._trial_results[trial_id])
+            current_mu = np.mean(self._trial_results[trial_id])
+            current_cv = current_std / abs(current_mu)
+        except Exception:
+            current_cv = float("inf")
+
+        # If stdev is lower than threshold, stop early.
+        return current_cv < self._cv
+
+
+
+
+
+
+def main(
         prior: _BasePrior,
-        max_iter = 20,
-        train_batch = 256,
+        simulator: _BaseSimulator = None,
+        tune_id: str = 'test',
+        prior_flow=True,
+        num_samples=200,
+        max_t=300,
+
 ):
-    pbar = tqdm.tqdm(total=max_iter, ncols=200, desc='loss')
-    prior_flow = fuckin_aboot(fcm=prior._fcm)
-    optimizer = torch.optim.Adam(prior_flow.parameters(), lr=1e-3, weight_decay=1e-5)
-    print(abs(prior_flow.sample(20)[0][:, 0].detach()) > 1.0)
-    # for i in range(max_iter):
-    #     pbar.update(i)
-    #     x = prior.sample((train_batch, ))
-    #     loss = prior_flow.forward_kld(x)
-    #     print(loss)
-    #     if ~(torch.isnan(loss) | torch.isinf(loss)):
-    #         loss.backward()
-    #         optimizer.step()
-    #
-    #     loss_np = loss.to('cpu').data.numpy()
-    #     pbar.set_postfix(loss=loss_np)
-    pass
+    if not prior_flow:
+        raise NotImplementedError('have yet to think about doing posteriors')
+
+    param_space = {
+        'prior_flow': prior_flow,
+        'autoregressive': tune.choice((True, False)),
+        'num_blocks': tune.randint(2, 5),
+        'num_hidden_channels': tune.qrandint(10, 100, 5),
+        'num_bins': tune.qrandint(4, 20, 4),
+        'dropout_probability': tune.uniform(0.0, 0.5),
+        'use_batch_norm': tune.choice((True, False)),
+        'num_transforms': tune.randint(2, 5),
+        'init_identity': tune.choice((True, False)),
+        'learning_rate': tune.loguniform(1e-5, 3e-1),
+        'weight_decay': tune.loguniform(1e-7, 1e-5),
+        'batch_size': tune.choice(2 ** np.arange(4, 10)),
+    }
+    whatune = (
+        'autoregressive', 'num_blocks', 'num_hidden_channels', 'num_bins', 'dropout_probability', 'use_batch_norm',
+        'num_transforms', 'learning_rate', 'batch_size'
+    )
+    param_space = {k: v for k, v in param_space.items() if k in whatune}
+    local_dir = os.path.join(SIM_DIR, 'ray_logs')
+    dirpath = Path(local_dir) / tune_id
+    if dirpath.exists() and dirpath.is_dir():
+        shutil.rmtree(dirpath)
+
+    callback = None  # TODO for posterior trainine, useful to do some calibration automatically!
+
+    metric = 'forward_kld'
+    grace_period = 5
+    tuner = tune.Tuner(
+        trainable=tune.with_parameters(MFA_Flow, prior=prior, simulator=simulator),
+        # trainable=tune.with_resources(
+        #     tune.with_parameters(MFA_Flow, prior=prior, simulator=simulator),
+        #     resources={"cpu": 1, "gpu": 0, "memory": 1e9},
+        # ),
+        tune_config=tune.TuneConfig(
+            search_alg=None,  # NB defaults to random search, think of doing BOHB or BayesOptSearch
+            metric=metric,
+            mode='min',
+            scheduler=tune.schedulers.ASHAScheduler(
+                max_t=max_t,
+                grace_period=grace_period,
+                reduction_factor=2
+            ),
+            num_samples=num_samples,
+        ),
+        run_config=ray.air.RunConfig(
+            local_dir=local_dir,
+            name=tune_id,
+            callbacks=callback,
+            stop=CVStopper(  # NB checks for convergence based on CV
+                metric=metric,
+                std=0.005,  # TODO THIS SHOULD ACTUALLY THE CV!
+                num_results=20,
+                grace_period=grace_period,
+                metric_threshold=None,
+                mode='min',
+                max_kld=5.0,
+            ),
+            log_to_file=True,
+            # checkpoint_config=ray.air.CheckpointConfig(
+            #     checkpoint_at_end=True
+            # )
+        ),
+        param_space=param_space,
+    )
+    result = tuner.fit()
+    return result
 
 
 if __name__ == "__main__":
@@ -205,20 +350,22 @@ if __name__ == "__main__":
     from sbmfi.inference.priors import UniformNetPrior
 
     model, kwargs = spiro(
-        backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None
+        backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='lcms'
     )
+
+    sim = kwargs['basebayes']
     fcm = FluxCoordinateMapper(
         model,
-        basis_coordinates='cylinder'
-
+        basis_coordinates='cylinder',
+        logit_xch_fluxes=False,
+        scale_bound=1.0
     )
 
+    # up = UniformNetPrior(fcm, cache_size=1000)
+    # main(prior=up)
 
-    up = UniformNetPrior(fcm, cache_size=1000)
-    # draws = up.sample((30,))
-    # flow = fuckin_aboot(fcm=fcm)
-    train_prior_flow(up)
-
+    # mflow = Kanker(prior=up)
+    # print(mflow.step())
 
 
 
