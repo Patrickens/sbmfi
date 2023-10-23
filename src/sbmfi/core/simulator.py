@@ -81,13 +81,13 @@ class _BaseSimulator(object):
         if boundary_observation_model is not None:
             bo_id = boundary_observation_model.boundary_id
             bo_fluxes_id = bo_id.to_series().replace({v: k for k, v in model._only_rev.items()})
-            if not bo_fluxes_id.isin(model.fluxes_id).all():
+            if not bo_fluxes_id.isin(model.labelling_fluxes_id).all():
                 raise ValueError
             if not model._la == boundary_observation_model._la:  # TODO make sure that device also matches
                 raise ValueError
             # NB this means that we always append the boundary fluxes to the end of the last dimension!
             self._bo_idx = self._la.get_tensor(  # TODO maybe make this select from prior fluxes??
-                values=np.array([self._model.fluxes_id.get_loc(rid) for rid in bo_fluxes_id], dtype=np.int64)
+                values=np.array([self._model.labelling_fluxes_id.get_loc(rid) for rid in bo_fluxes_id], dtype=np.int64)
             )
         self._bomsize = 0 if boundary_observation_model is None else len(self._bo_idx)
         self._bom = boundary_observation_model
@@ -118,10 +118,12 @@ class _BaseSimulator(object):
     def _pandalize_data(self, data, index, n_obs, return_mdvs=False):
         if return_mdvs:
             columns = make_multidex({k: self._model.state_id for k in self._obmods}, 'labelling_id', 'mdv_id')
+            n_f, n_mdv, n_s = data.shape
+            data = self._la.tonp(data).reshape(n_f, n_mdv * n_s)
             return pd.DataFrame(data, index=index, columns=columns)
         else:
-            n_obshape = max(1, n_obs)
             n_f = data.shape[0]
+            n_obshape = max(1, n_obs)
             data = self._la.tonp(data).transpose(1, 0, 2).reshape((n_f * n_obshape, len(self.data_id)))
             if index is None:
                 index = pd.RangeIndex(n_f)
@@ -136,6 +138,7 @@ class _BaseSimulator(object):
             n_obs=3,
             return_mdvs=False, # whether to return mdvs, observation_average or noisy observations
             pandalize=False,
+            mdvs=None,
     ):
         index = None
         if isinstance(theta, pd.DataFrame):
@@ -148,29 +151,39 @@ class _BaseSimulator(object):
 
         fluxes = self._fcm.map_theta_2_fluxes(theta)
 
-        if len(fluxes.shape) > 2:
-            raise ValueError('pass n_samples x n_fluxes array!')
+        if mdvs is None:
+            if len(fluxes.shape) > 2:
+                raise ValueError('pass n_samples x n_fluxes array!')
+            n_f = fluxes.shape[0]
+            self._model.set_fluxes(fluxes, index, trim=True)  # this is where wrongly shaped fluxes are caught!
+            fluxes = self._model._fluxes
+        elif return_mdvs:
+            raise ValueError('return passed MDVS?')
+        else:
+            fluxes = self._fcm.frame_fluxes(fluxes, index, trim=True)
+            n_f = mdvs.shape[0]
 
-        n_obshape = max(1, n_obs)
         slicer = 0 if n_obs == 0 else slice(None)
-        n_f = fluxes.shape[0]
-        self._model.set_fluxes(fluxes, index, trim=True)  # this is where wrongly shaped fluxes are caught!
+        n_obshape = max(1, n_obs)
 
         if return_mdvs:
-            result = self._la.get_tensor(shape=(n_f, self._model._ns * len(self._obmods)))
+            result = self._la.get_tensor(shape=(n_f, len(self._obmods), self._model._ns))
         else:
             result = self._la.get_tensor(shape=(n_f, n_obshape, len(self.data_id)))
             if self._bomsize > 0:
                 result[:, slicer, -self._bomsize:] = self._bom.sample_observation(
-                    self._model._fluxes[:, self._bo_idx], n_obs=n_obs
+                    fluxes[:, self._bo_idx], n_obs=n_obs
                 )
 
         for i, (labelling_id, obmod) in enumerate(self._obmods.items()):
             j, k = self._obsize[labelling_id]
-            self._model.set_input_labelling(input_labelling=self._substrate_df.loc[labelling_id])
-            mdv = self._model.cascade()
+            if mdvs is not None:
+                mdv = mdvs[:, i, :]
+            else:
+                self._model.set_input_labelling(input_labelling=self._substrate_df.loc[labelling_id])
+                mdv = self._model.cascade()
             if return_mdvs:
-                result[:, i*self._model._ns : (i+1) * self._model._ns] = mdv
+                result[:, i, :] = mdv
             else:
                 result[:, slicer, j:k] = obmod(mdv, n_obs=n_obs)
 
@@ -178,11 +191,13 @@ class _BaseSimulator(object):
             return self._pandalize_data(result, index, n_obs, return_mdvs)
         return result
 
-    def to_partial_mdvs(self, data, is_mdv=False, normalize=False, pandalize=True):
+    def to_partial_mdvs(self, data, is_mdv=False, normalize=False, pandalize=True, append_bom=True):
         index = None
         if isinstance(data, pd.DataFrame):
             index = data.index
             data = self._la.get_tensor(values=data.values)
+            if is_mdv:
+                data = data[:, None, :]
 
         processed = []
         columns = {}
@@ -200,7 +215,7 @@ class _BaseSimulator(object):
                     part_mdvs = obmod.compute_observations(part_mdvs)
                 processed.append(part_mdvs)
             columns[labelling_id] = obmod._observation_df.index.copy()
-        if self._bomsize > 0:
+        if (self._bomsize > 0) and append_bom and not is_mdv:
             processed.append(data[..., -self._bomsize:])
             columns['BOM'] = self._bom.boundary_id
         processed = self._la.cat(processed, -1)
@@ -509,14 +524,34 @@ if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.inference.priors import UniformNetPrior
     import pickle
-    model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0,)
-    bb = kwargs['basebayes']
-    sdf = kwargs['substrate_df']
-    dss = DataSetSim(model, sdf, bb._obmods)
-    up = UniformNetPrior(model)
-    # theta = up.sample((30,))
+    # model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0,)
+    # bb = kwargs['basebayes']
+    # sdf = kwargs['substrate_df']
+    # dss = DataSetSim(model, sdf, bb._obmods)
+    # up = UniformNetPrior(model)
+    # # theta = up.sample((30,))
+    # #
+    # # result = dss.simulate_set(theta)
+    # # dss.to_hdf('spriro.h5', result=result, dataset_id='niks', append=True)
     #
-    # result = dss.simulate_set(theta)
-    # dss.to_hdf('spriro.h5', result=result, dataset_id='niks', append=True)
+    # theta = dss.read_hdf('spriro.h5', what='theta', dataset_id='niks')
 
-    theta = dss.read_hdf('spriro.h5', what='theta', dataset_id='niks')
+    pd.set_option('display.max_rows', 500)
+    pd.set_option('display.max_columns', 500)
+    pd.set_option('display.width', 1000)
+
+    model, kwargs = spiro(backend='torch', v2_reversible=True, build_simulator=True, which_measurements='lcms',
+                          which_labellings=list('AB'))
+    up = UniformNetPrior(model._fcm, cache_size=50)
+    dss = DataSetSim(
+        model,
+        substrate_df=kwargs['substrate_df'],
+        mdv_observation_models=kwargs['basebayes']._obmods,
+        boundary_observation_model=kwargs['basebayes']._bom,
+        num_processes=0,
+    )
+    theta = up.sample((10,))
+    result = dss.simulate_set(theta, what='all', n_obs=0, show_progress=True, close_pool=False)
+    mdvs = result['mdv']
+
+    data = dss.simulate(mdvs=mdvs, n_obs=0)

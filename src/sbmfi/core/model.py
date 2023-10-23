@@ -171,7 +171,7 @@ class LabellingModel(Model):
         return self._labelling_id[:]
 
     @property
-    def fluxes_id(self) -> pd.Index:
+    def labelling_fluxes_id(self) -> pd.Index:
         return pd.Index(self.labelling_reactions.list_attr('id'), name='fluxes_id')
 
     @property
@@ -195,7 +195,7 @@ class LabellingModel(Model):
         if not self._is_built:
             raise ValueError('MUST BUILD')
         jac = self._la.tonp(self._jacobian)
-        framed_jacs = [pd.DataFrame(sub_jac, index=self.fluxes_id, columns=self.state_id) for sub_jac in jac]
+        framed_jacs = [pd.DataFrame(sub_jac, index=self.labelling_fluxes_id, columns=self.state_id) for sub_jac in jac]
         return pd.concat(framed_jacs, keys=self._fcm._samples_id)
 
     @property
@@ -351,8 +351,9 @@ class LabellingModel(Model):
                 boundary.append(reaction)
             else:
                 fwd.append(reaction)
-
-        user_chosen.sort(key=lambda x: free_reaction_id.index(_rev_reactions_rex.sub('', x.id)))
+        user_chosen.sort(key=lambda x: \
+            free_reaction_id.index(_rev_reactions_rex.sub('', x.id)) if x.id not in free_reaction_id else x.id
+        )
         self._chosen_rid = user_chosen.list_attr('id')
         self._zero_faced_rid = zero_facet.list_attr('id')
         self._labelling_reactions = fwd + boundary + bm + user_chosen + zero_facet + rev
@@ -860,8 +861,8 @@ class RatioMixin(LabellingModel):
             repo[ratio_id] = {'numerator': numerator, 'denominator': denominator}
 
         self._ratio_repo = repo  # condensed representation!
-        self._ratio_num_sum = self._sum_getter('numerator', repo, self._la, self.fluxes_id)
-        self._ratio_den_sum = self._sum_getter('denominator', repo, self._la, self.fluxes_id)
+        self._ratio_num_sum = self._sum_getter('numerator', repo, self._la, self.labelling_fluxes_id)
+        self._ratio_den_sum = self._sum_getter('denominator', repo, self._la, self.labelling_fluxes_id)
 
     def prepare_polytopes(self, free_reaction_id=None, verbose=False):
         if free_reaction_id is None:

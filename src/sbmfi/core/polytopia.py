@@ -463,7 +463,7 @@ def extract_labelling_polytope(
     A = A.loc[non_nan_constraints]
     b.index = A.index
 
-    fluxes_id = model.fluxes_id
+    fluxes_id = model.labelling_fluxes_id
     if coordinates == 'thermo':
         fluxes_id = fluxes_id.map(lambda x: model._only_rev[x] if x in model._only_rev else x)
 
@@ -986,7 +986,7 @@ class FluxCoordinateMapper(object):
     ):
         # this is if we rebuild model and set new free reactions
         free_reaction_id = [] if free_reaction_id is None else free_reaction_id
-        if not model._is_built or not model.fluxes_id[-len(free_reaction_id):].isin(free_reaction_id).all():
+        if not model._is_built or not model.labelling_fluxes_id[-len(free_reaction_id):].isin(free_reaction_id).all():
             model.prepare_polytopes(free_reaction_id)
 
         self._la = linalg if linalg else model._la
@@ -1226,7 +1226,7 @@ class FluxCoordinateMapper(object):
             n = 1
             if self._logxch:
                 n = thermo_fluxes.shape[0]
-            self._J_tt = self._la.get_tensor(shape=(n, len(self.theta_id), len(self.fluxes_id)))
+            self._J_tt = self._la.get_tensor(shape=(n, len(self.theta_id), len(self.labelling_fluxes_id)))
             self._J_tt[:, :len(self.net_basis_id), :-self._nx] = self._mapper.to_fluxes_transform[0].T[None, :, :]
             if not self._logxch and (self._nx > 0):
                 self._J_tt[:, -self._nx, -self._nx] = self._la.ones(self._nx)
@@ -1459,26 +1459,18 @@ def sample_polytope(
             # uniform samples from unit ball in d dims
             sphere_samples = model._la.sample_hypersphere(shape=(biatch, n_chains, K))
             # batch compute distances to all planes
-            ARs = model._G[None, ...] @ model._la.transax(sphere_samples)
+            # A_dist = model._G[None, ...] @ model._la.transax(sphere_samples)
+            A_dist = model._la.tensormul_T(model._G, sphere_samples)
             rands = model._la.randu((biatch, n_chains), dtype=model._G.dtype)
 
-        ar = ARs[i % biatch]
         sphere_sample = sphere_samples[i % biatch]
+        ar = A_dist[i % biatch]
         rnd = rands[i % biatch]
-        dist = model._h - model._G @ x.T
+        dist = model._h.T - model._la.tensormul_T(model._G, x)
         dist[dist < 0.0] = 0.0
-        alpha_min = dist / ar
-        alpha_max = model._la.vecopy(alpha_min)
+        allpha = dist / ar
 
-        alpha_max[alpha_max < 0.0] = alpha_max.max()
-        alpha_max = alpha_max.min(0)
-        if isinstance(alpha_max, tuple):
-            alpha_max = alpha_max[0]
-
-        alpha_min[alpha_min > 0.0] = alpha_min.min()
-        alpha_min = alpha_min.max(0)
-        if isinstance(alpha_min, tuple):
-            alpha_min = alpha_min[0]
+        alpha_min, alpha_max = model._la.min_pos_max_neg(allpha, return_what=0)
 
         if phi is not None:
             # this is ellipsoid aware sampling for volume computation, meaning that
@@ -1639,19 +1631,20 @@ if __name__ == "__main__":
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    model, kwargs=spiro(backend='torch', v2_reversible=True, v5_reversible=True, build_simulator=False, which_measurements=None)
+    model, kwargs=spiro(backend='numpy', v2_reversible=True, v5_reversible=True, build_simulator=False, which_measurements=None)
     fcm = FluxCoordinateMapper(
         model,
         kernel_basis='rref',
         logit_xch_fluxes=False,
-        basis_coordinates='cylinder',
+        basis_coordinates='rounded',
         pr_verbose=False,
         hemi_sphere=True,
         scale_bound=2.0,
     )
-    up = UniformNetPrior(fcm, cache_size=10)
-    s = up.sample((10, ))
-    df = fcm.map_theta_2_fluxes(s, pandalize=True)
+    res = sample_polytope(fcm._sampler, n=50, n_burn=0, n_chains=5, n_cdf=6)
+    # up = UniformNetPrior(fcm, cache_size=10)
+    # s = up.sample((10, ))
+    # df = fcm.map_theta_2_fluxes(s, pandalize=True)
     # df = up.sample_pandalize(15)
     # psm = fcm._sampler
     # ball = sample_polytope(psm, n=3, n_burn=0, thinning_factor=1, return_what='basis')['basis']
