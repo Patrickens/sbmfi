@@ -234,6 +234,10 @@ class NumpyBackend(object):
     def atan2( x, y):
         return
 
+    @staticmethod
+    def triu_indices(n, k):
+        return np.triu_indices(n=n, k=k)
+
     def zeros(self, shape, dtype=None):
         if dtype is None:
             dtype = self._def_dtype
@@ -479,6 +483,11 @@ class TorchBackend(object):
     def logsumexp(A, dim=0, keepdims=False):
         return torch.logsumexp(A, dim, keepdims)
 
+    @staticmethod
+    def triu_indices(n, k):
+        indices = torch.triu_indices(row=n, col=n, offset=k)
+        return indices[0], indices[1]
+
     def zeros(self, shape, dtype=None):
         if dtype is None:
             dtype = self._def_dtype
@@ -536,7 +545,7 @@ class LinAlg(object):
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
         'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
-        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff'
+        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum'
     ]
 
     def __getstate__(self):
@@ -737,11 +746,11 @@ class LinAlg(object):
         beta  = self.norm_cdf(hi, mu, std)
         return norm_pdf / (beta - alpha)
 
-    def trunc_norm_log_pdf(self, A, lo, hi, mu=0.0, std=1.0):
-        log_norm_pdf = self.norm_log_pdf(A, mu, std)
+    def trunc_norm_log_pdf(self, A, lo, hi, mu=0.0, std=1.0, *args, **kwargs):
+        norm_log_pdf = self.norm_log_pdf(A, mu, std)
         alpha = self.norm_cdf(lo, mu, std)
         beta = self.norm_cdf(hi, mu, std)
-        return log_norm_pdf - self.log(beta - alpha)
+        return norm_log_pdf - self.log(beta - alpha)
 
     def trunc_norm_cdf(self, A, lo, hi, mu=0.0, std=1.0):
         norm_cdf = self.norm_cdf(A, mu, std)
@@ -763,16 +772,16 @@ class LinAlg(object):
         diff = hi - lo
         samples = lo + u * diff
         if return_log_prob:
-            log_probs = self.ones(u.shape) / diff
+            log_probs = self.log(self.ones(u.shape) / diff)
             return samples, log_probs
         return samples
 
-    def unif_log_pdf(self, x, mu=None, lo=0.0, hi=1.0):
-        if mu is None:
-            out_shape = x.shape
+    def unif_log_pdf(self, A, lo=0.0, hi=1.0, mu=0.0, *args, **kwargs):
+        if isinstance(mu, float):
+            out_shape = A.shape
         else:
-            out_shape = tuple(np.maximum(x.shape, mu.shape))
-        return self.ones(out_shape) / (hi - lo)
+            out_shape = tuple(np.maximum(A.shape, mu.shape))
+        return self.log(self.ones(out_shape) / (hi - lo))
 
     def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='unif', return_log_prob=False):
         if not (lo.shape == hi.shape):
@@ -790,24 +799,45 @@ class LinAlg(object):
         else:
             raise ValueError
 
-    def bounded_distribution_log_prob(self, x, lo, hi, mu=0.0, std=0.1, which='unif'):
+    def triu_indices(self, n, k):
+        return self._BACKEND.triu_indices(n, k)
+
+    def bounded_distribution_log_prob(self, x, lo, hi, mu, std=0.1, which='unif', old_is_new=False, unsqueeze=True):
         if not (lo.shape == hi.shape):  # TODO should work with float lo and hi
             raise ValueError
+
+        if not x.ndim == mu.ndim:
+            raise ValueError('conjolo')
+            # this means we passed old particles and we need to unsqueeze here!
+
+        if unsqueeze:
+            mu = self.unsqueeze(mu, 1)
+            x = self.unsqueeze(x, 0)
+
         if which == 'unif':
-            return self.unif_log_pdf(x, mu, lo, hi)
+            pdf = self.unif_log_pdf
         elif which == 'gauss':
-            return self.trunc_norm_log_pdf(x, lo, hi, mu, std)
+            pdf = self.trunc_norm_log_pdf
         else:
             raise ValueError
 
-    def proposal_log_probs(self, x, lo, hi, std=0.1, which='unif'):
-
-        A = self.unsqueeze(x, 1)
-        mu = self.unsqueeze(x, 0)
-        # print(mu.shape, A.shape, (A - mu).shape, hi.shape)
-        log_probs = self.bounded_distribution_log_prob(A, lo, hi, mu, std, which)
-        dim_sum_dim = tuple([-i for i in range(1, lo.ndim+1)])
-        log_probs = self.sum(log_probs, dim=dim_sum_dim)
+        if old_is_new:
+            rows, cols = self.triu_indices(x.shape[1], k=1)
+            if unsqueeze:
+                uptri_x = x[0, cols]
+                uptri_mu = mu[rows, 0]
+            else:
+                lo = lo[rows]
+                hi = hi[rows]
+                uptri_x = x[rows, cols]
+                uptri_mu = mu[cols, rows]
+            uptri_probs = pdf(uptri_x, lo, hi, uptri_mu, std)
+            out_shape = tuple(np.maximum(x.shape, mu.shape))
+            log_probs = self.get_tensor(shape=out_shape)
+            log_probs[rows, cols] = uptri_probs
+            return log_probs + self.transax(log_probs, dim0=0, dim1=1)
+        else:
+            return pdf(x, lo, hi, mu, std)
 
     def multinomial(self, n, p):
         return self._BACKEND.multinomial(n, p)
@@ -856,31 +886,39 @@ class LinAlg(object):
             return A * (hi - lo) + lo
         return (A - lo) / (hi - lo)
 
+    def unsqueeze_like(self, A, like):
+        n_unsqueezes = like.ndim - A.ndim
+        return A[(None,) * n_unsqueezes + (...,)]
+
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
-    l = LinAlg(backend='torch')
 
-    n_dim = 2
-    dim_slicer = slice(0, n_dim) if n_dim > 1 else 0
-    n_el = 2
+    # a = torch.zeros((3,3,3))
+    # b = torch.zeros((3,3,3,5))
+    # l = LinAlg(backend='torch')
+    # l.unsqueeze_like(a, b)
 
-    lo = l.get_tensor(values=np.array([
-        [0.0, 0.5],
-        [0.0, 0.5],
-    ])[dim_slicer, :n_el])
-    hi = l.get_tensor(values=np.array([
-        [1.5, 1.0],
-        [1.5, 1.0],
-    ])[dim_slicer, :n_el])
-    mu = l.get_tensor(values=np.array([
-        [0.2, 0.55],
-        [0.2, 0.55],
-    ])[dim_slicer, :n_el])
-    shape = (3,)
-    std = l.get_tensor(values=np.array(0.1))
-    which = 'unif'
-
-    dang = l.sample_bounded_distribution(shape=shape, lo=lo, hi=hi, mu=mu, std=std, which=which)
-    log_probs = l.proposal_log_probs(dang, lo, hi, std, which)
+    # n_dim = 2
+    # dim_slicer = slice(0, n_dim) if n_dim > 1 else 0
+    # n_el = 2
+    #
+    # lo = l.get_tensor(values=np.array([
+    #     [0.0, 0.5],
+    #     [0.0, 0.5],
+    # ])[dim_slicer, :n_el])
+    # hi = l.get_tensor(values=np.array([
+    #     [1.5, 1.0],
+    #     [1.5, 1.0],
+    # ])[dim_slicer, :n_el])
+    # mu = l.get_tensor(values=np.array([
+    #     [0.2, 0.55],
+    #     [0.2, 0.55],
+    # ])[dim_slicer, :n_el])
+    # shape = (3,)
+    # std = l.get_tensor(values=np.array(0.1))
+    # which = 'unif'
+    #
+    # dang = l.sample_bounded_distribution(shape=shape, lo=lo, hi=hi, mu=mu, std=std, which=which)
+    # log_probs = l.proposal_log_probs(dang, lo, hi, std, which)
 

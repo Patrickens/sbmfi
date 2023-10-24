@@ -1,3 +1,5 @@
+import torch
+
 from sbmfi.core.simulator import _BaseSimulator, DataSetSim
 from sbmfi.inference.priors import _BasePrior, _NetFluxPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
@@ -311,93 +313,6 @@ class _BaseBayes(_BaseSimulator):
             particle_ranges = self._la.max(samples, 0) - self._la.min(samples, 0)
             return kernel_std_scale * self._la.diag(particle_ranges)
 
-    def _format_line_kernel_kwargs(self, alpha, line_variance, directions):
-        alpha_min = self._la.vecopy(alpha)
-        alpha_max = self._la.vecopy(alpha)
-        alpha_max[alpha_max < 0.0] = alpha_max.max()
-        alpha_max = self._la.min(alpha_max, -1)
-
-        alpha_min[alpha_min > 0.0] = alpha_min.min()
-        alpha_min = self._la.max(alpha_min, -1)
-
-        # construct proposals along the line-segment and compute the empirical CDF from which we select the next step
-        if not isinstance(line_variance, float):
-            line_variance = self._la.sum(((directions @ line_variance) * directions), -1)
-        return alpha_min, alpha_max, line_variance
-
-    def choose_direction(self):
-        pass
-
-    def perturb_particles(
-            self,
-            theta,
-            i,
-            batch_shape,
-            n_cdf=5,
-            chord_proposal='unif',
-            chord_std=2.0,
-            xch_proposal='gauss',
-            xch_std=0.4,
-            return_what=1,
-            old_is_new=True
-    ):
-        # TODO implement random coordinate instead of random direction
-        # given x, the next point in the chain is x+alpha*r
-        #   it also satisfies A(x+alpha*r)<=b which implies A*alpha*r<=b-Ax
-        #   so alpha<=(b-Ax)/ar for ar>0, and alpha>=(b-Ax)/ar for ar<0.
-        #   b - A @ x is always >= 0, clamping for numerical tolerances
-
-        batch_n = batch_shape[0]
-        ii = i % batch_n
-        if ii == 0:
-            # TODO: https://link.springer.com/article/10.1007/BF02591694
-            #  implement coordinate hit-and-run (might be faster??)
-            # uniform samples from unit ball in batch_shape dims
-            self._sphere_samples = self._la.sample_hypersphere(shape=(*batch_shape, self._K))
-            # batch compute distances to all planes
-            self._A_dist = self._la.tensormul_T(self._sampler._G, self._sphere_samples)
-
-        sphere_sample = self._sphere_samples[[ii]]
-        A_dist = self._A_dist[ii]
-
-        pol_dist = self._sampler._h.T - self._la.tensormul_T(self._sampler._G, theta[..., :self._K])
-        pol_dist[pol_dist < 0.0] = 0.0
-        allpha = pol_dist / A_dist
-        alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
-
-        # if not isinstance(line_variance, float):
-        #     line_variance = self._la.sum(((directions @ line_variance) * directions), -1)
-
-        chord_alphas = self._la.sample_bounded_distribution(
-            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal, std=chord_std, return_log_prob=return_what>0
-        )
-        if return_what > 0:
-            chord_alphas, log_probs = chord_alphas
-
-        perturbed_particles = theta[..., :self._K] + chord_alphas[..., None] * sphere_sample
-
-        if self._nx > 0:
-            # in case there are exchange fluxes, construct them here
-            current_xch = theta[..., -self._nx:]
-            xch_fluxes = self._la.sample_bounded_distribution(
-                shape=perturbed_particles.shape[:-1],
-                lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                mu=current_xch, which=xch_proposal, std=xch_std, return_log_prob=True,
-            )
-            if return_what > 0:
-                xch_fluxes, xch_log_probs = xch_fluxes
-                log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
-            perturbed_particles = self._la.cat([perturbed_particles, xch_fluxes], dim=-1)
-
-        if return_what == 0:
-            return perturbed_particles
-        elif return_what == 1:
-            return perturbed_particles, log_probs
-        return perturbed_particles, dict(  # this is just for debuggin stuff in compute_proposal_prob()
-            chord_alphas=chord_alphas, alpha_min=alpha_min, alpha_max=alpha_max, directions=sphere_sample,
-            log_probs=log_probs
-        )
-
     def quantile_indices(self, distances, quantiles=0.8):
         dist_cumsum = self._la.cumsum(distances, 0)
         dist_cdf = dist_cumsum / dist_cumsum[-1]
@@ -488,45 +403,132 @@ class _BaseBayes(_BaseSimulator):
                 print('returning result instead of adding to inference data, since it is not clear where theta originates')
             return result
 
+    def perturb_particles(
+            self,
+            theta,
+            i,
+            batch_shape,
+            n_cdf=5,
+            chord_proposal='unif',
+            chord_std=2.0,
+            xch_proposal='gauss',
+            xch_std=0.4,
+            return_what=1,
+    ):
+        # TODO implement random coordinate instead of random direction
+        # given x, the next point in the chain is x+alpha*r
+        #   it also satisfies A(x+alpha*r)<=b which implies A*alpha*r<=b-Ax
+        #   so alpha<=(b-Ax)/ar for ar>0, and alpha>=(b-Ax)/ar for ar<0.
+        #   b - A @ x is always >= 0, clamping for numerical tolerances
+
+        batch_n = batch_shape[0]
+        ii = i % batch_n
+        if ii == 0:
+            # TODO: https://link.springer.com/article/10.1007/BF02591694
+            #  implement coordinate hit-and-run (might be faster??)
+            # uniform samples from unit ball in batch_shape dims
+            self._sphere_samples = self._la.sample_hypersphere(shape=(*batch_shape, self._K))
+            # batch compute distances to all planes
+            self._A_dist = self._la.tensormul_T(self._sampler._G, self._sphere_samples)
+
+        sphere_sample = self._sphere_samples[[ii]]
+        A_dist = self._A_dist[ii]
+
+        pol_dist = self._sampler._h.T - self._la.tensormul_T(self._sampler._G, theta[..., :self._K])
+        pol_dist[pol_dist < 0.0] = 0.0
+        allpha = pol_dist / A_dist
+        alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
+
+        # if not isinstance(line_variance, float):
+        #     line_variance = self._la.sum(((directions @ line_variance) * directions), -1)
+
+        chord_alphas = self._la.sample_bounded_distribution(
+            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal,
+            std=chord_std, return_log_prob=return_what>0
+        )
+        if return_what > 0:
+            chord_alphas, log_probs = chord_alphas
+        print(1233, log_probs)
+        perturbed_particles = theta[..., :self._K] + chord_alphas[..., None] * sphere_sample
+
+        if self._nx > 0:
+            # in case there are exchange fluxes, construct them here
+            current_xch = theta[..., -self._nx:]
+            xch_fluxes = self._la.sample_bounded_distribution(
+                shape=perturbed_particles.shape[:-1],
+                lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
+                mu=current_xch, which=xch_proposal, std=xch_std, return_log_prob=return_what>0,
+            )
+            if return_what > 0:
+                xch_fluxes, xch_log_probs = xch_fluxes
+                log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
+            perturbed_particles = self._la.cat([perturbed_particles, xch_fluxes], dim=-1)
+
+        print(123, log_probs)
+
+        # print(123, sphere_sample)
+        # print(123, chord_alphas)
+        if return_what == 0:
+            return perturbed_particles
+        elif return_what == 1:
+            return perturbed_particles, log_probs
+        return perturbed_particles, dict(  # this is just for debuggin stuff in compute_proposal_prob()
+            chord_alphas=chord_alphas, alpha_min=alpha_min, alpha_max=alpha_max, directions=sphere_sample,
+            log_probs=log_probs
+        )
+
     def compute_proposal_prob(
             self,
             old_particles,
             new_particles,
-            chord=None,
             chord_proposal='unif',
             chord_std=1.0,
             xch_proposal='unif',
             xch_std=0.4,
-            new_along_chord=True,
+            old_is_new=True,
     ):
         old_pol = old_particles[..., :self._K]
         new_pol = new_particles[..., :self._K]
+        old_pol = self._la.unsqueeze_like(old_pol, new_pol)
 
-        # n_unsqueezes = len(new_pol.shape) - len(old_pol.shape)
-        # old_pol = old_pol[(None,) * n_unsqueezes + (...,)]
+        diff = self._la.unsqueeze(old_pol, 1) - self._la.unsqueeze(new_pol, 0)
+        directions = diff
+        if old_is_new:
+            # along a chord, directions are the same, per chain we only need 1 direction computation
+            # directions = diff[:1, [1]]
+            directions = diff[0, 1]
+            # dirr = diff[[0], [1]]
 
-        diff = old_pol - new_pol
-
-        dirr = diff
-        if new_along_chord:
-            dirr = diff[[0]]
-
-        directions = dirr / self._la.norm(dirr, 2, -1, True)
+        directions = directions / self._la.norm(directions, 2, -1, True)
 
         A_dist = self._la.tensormul_T(self._sampler._G, directions)  # this one has wrong sign on first row
         particle_pol_dist = self._sampler._h.T - model._la.tensormul_T(self._sampler._G, old_pol)
 
         allpha = particle_pol_dist / A_dist
         alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
-        alpha = diff[..., -1] / directions[..., -1]
-        log_probs = self._la.bounded_distribution_log_prob(x=alpha, lo=alpha_min, hi=alpha_max, mu=0.0, std=chord_std, which=chord_proposal)
+        alpha = diff[..., 0] / directions[..., 0]  # alpha is the same for all dimensions, so we only need to select 1
+
+        mu = self._la.zeros(alpha.shape)
+        log_probs = self._la.bounded_distribution_log_prob(
+            x=alpha, lo=alpha_min, hi=alpha_max, mu=mu, std=chord_std, which=chord_proposal, old_is_new=old_is_new,
+            unsqueeze=False
+        )
+        print(self._la.nansum(log_probs, 0))
         if self._nx > 0:
+            old_xch = old_particles[..., -self._nx:]
+            new_xch = new_particles[..., -self._nx:]
+            old_xch = self._la.unsqueeze_like(old_xch, new_xch)
+
             xch_log_probs = self._la.bounded_distribution_log_prob(
-                x=new_particles[..., -self._nx:],
+                x=new_xch, mu=old_xch,
                 lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                mu=old_particles[..., -self._nx:], std=xch_std, which=xch_proposal
+                std=xch_std, which=xch_proposal, old_is_new=old_is_new
             )
             log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
+        # print(log_probs)
+        log_probs = self._la.nansum(log_probs, 0)  # this is the correct one I think!
+        print(log_probs)
+        print()
 
 
 class MCMC(_BaseBayes):
@@ -649,7 +651,6 @@ class MCMC(_BaseBayes):
             xch_proposal=xch_proposal,
             xch_std=xch_std,
             return_what=1,
-            old_is_new=True,
         )
         # for i in tqdm.trange(n_tot, ncols=100):
         pbar = tqdm.tqdm(total=n_tot, ncols=100)
@@ -667,15 +668,34 @@ class MCMC(_BaseBayes):
 
             chord_post_prob[1:] = post_prob
 
+            # self.compute_proposal_prob(  # TODO this is for debugging, currently yields the same log_probs as computed in perturb_particles!
+            #     old_particles=chord_ys[0],
+            #     new_particles=chord_ys[1:],
+            #     chord_proposal=chord_proposal,
+            #     chord_std=chord_std,
+            #     xch_proposal=xch_proposal,
+            #     xch_std=xch_std,
+            #     old_is_new=False,
+            # )
+            # print(88888)
             self.compute_proposal_prob(
-                old_particles=y,
-                new_particles=chord_ys[1:],
-                chord=chord,
+                old_particles=chord_ys,
+                new_particles=chord_ys,
                 chord_proposal=chord_proposal,
                 chord_std=chord_std,
                 xch_proposal=xch_proposal,
                 xch_std=xch_std,
-                new_along_chord=True,
+                old_is_new=True,
+            )
+            print(99999)
+            self.compute_proposal_prob(
+                old_particles=chord_ys,
+                new_particles=chord_ys,
+                chord_proposal=chord_proposal,
+                chord_std=chord_std,
+                xch_proposal=xch_proposal,
+                xch_std=xch_std,
+                old_is_new=False,
             )
 
             # self.compute_proposal_prob(
@@ -1322,12 +1342,23 @@ if __name__ == "__main__":
     mcmc = MCMC(model, sdf, bb._obmods, prior=up, boundary_observation_model=bb._bom)
     mcmc.set_measurement(x_meas=kwargs['measurements'])
     mcmc.set_true_theta(theta=kwargs['theta'])
+
     res = mcmc.run(
         n=2,
         n_burn=0,
         thinning_factor=1,
-        n_chains=3,
-        n_cdf=2,
+        n_chains=2,
+        n_cdf=3,
+        chord_proposal='gauss'
+    )
+
+    res = mcmc.run(
+        n=2,
+        n_burn=0,
+        thinning_factor=1,
+        n_chains=2,
+        n_cdf=1,
+        chord_proposal='gauss'
     )
 
 
