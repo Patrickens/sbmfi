@@ -338,8 +338,8 @@ class _BaseBayes(_BaseSimulator):
             chord_std=2.0,
             xch_proposal='gauss',
             xch_std=0.4,
-            return_chords=True,
-            logit_xch=False,  # for most tasks where this is needed, we enter this function via the hyper-rectangle, so no logit is necessary
+            return_what=1,
+            old_is_new=True
     ):
         # TODO implement random coordinate instead of random direction
         # given x, the next point in the chain is x+alpha*r
@@ -369,29 +369,34 @@ class _BaseBayes(_BaseSimulator):
         #     line_variance = self._la.sum(((directions @ line_variance) * directions), -1)
 
         chord_alphas = self._la.sample_bounded_distribution(
-            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal, std=chord_std,
+            shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal, std=chord_std, return_log_prob=return_what>0
         )
+        if return_what > 0:
+            chord_alphas, log_probs = chord_alphas
 
         perturbed_particles = theta[..., :self._K] + chord_alphas[..., None] * sphere_sample
 
         if self._nx > 0:
             # in case there are exchange fluxes, construct them here
             current_xch = theta[..., -self._nx:]
-            if self._fcm.logit_xch_fluxes and logit_xch:
-                current_xch = self._fcm._expit_xch(current_xch)
             xch_fluxes = self._la.sample_bounded_distribution(
-                shape=perturbed_particles.shape[:-1], lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                mu=current_xch, which=xch_proposal, std=xch_std,
+                shape=perturbed_particles.shape[:-1],
+                lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
+                mu=current_xch, which=xch_proposal, std=xch_std, return_log_prob=True,
             )
-            if self._fcm.logit_xch_fluxes and logit_xch:
-                xch_fluxes = self._fcm._logit_xch(xch_fluxes)
+            if return_what > 0:
+                xch_fluxes, xch_log_probs = xch_fluxes
+                log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
             perturbed_particles = self._la.cat([perturbed_particles, xch_fluxes], dim=-1)
 
-        if return_chords:
-            return perturbed_particles, dict(
-                chord_alphas=chord_alphas, alpha_min=alpha_min, alpha_max=alpha_max, directions=sphere_sample
-            )
-        return perturbed_particles
+        if return_what == 0:
+            return perturbed_particles
+        elif return_what == 1:
+            return perturbed_particles, log_probs
+        return perturbed_particles, dict(  # this is just for debuggin stuff in compute_proposal_prob()
+            chord_alphas=chord_alphas, alpha_min=alpha_min, alpha_max=alpha_max, directions=sphere_sample,
+            log_probs=log_probs
+        )
 
     def quantile_indices(self, distances, quantiles=0.8):
         dist_cumsum = self._la.cumsum(distances, 0)
@@ -487,7 +492,6 @@ class _BaseBayes(_BaseSimulator):
             self,
             old_particles,
             new_particles,
-            chord_alphas=None,
             chord=None,
             chord_proposal='unif',
             chord_std=1.0,
@@ -498,6 +502,9 @@ class _BaseBayes(_BaseSimulator):
         old_pol = old_particles[..., :self._K]
         new_pol = new_particles[..., :self._K]
 
+        # n_unsqueezes = len(new_pol.shape) - len(old_pol.shape)
+        # old_pol = old_pol[(None,) * n_unsqueezes + (...,)]
+
         diff = old_pol - new_pol
 
         dirr = diff
@@ -506,29 +513,20 @@ class _BaseBayes(_BaseSimulator):
 
         directions = dirr / self._la.norm(dirr, 2, -1, True)
 
-        A_dist = self._la.tensormul_T(self._sampler._G, directions)
-
-        particle_pol_dist = self._la.transax(
-            self._sampler._h - self._sampler._G @ self._la.transax(old_pol)
-        )
+        A_dist = self._la.tensormul_T(self._sampler._G, directions)  # this one has wrong sign on first row
+        particle_pol_dist = self._sampler._h.T - model._la.tensormul_T(self._sampler._G, old_pol)
 
         allpha = particle_pol_dist / A_dist
         alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
-        alpha = diff[..., 0] / directions[..., 0]
+        alpha = diff[..., -1] / directions[..., -1]
         log_probs = self._la.bounded_distribution_log_prob(x=alpha, lo=alpha_min, hi=alpha_max, mu=0.0, std=chord_std, which=chord_proposal)
-
         if self._nx > 0:
-            x_probs = self._la.bounded_distribution_log_prob(x=old_particles[..., :self._K])
-
-        print(directions.shape, diff.shape, alpha.shape, alpha_min.shape, log_probs.shape)
-        print(chord['directions'].shape)
-        #
-        # alpha = diff[..., 0] / directions[..., 0]  # alpha is scalar and is thus the same along all polytope dimensions
-        #
-        # print(old_particles[..., :self._K])
-        # print(self._la.norm(diff, 2, -1, True).shape, old_pol.shape, diff.shape, old_particles.shape)
-        # directions = diff / self._la.norm(diff, 2, -1, True)
-        # print(directions)
+            xch_log_probs = self._la.bounded_distribution_log_prob(
+                x=new_particles[..., -self._nx:],
+                lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
+                mu=old_particles[..., -self._nx:], std=xch_std, which=xch_proposal
+            )
+            log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
 
 
 class MCMC(_BaseBayes):
@@ -627,9 +625,7 @@ class MCMC(_BaseBayes):
             raise NotImplementedError('this is complicated, since we need to weight samples by the prior somehow')
 
         chord_ys = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self._fcm.theta_id)))
-        chord_alphas = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
         chord_post_prob = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
-        chord_prop_prob = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
         post_prob = self.potential(y)
 
         if return_data:
@@ -652,14 +648,14 @@ class MCMC(_BaseBayes):
             chord_std=chord_std,
             xch_proposal=xch_proposal,
             xch_std=xch_std,
-            return_chords=True,
+            return_what=1,
+            old_is_new=True,
         )
         # for i in tqdm.trange(n_tot, ncols=100):
         pbar = tqdm.tqdm(total=n_tot, ncols=100)
         i = 0
         while i < n_tot:
-            chord_ys[1:], chord = self.perturb_particles(y, i, **perturb_kwargs)
-            chord_alphas[1:] = chord['chord_alphas']
+            chord_ys[1:], prop_prob = self.perturb_particles(y, i, **perturb_kwargs)
             post_prob = self.potential(chord_ys[1:])
 
             if self.potentype == 'approx':
@@ -681,6 +677,17 @@ class MCMC(_BaseBayes):
                 xch_std=xch_std,
                 new_along_chord=True,
             )
+
+            # self.compute_proposal_prob(
+            #     old_particles=y,
+            #     new_particles=chord_ys[1:],
+            #     chord=chord,
+            #     chord_proposal=chord_proposal,
+            #     chord_std=chord_std,
+            #     xch_proposal=xch_proposal,
+            #     xch_std=xch_std,
+            #     new_along_chord=True,
+            # )
             return
 
 
@@ -1304,7 +1311,11 @@ if __name__ == "__main__":
     from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope, fast_FVA
     import pickle
 
-    model, kwargs = spiro(backend='torch', v2_reversible=True, ratios=False, build_simulator=True, which_measurements='com', which_labellings=['A'])
+    model, kwargs = spiro(
+        seed=4,
+        backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+        which_measurements='com', which_labellings=['A'], v5_reversible=True
+    )
     sdf = kwargs['substrate_df']
     bb = kwargs['basebayes']
     up = UniformNetPrior(model._fcm)

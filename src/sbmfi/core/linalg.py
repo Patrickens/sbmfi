@@ -749,32 +749,44 @@ class LinAlg(object):
         beta  = self.norm_cdf(hi, mu, std)
         return (norm_cdf - alpha) / (beta - alpha)
 
-    def trunc_norm_inv_cdf(self, u, lo, hi, mu=0.0, std=1.0):
+    def trunc_norm_inv_cdf(self, u, lo, hi, mu=0.0, std=1.0, return_log_prob=False):
         alpha = self.norm_cdf(lo, mu, std)
         beta  = self.norm_cdf(hi, mu, std)
         uu = alpha + u * (beta - alpha)
-        return self.norm_inv_cdf(uu, mu, std)
+        samples = self.norm_inv_cdf(uu, mu, std)
+        if return_log_prob:
+            log_prob = self.norm_log_pdf(samples, mu, std) - self.log(beta - alpha) # TODO perhaps there are still double computations somewhere?
+            return samples, log_prob
+        return samples
 
-    def unif_inv_cdf(self, u, lo=0.0, hi=1.0):
-        return lo + u * (hi - lo)
+    def unif_inv_cdf(self, u, lo=0.0, hi=1.0, return_log_prob=False):
+        diff = hi - lo
+        samples = lo + u * diff
+        if return_log_prob:
+            log_probs = self.ones(u.shape) / diff
+            return samples, log_probs
+        return samples
 
-    def unif_log_pdf(self, x, mu, lo=0.0, hi=1.0):
-        out_shape = tuple(np.maximum(x.shape, mu.shape))
+    def unif_log_pdf(self, x, mu=None, lo=0.0, hi=1.0):
+        if mu is None:
+            out_shape = x.shape
+        else:
+            out_shape = tuple(np.maximum(x.shape, mu.shape))
         return self.ones(out_shape) / (hi - lo)
 
-    def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='unif'):
+    def sample_bounded_distribution(self, shape: tuple, lo, hi, mu=0.0, std=0.1, which='unif', return_log_prob=False):
         if not (lo.shape == hi.shape):
             raise ValueError(f'lo.shape: {lo.shape}, hi.shape: {hi.shape}')
         u = self.randu(shape=(*shape, *lo.shape))
         if which == 'unif':
-            return self.unif_inv_cdf(u, lo, hi)
+            return self.unif_inv_cdf(u, lo, hi, return_log_prob)
         elif which == 'gauss':
             # truncated multivariate normal sampling
             # https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
             # publication: Efficient Sampling Methods for Truncated Multivariate
             #   Normal and Student-t Distributions Subject to Linear
             #   Inequality Constraints
-            return self.trunc_norm_inv_cdf(u, lo, hi, mu, std)
+            return self.trunc_norm_inv_cdf(u, lo, hi, mu, std, return_log_prob)
         else:
             raise ValueError
 

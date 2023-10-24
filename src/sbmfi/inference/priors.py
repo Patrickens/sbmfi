@@ -430,7 +430,7 @@ class _XchFluxPrior(Distribution):
             return constraints.interval(self._rho_bounds[:, 0], self._rho_bounds[:, 1])
 
 
-class UniXchFluxPrior(_XchFluxPrior):
+class UniXchFluxPrior(_XchFluxPrior):  # TODO rename
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
