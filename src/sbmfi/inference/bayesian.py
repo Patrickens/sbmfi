@@ -149,13 +149,6 @@ class _BaseBayes(_BaseSimulator):
             ll = obmod.log_lik(x_meas_o, mu_o_i)
             log_lik[..., i] = ll
 
-        nob = len(self._obmods) + n_bom
-        # pll = pd.DataFrame(log_lik.transpose(1,2).view((n_f * nob, n_meas)).numpy(), columns=self.data_id)
-        # print(self.measurements)
-        # print(pd.DataFrame(mu_o[:, 0, :], columns=self.data_id))
-        # print(pll)
-        # print(pd.DataFrame(log_lik[:, 0, :].numpy(), columns=list(self._obmods.keys()) + ['BOM']))
-
         if sum:
             log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
 
@@ -192,7 +185,6 @@ class _BaseBayes(_BaseSimulator):
         log_lik = self.log_lik(theta, return_data, False)
         if return_data:
             log_lik, mu_o = log_lik
-        # print(pd.DataFrame(log_lik[:, 0, :].numpy(), columns=list(self._obmods.keys()) + ['BOM']))
 
         log_prob[..., :-1] = log_lik
         log_prob = self._la.view(self._la.sum(log_prob, axis=(1, 2), keepdims=False), shape=vape[:-1])
@@ -312,14 +304,9 @@ class _BaseBayes(_BaseSimulator):
             # Make sure variance is nonsingular.
             # I'd rather have this crash out if the singular, means that the parameters are not independent
             #    or constrained to a single value
-            diagonal = self._la.diag(population_cov)
-            print(diagonal )
-            diagonal += 0.01
-            print(self._la.diag(population_cov) )
-            try:
-                self._la.cholesky(kernel_std_scale * population_cov)
-            except:
-                print(population_cov)
+            # diagonal = self._la.diag(population_cov)
+            # diagonal += 0.01
+            self._la.cholesky(kernel_std_scale * population_cov)
             return kernel_std_scale * population_cov
         else:
             # Toni et al. and Sisson et al. it comes from the parameter ranges.
@@ -396,9 +383,6 @@ class _BaseBayes(_BaseSimulator):
             shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal,
             std=chord_std, return_log_prob=return_what>0
         )
-        # print(chord_alphas)
-        # print(alpha_min)
-        # print(alpha_max)
         if return_what > 0:
             chord_alphas, log_probs = chord_alphas
         perturbed_particles = theta[..., :self._K] + chord_alphas[..., None] * sphere_sample
@@ -461,7 +445,7 @@ class _BaseBayes(_BaseSimulator):
 
         log_probs = self._la.bounded_distribution_log_prob(
             x=alpha, lo=alpha_min, hi=alpha_max, mu=mu, std=chord_std, which=chord_proposal, old_is_new=old_is_new,
-            unsqueeze=False
+            unsqueeze=False,
         )
         if self._nx > 0:
             old_xch = old_particles[..., -self._nx:]
@@ -474,7 +458,7 @@ class _BaseBayes(_BaseSimulator):
                 std=xch_std, which=xch_proposal, old_is_new=old_is_new
             )
             log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
-        log_probs = self._la.nansum(log_probs, 0, keepdims=False)  # this is the correct one I think!
+
         return log_probs
 
     def map_chains_2_theta(self, chains):
@@ -491,14 +475,19 @@ class _BaseBayes(_BaseSimulator):
 
 
 class MCMC(_BaseBayes):
-
-    def accept_reject(self, post_probs, prop_probs, pre_sample_batch, i, peskunize=True):
+    SYMMETRIC_PROPOSALS = ['gauss', 'unif']
+    def accept_reject(self, i, post_probs, prop_probs=None, pre_sample_batch=5000, peskunize=True):
         # based on: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf
         # other notation: https://ntnuopen.ntnu.no/ntnu-xmlui/bitstream/handle/11250/258340/348197_FULLTEXT01.pdf?sequence=2&isAllowed=y
-        if post_probs.shape != prop_probs.shape:
-            raise ValueError
-        n_cdf_1, n_chains = post_probs.shape
-        k = post_probs + prop_probs
+
+        if prop_probs is not None:
+            prop_probs = prop_probs.sum(1)  # sum transition probs over all proposals
+            if post_probs.shape != prop_probs.shape:
+                raise ValueError(f'post shape: {post_probs.shape}, proposal shape: {prop_probs.shape}')
+            n_cdf_1, n_chains = post_probs.shape
+            k = post_probs + prop_probs
+        else:
+            k = post_probs
 
         if (n_cdf_1 == 2) and peskunize:
             # this is the single proposal Metropolis-Hastings acceptance ratio!
@@ -596,6 +585,7 @@ class MCMC(_BaseBayes):
 
         chord_ys = self._la.get_tensor(shape=(1 + n_cdf, n_chains, n_rounded))
         chord_post_probs = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
+        chord_prop_probs = self._la.get_tensor(shape=(1 + n_cdf, 1 + n_cdf, n_chains))
         pert_post_probs = self.potential(y)
 
         if return_data:
@@ -611,7 +601,8 @@ class MCMC(_BaseBayes):
 
         n_tot = n_burn + n * thinning_factor
         pre_sample_batch = min(pre_sample_batch, n_tot)
-        return_what = (n_cdf > 1) or (chord_proposal not in ['unif', 'gauss'])  # only holds for symmetrical proposals and n_cdf==1
+        return_what = (n_cdf == 1) and (chord_proposal in self.SYMMETRIC_PROPOSALS)  # only useful for symmetrical proposals and n_cdf==1
+        # TODO I think for n_cdf and symmetrical proposals, we dont need to compute anything
         perturb_kwargs = dict(
             batch_shape=(pre_sample_batch, n_chains),
             n_cdf=n_cdf,
@@ -619,16 +610,18 @@ class MCMC(_BaseBayes):
             chord_std=chord_std,
             xch_proposal=xch_proposal,
             xch_std=xch_std,
-            return_what=0 if return_what else 1,
+            return_what=return_what,
         )
         pbar = tqdm.tqdm(total=n_tot, ncols=100)
         i = 0
         try:
             while i < n_tot:
                 pert_ys = self.perturb_particles(y, i, **perturb_kwargs)
-                if not return_what:
-                    pert_ys, chord_prop_probs = pert_ys
-                    chord_prop_probs = self._la.tile(chord_prop_probs, (2, 1))  # this only holds for symmetric proposals and n_cdf = 1!
+                if return_what:
+                    pert_ys, pert_prop_probs = pert_ys
+                    # two lines below only hold for symmetric proposals, otherwise we need to compute exactly
+                    chord_prop_probs[0, 1] = pert_prop_probs
+                    chord_prop_probs[1, 0] = pert_prop_probs
 
                 chord_ys[1:] = pert_ys
                 pert_post_probs = self.potential(pert_ys)
@@ -642,7 +635,7 @@ class MCMC(_BaseBayes):
 
                 chord_post_probs[1:] = pert_post_probs
 
-                if return_what:
+                if not return_what:
                     chord_prop_probs = self.compute_proposal_prob(
                         old_particles=chord_ys,
                         new_particles=chord_ys,
@@ -652,8 +645,7 @@ class MCMC(_BaseBayes):
                         xch_std=xch_std,
                         old_is_new=True,
                     )
-
-                accept_idx = self.accept_reject(chord_post_probs, chord_prop_probs, pre_sample_batch, i, peskunize)
+                accept_idx = self.accept_reject(i, chord_post_probs, chord_prop_probs, pre_sample_batch, peskunize)
                 accepted_probs = chord_post_probs[accept_idx, chain_selector]
                 chord_post_probs[0] = accepted_probs  # set the log-probs of the current sample
                 y = chord_ys[accept_idx, chain_selector]
@@ -678,7 +670,6 @@ class MCMC(_BaseBayes):
                     if return_data:
                         sim_data[k] = data
                 i += 1
-
         except Exception as e:
             if e is not KeyboardInterrupt:
                 print(e)
@@ -774,15 +765,14 @@ class SMC(_BaseBayes):
             xch_proposal,
             xch_std,
             evaluate_prior=True,
-            pbatch=1000,
+            population_batch=1000,
     ):
-        pbatch = min(old_particles.shape[0], pbatch)
-        log_probs = self._la.get_tensor(shape=(*new_particles.shape[:-1], *old_particles.shape[:-1]))
+        population_batch = min(old_particles.shape[0], population_batch)
+        prop_probs = self._la.get_tensor(shape=(*new_particles.shape[:-1], *old_particles.shape[:-1]))
 
-        for i in range(0, old_particles.shape[0], pbatch):
-
-            self.compute_proposal_prob(
-                old_particles[i: i + pbatch],
+        for i in range(0, old_particles.shape[0], population_batch):
+            aa = self.compute_proposal_prob(
+                old_particles[i: i + population_batch],
                 new_particles,
                 chord_proposal,
                 chord_std,
@@ -790,9 +780,12 @@ class SMC(_BaseBayes):
                 xch_std,
                 old_is_new=False
             )
+            print(old_particles[i: i + population_batch].shape, new_particles.shape)
+            print(aa.shape, prop_probs.shape, old_log_weights.shape)
 
-        log_weighted_sum = self._la.logsumexp(log_probs + old_log_weights, -1)  # computes importance weights
-
+        log_weighted_sum = self._la.logsumexp(prop_probs + old_log_weights, -1)  # computes importance weights
+        aaa = self._prior.log_prob(new_particles)
+        print(aaa.shape)
         if evaluate_prior:
             prior_log_probs = self._prior.log_prob(new_particles)
         else:
@@ -881,7 +874,7 @@ class SMC(_BaseBayes):
                         chord_std=chord_cov,
                         xch_proposal=xch_proposal,
                         xch_std=xch_std,
-                        pbatch=population_batch,
+                        population_batch=population_batch,
                     )
                 )
                 if return_data:
@@ -1184,210 +1177,36 @@ if __name__ == "__main__":
     from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope, fast_FVA
     import pickle
 
-    # model, kwargs = spiro(
-    #     seed=None,
-    #     batch_size=100,
-    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
-    #     which_measurements='lcms', which_labellings=['A', 'B'], v5_reversible=True
-    # )
-    # sdf = kwargs['substrate_df']
-    # bb = kwargs['basebayes']
-    # up = UniformNetPrior(model._fcm)
-    # smc = SMC(model, sdf, bb._obmods, prior=up, boundary_observation_model=bb._bom, num_processes=0)
-    # smc.set_measurement(x_meas=kwargs['measurements'])
-    # smc.set_true_theta(theta=kwargs['theta'])
-
-    model2, kwargs2 = spiro(
-        seed=9, batch_size=2,
+    model, kwargs = spiro(
+        seed=None,
+        batch_size=50,
         backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
-        which_measurements='com', which_labellings=['C', 'D'], v5_reversible=True, include_bom=True
+        which_measurements='lcms', which_labellings=['A', 'B'], v5_reversible=True
     )
-    up = UniformNetPrior(model2._fcm)
-    bb2 = kwargs2['basebayes']
-    sdf = kwargs2['substrate_df']
-    mcmc = MCMC(model2, sdf, bb2._obmods, prior=up, boundary_observation_model=bb2._bom)
-    mcmc.set_measurement(x_meas=kwargs2['measurements'])
-    mcmc.set_true_theta(theta=kwargs2['theta'])
-    res = mcmc.run(
-        n=5000, n_burn=500, thinning_factor=3, n_cdf=3, n_chains=3, chord_std=0.2, peskunize=False,
-        chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
-    )
-    az.to_netcdf(res, 'spiro_TEST.nc')
-    # chains = 3
-    # res = smc.run(
-    #     n=5000,
-    #     n_smc_steps=2,
-    #     return_all_populations=True
+    sdf = kwargs['substrate_df']
+    bb = kwargs['basebayes']
+    up = UniformNetPrior(model._fcm)
+    smc = SMC(model, sdf, bb._obmods, prior=up, boundary_observation_model=bb._bom, num_processes=0)
+    smc.set_measurement(x_meas=kwargs['measurements'])
+    smc.set_true_theta(theta=kwargs['theta'])
+
+    smc.run()
+
+    # model2, kwargs2 = spiro(
+    #     seed=9, batch_size=2,
+    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+    #     which_measurements='com', which_labellings=['C', 'D'], v5_reversible=True, include_bom=True
     # )
-    # az.to_netcdf(res, 'spiro_test_smc.nc')
-
-
-    # model, kwargs = build_e_coli_anton_glc(backend='torch', which_measurements=None)
-    # projected_fluxes = kwargs['measured_boundary_fluxes']
-    # model.reactions.get_by_id('EX_glc__D_e').bounds = (-12.0, 0.0)
-
-    # fcm = FluxCoordinateMapper(model, kernel_basis='svd', basis_coordinates='rounded', free_reaction_id=projected_fluxes)
-
-    # up = ProjectionPrior(fcm, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=0)
-    # projection_pol = up._projection_pol
-    # pickle.dump(projection_pol, open('anton_glc_projection_pol.p', 'wb'))
-
-    # projection_pol = pickle.load(open('anton_glc_projection_pol.p', 'rb'))
-    # up = ProjectionPrior(model, projection_pol=projection_pol, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=3)
-    # up._fill_caches(n=5000, enumerate_vertices=True)
-    # pickle.dump(up, open('anton_glc_projection_prior_w_volumes.p', 'wb'))
-    # up = pickle.load(open('anton_glc_projection_prior_w_volumes.p', 'rb'))
-
-    # model, kwargs = build_e_coli_anton_glc(
-    #     backend='torch',
-    #     auto_diff=False,
-    #     build_simulator=True,
-    #     ratios=False,
-    #     batch_size=25,
-    #     which_measurements='tomek',
-    #     which_labellings=['20% [U]Glc', '[1]Glc'],
-    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    #     seed=1,
+    # up = UniformNetPrior(model2._fcm)
+    # bb2 = kwargs2['basebayes']
+    # sdf = kwargs2['substrate_df']
+    # mcmc = MCMC(model2, sdf, bb2._obmods, prior=up, boundary_observation_model=bb2._bom)
+    # mcmc.set_measurement(x_meas=kwargs2['measurements'])
+    # mcmc.set_true_theta(theta=kwargs2['theta'])
+    # res = mcmc.run(
+    #     n=5000, n_burn=500, thinning_factor=3, n_cdf=1, n_chains=3, chord_std=0.2, peskunize=False,
+    #     chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
     # )
-    #
-    # sdf = kwargs['substrate_df']
-    # dss = kwargs['basebayes']
-    # simm = dss._obmods
-    # bom = dss._bom
-    # up = UniFluxPrior(model, cache_size=2000)
-    #
-    # smc = SMC(
-    #     model=model,
-    #     substrate_df=sdf,
-    #     mdv_observation_models=simm,
-    #     boundary_observation_model=bom,
-    #     prior=up,
-    #     num_processes=0,
-    # )
-    # smc.set_measurement(x_meas=kwargs['measurements'])
-    # smc.set_true_theta(theta=kwargs['theta'])
-
-    # a = False
-    # if a:
-    #     which = 'lcms'
-    #     # which = 'tomek'
-    #     ding = SMC
-    #     run_kwargs = dict(
-    #         n_smc_steps=3,
-    #         n=50,
-    #         n_obs=5,
-    #         population_batch=7,
-    #         n0_multiplier=2,
-    #         distance_based_decay=True,
-    #         epsilon_decay=0.8,
-    #         kernel_variance_scale=1.0,
-    #         evaluate_prior=False,
-    #         potentype='approx',
-    #         return_data=True,
-    #         potential_kwargs={},
-    #         metric='rmse',
-    #         line_kernel='gauss',
-    #         xch_kernel='gauss',
-    #         xch_std=0.4,
-    #         return_all_populations=False,
-    #     )
-    # else:
-    #     which = 'com'
-    #     # which = 'anton'
-    #     ding = MCMC
-    #     run_kwargs = dict(
-    #         n= 20,
-    #         n_burn = 10,
-    #         thinning_factor = 2,
-    #         n_chains = 1,
-    #         potentype = 'exact',  # TODO: this should either accpet a normalizing flow or even a distance for MCMC-ABC
-    #         n_cdf = 2,
-    #         # algorithm = 'mh',  # TODO: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf different acceptance step from eCDF!!
-    #         chord_proposal = 'gauss',
-    #         chord_std = 1.0,
-    #         xch_proposal = 'gauss',
-    #         xch_std = 0.4,
-    #         return_data = True,
-    #         evaluate_prior = False,
-    #         potential_kwargs = {},
-    #         return_az = True,
-    #     )
-    #
-    #
-    # model, kwargs = spiro(
-    #     backend='numpy',
-    #     batch_size=3, which_measurements=which, build_simulator=True, which_labellings=list('CD'),
-    #     v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=2, L_12_omega=1.0,
-    #     v5_reversible=True
-    # )
-    # # model, kwargs = build_e_coli_anton_glc(
-    # #     backend='torch',
-    # #     auto_diff=False,
-    # #     build_simulator=True,
-    # #     ratios=False,
-    # #     batch_size=10,
-    # #     which_measurements=which,
-    # #     which_labellings=['20% [U]Glc', '[1]Glc'],
-    # #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    # #     seed=1,
-    # # )
-    # sdf = kwargs['substrate_df']
-    # dss = kwargs['basebayes']
-    # simm = dss._obmods
-    # bom = dss._bom
-    # up = UniFluxPrior(model, cache_size=2000)
-    # # from botorch.utils.sampling import sample_polytope
-    #
-    # mcmc = ding(
-    #     model=model,
-    #     substrate_df=sdf,
-    #     mdv_observation_models=simm,
-    #     boundary_observation_model=bom,
-    #     prior=up,
-    # )
-    # mcmc.set_measurement(x_meas=kwargs['measurements'])
-    # mcmc.set_true_theta(theta=kwargs['theta'])
-    #
-    # post = mcmc.run(**run_kwargs)
-    # # az.to_netcdf(post, 'MCMC_e_coli_glc_anton_obsmod.nc')
-    # # print(prof2.print_stats())
-    #
-    # # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod.nc")
-    # # mcmc_data = az.from_netcdf(r"C:\python_projects\sbmfi\src\sbmfi\inference\MCMC_e_coli_glc_anton_obsmod.nc")
-    #
-    # # if 'prior' in mcmc_data:
-    # #     del mcmc_data.prior
-    # # if 'prior_predictive' in mcmc_data:
-    # #     del mcmc_data.prior_predictive
-    #
-    # # make_model = True
-    # # if make_model:
-    # #     model, kwargs = build_e_coli_anton_glc(
-    # #         backend='torch',
-    # #         auto_diff=False,
-    # #         build_simulator=True,
-    # #         ratios=False,
-    # #         batch_size=25,
-    # #         which_measurements='anton',
-    # #         which_labellings=['20% [U]Glc', '[1]Glc'],
-    # #         measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    # #         seed=1,
-    # #     )
-    # #     sdf = kwargs['substrate_df']
-    # #     dss = kwargs['basebayes']
-    # #     simm = dss._obmods
-    # #     bom = dss._bom
-    # #     up = UniFluxPrior(model, cache_size=2000)
-    # #
-    # #     mcmc = MCMC(
-    # #         model=model,
-    # #         substrate_df=sdf,
-    # #         mdv_observation_models=simm,
-    # #         boundary_observation_model=bom,
-    # #         prior=up,
-    # #     )
-    # #     mcmc.set_measurement(x_meas=kwargs['measurements'])
-    # #     mcmc.set_true_theta(theta=kwargs['theta'])
-    # #     mcmc.simulate_data(mcmc_data, n=60000)
+    # az.to_netcdf(res, 'spiro_TEST.nc')
 
 
