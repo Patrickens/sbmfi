@@ -19,7 +19,7 @@ def spiro(
         ratios=True, build_simulator=False, add_cofactors=True, which_measurements=None, seed=2,
         which_labellings=None, include_bom=True, v5_reversible=False, n_obs=0,
         kernel_basis='svd', basis_coordinates='rounded', logit_xch_fluxes=False,
-        L_12_omega = 20.0, clip_min=750.0,
+        L_12_omega = 1.0, clip_min=750.0,
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -145,33 +145,33 @@ def spiro(
         }
 
     annotation_df = pd.DataFrame([
-        ('H', 1, 'M-H', 3.0, 0.01, None, 3e3),
-        ('H', 0, 'M-H', 2.0, 0.01, None, 3e3),
+        ('H', 1, 'M-H', 3.0, 0.1, None, 3e3),
+        ('H', 0, 'M-H', 2.0, 0.1, None, 3e3),
 
-        ('H', 1, 'M+F', 5.0, 0.03, None, 3e3),
-        ('H', 1, 'M+Cl', 88.0, 0.03, None, 2e3),
-        ('H', 0, 'M+F', 4.0, 0.03, None, 3e3),  # to indicate that da_df is not yet in any order!
-        ('H', 0, 'M+Cl', 89.0, 0.03, None, 2e3),
+        ('H', 1, 'M+F', 5.0, 0.3, None, 3e3),
+        ('H', 1, 'M+Cl', 88.0, 0.3, None, 2e3),
+        ('H', 0, 'M+F', 4.0, 0.3, None, 3e3),  # to indicate that da_df is not yet in any order!
+        ('H', 0, 'M+Cl', 89.0, 0.3, None, 2e3),
 
-        ('P', 1, 'M-H', 3.7, 0.02, None, 2e3),  # an annotated metabolite that is not in the model
-        ('P', 2, 'M-H', 4.7, 0.02, None, 2e3),
-        ('P', 3, 'M-H', 5.7, 0.02, None, 2e3),
+        ('P', 1, 'M-H', 3.7, 0.2, None, 2e3),  # an annotated metabolite that is not in the model
+        ('P', 2, 'M-H', 4.7, 0.2, None, 2e3),
+        ('P', 3, 'M-H', 5.7, 0.2, None, 2e3),
 
-        ('C', 0, 'M-H', 1.5, 0.02, None, 7e5),
-        ('C', 3, 'M-H', 4.5, 0.02, None, 7e5),
-        ('C', 4, 'M-H', 5.5, 0.02, None, 7e5),
+        ('C', 0, 'M-H', 1.5, 0.2, None, 7e5),
+        ('C', 3, 'M-H', 4.5, 0.2, None, 7e5),
+        ('C', 4, 'M-H', 5.5, 0.2, None, 7e5),
 
-        ('D', 2, 'M-H', 12.0, 0.001, None, 1e5),
-        ('D', 0, 'M-H', 9.0, 0.001, None, 1e5),
-        ('D', 3, 'M-H', 13.0, 0.001, None, 1e5),
+        ('D', 2, 'M-H', 12.0, 0.1, None, 1e5),
+        ('D', 0, 'M-H', 9.0, 0.1, None, 1e5),
+        ('D', 3, 'M-H', 13.0, 0.1, None, 1e5),
 
-        ('L|[1,2]', 0, 'M-H', 14.0, 0.01 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
-        ('L|[1,2]', 1, 'M-H', 15.0, 0.01 * L_12_omega, L_12_omega, 4e4),
+        ('L|[1,2]', 0, 'M-H', 14.0, 0.1 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
+        ('L|[1,2]', 1, 'M-H', 15.0, 0.1 * L_12_omega, L_12_omega, 4e4),
 
-        ('L', 0, 'M-H', 14.0, 0.01, None, 4e5),
-        ('L', 1, 'M-H', 15.0, 0.01, None, 4e5),
-        ('L', 2, 'M-H', 16.0, 0.01, None, 4e5),
-        ('L', 5, 'M-H', 19.0, 0.01, None, 4e5),
+        ('L', 0, 'M-H', 14.0, 0.1, None, 4e5),
+        ('L', 1, 'M-H', 15.0, 0.1, None, 4e5),
+        ('L', 2, 'M-H', 16.0, 0.1, None, 4e5),
+        ('L', 5, 'M-H', 19.0, 0.1, None, 4e5),
     ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'sigma', 'omega', 'total_I'])
     formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
     annotation_df['formula'] = annotation_df['met_id'].map(formap)
@@ -625,13 +625,20 @@ if __name__ == "__main__":
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
+    # model, kwargs = spiro(
+    #     backend='torch', add_biomass=True, v2_reversible=True, v5_reversible=True,
+    #     batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
+    #     kernel_basis='rref',
+    # )
+
     model, kwargs = spiro(
-        backend='torch', add_biomass=True, v2_reversible=True,
-        batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
-        kernel_basis='rref',
+        seed=9, batch_size=1,
+        backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+        which_measurements='com', which_labellings=['A', 'B'], v5_reversible=True, include_bom=False
     )
-    dss = kwargs['basebayes']
-    data = kwargs['measurements']
+    #
+    # dss = kwargs['basebayes']
+    # data = kwargs['measurements']
     # inv = dss.to_partial_mdvs(data)
 
 

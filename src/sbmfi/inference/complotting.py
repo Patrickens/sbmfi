@@ -9,7 +9,7 @@ from bokeh.plotting import show
 from bokeh.io import output_file
 import matplotlib.pyplot as plt
 import colorcet
-
+from sbmfi.core.polytopia import thermo_2_net_polytope
 
 class PlotMonster(object):
     _ALLFONTSIZES = {
@@ -43,6 +43,7 @@ class PlotMonster(object):
             v_rep: pd.DataFrame = None,
             hv_backend='matplotlib',
     ):
+        # TODO make sure we can plot exchange fluxes!
         hv.extension(hv_backend)
         self._hvb = hv_backend == 'matplotlib'
         self._pol = polytope
@@ -70,6 +71,7 @@ class PlotMonster(object):
         if not all(polytope.A.columns.isin(inference_data.posterior.theta_id.values)):
             raise ValueError
 
+        net_pol = thermo_2_net_polytope(polytope)
         if v_rep is None:
             v_rep = V_representation(polytope, number_type='fraction')
         else:
@@ -113,6 +115,7 @@ class PlotMonster(object):
         return hull.points[verts]
 
     def _get_samples(self, *args, group='posterior', num_samples=None):
+        print(*args)
         return az.extract(
             self._data,
             group=group,
@@ -204,7 +207,7 @@ class PlotMonster(object):
             group='posterior',
             num_samples=None
     ):
-        sampled_points = self._get_samples(group, num_samples, var1_id, var2_id)
+        sampled_points = self._get_samples(var1_id, var2_id, group=group, num_samples=num_samples)
         vertices = self._process_points(sampled_points)
         return self._plot_area(vertices, var1_id, var2_id, label=f'{group} sampled support', color=self._colors[group])
 
@@ -216,7 +219,7 @@ class PlotMonster(object):
             num_samples=30000,
             bandwidth=None,
     ):
-        sampled_points = self._get_samples(group, num_samples, var1_id, var2_id)
+        sampled_points = self._get_samples(var1_id, var2_id, group=group, num_samples=num_samples)
         xax = self._axes_range(var1_id)
         yax = self._axes_range(var2_id)
         return hv.Bivariate(sampled_points, kdims=[xax, yax], label='density').opts(
@@ -506,6 +509,28 @@ def PPC_PLOT():
 
 
 if __name__ == "__main__":
-    import pickle, os
+    from sbmfi.models.small_models import spiro
+    from bokeh.plotting import figure, output_file, save
+    # model, kwargs = spiro(
+    #     seed=None,
+    #     batch_size=100,
+    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+    #     which_measurements='com', which_labellings=['A'], v5_reversible=True
+    # )
+    model, kwargs = spiro(
+        seed=None,
+        batch_size=10,
+        backend='torch', v2_reversible=True, ratios=False, build_simulator=True, which_labellings=['A', 'B'],
+        v5_reversible=True
+    )
+    spres = az.from_netcdf("C:\python_projects\sbmfi\src\sbmfi\inference\spiro_TEST.nc")
+    v_rep = pd.read_excel('vrep.xlsx')
+    mc = MCMC_PLOT(model._fcm.make_theta_polytope(), inference_data=spres, v_rep=v_rep)
+    # R_svd0    R_svd1    R_svd2    R_svd3  v2_xch  v5_xch
+    # aa = mc.point_plot('R_svd0', 'R_svd1')
+    aa = mc.grand_theta_plot('R_svd0', 'v5_xch')
+    # aa = mc.density_plot('R_svd3')
+    # output_file(filename="custom_filename.html", title="plot2")
+    show(hv.render(aa))
+    # mc._v_rep.to_excel('vrep.xlsx', index=False)
 
-    PPC_PLOT()

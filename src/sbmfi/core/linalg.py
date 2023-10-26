@@ -258,7 +258,7 @@ class NumpyBackend(object):
         return self._rng.permutation(n)
 
     def multinomial(self, n, p):
-        counts = self._rng.multinomial(1, p, size=n)
+        counts = self._rng.multinomial(1, p, size=(n, *p.shape[:-1]))
         return np.where(counts)[1]
 
     def choice(self, n, tot, replace=False):
@@ -491,6 +491,8 @@ class TorchBackend(object):
     def zeros(self, shape, dtype=None):
         if dtype is None:
             dtype = self._def_dtype
+        elif dtype in _NP_TORCH_DTYPE:
+            dtype = _NP_TORCH_DTYPE[dtype]
         return torch.zeros(shape, dtype=dtype)
 
     def ones(self, shape, dtype=None):
@@ -545,7 +547,7 @@ class LinAlg(object):
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
         'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
-        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum'
+        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum',
     ]
 
     def __getstate__(self):
@@ -893,6 +895,17 @@ class LinAlg(object):
 
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
+
+    nl = LinAlg(backend='numpy')
+    p = nl.randu((5, ))
+    p = p / p.sum()
+
+    tl = LinAlg(backend='torch')
+    tp = tl.get_tensor(values=p)
+    print(tp)
+    for i in range(10):
+        print(tl.multinomial(1, p=tp))
+    print(nl.multinomial(1, p=p))
 
     # a = torch.zeros((3,3,3))
     # b = torch.zeros((3,3,3,5))

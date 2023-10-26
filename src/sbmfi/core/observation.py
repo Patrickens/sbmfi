@@ -481,19 +481,19 @@ class _BlockDiagGaussian(object):
         return self._sigma_1
 
     @staticmethod
-    def construct_sigma_x(observation_df: pd.DataFrame, diagonal: pd.Series = 0.0001, corr=0.0):
+    def construct_sigma_x(observation_df: pd.DataFrame, diagonal_std: pd.Series = 0.1, corr=0.0):
         la = LinAlg(backend='numpy')
-        if isinstance(diagonal, float):
-            diagonal = pd.Series(diagonal, index=observation_df.index)
-        elif isinstance(diagonal, pd.Series) and (len(diagonal) != observation_df.shape[0]):
+        if isinstance(diagonal_std, float):
+            diagonal_std = pd.Series(diagonal_std, index=observation_df.index)
+        elif isinstance(diagonal_std, pd.Series) and (len(diagonal_std) != observation_df.shape[0]):
             raise ValueError('wrong shape')
 
-        diagonal = diagonal.loc[observation_df.index]
+        diagonal_std = diagonal_std.loc[observation_df.index]
         idx = _BlockDiagGaussian(linalg=la, observation_df=observation_df)
-        nf = len(diagonal)
+        nf = len(diagonal_std)
         sigma = np.zeros((nf, nf))
         diagi = np.diag_indices(n=nf)
-        variance = diagonal.values
+        variance = diagonal_std.values ** 2
         std = np.sqrt(variance)
         sigma[diagi] = variance / 2
         if corr > 0.0:
@@ -506,7 +506,7 @@ class _BlockDiagGaussian(object):
         # this is mainly to set constant sigma
 
         if isinstance(sigma, pd.Series):
-            sigma = self.construct_sigma_x(self._observation_df, diagonal=sigma)
+            sigma = self.construct_sigma_x(self._observation_df, diagonal_std=sigma)
 
         if isinstance(sigma, pd.DataFrame):
             sigma = self._la.get_tensor(
@@ -979,18 +979,18 @@ class MVN_BoundaryObservationModel(BoundaryObservationModel):
             check_noise_support: bool = False,
             number_type='float',
             sigma_o=None,
-            biomass_std=0.01,
-            boundary_std=0.2,
+            biomass_std=0.1,
+            boundary_std=0.3,
     ):
         super(MVN_BoundaryObservationModel, self).__init__(
             fcm, measured_boundary_fluxes, biomass_id, check_noise_support, number_type
         )
         n = len(self._bound_id)
         if sigma_o is None:
-            sigma_o = np.eye(n) * boundary_std
+            sigma_o = np.eye(n) * boundary_std ** 2
             if biomass_id is not None:
                 bm_idx = self._bound_id.get_loc(biomass_id)
-                sigma_o[bm_idx, bm_idx] = biomass_std
+                sigma_o[bm_idx, bm_idx] = biomass_std ** 2
         self._sigma_o = self._la.get_tensor(values=sigma_o)
         self._sigma_o_1 = self._la.pinv(self._sigma_o, rcond= 1e-12, hermitian=False)
 
@@ -1025,7 +1025,6 @@ class MVN_BoundaryObservationModel(BoundaryObservationModel):
     def log_lik(self, bo_meas, mu_bo):
         mu_bo = self._la.atleast_2d(mu_bo)  # shape = batch x n_bo
         bo_meas = self._la.atleast_2d(bo_meas)  # shape = n_obs x n_bo
-        # diff = mu_bo[None, :, :] - bo_meas[:, None, :]  # shape = n_obs x batch x n_bo
         diff = mu_bo[:, None, :] - bo_meas[:, None, :]  # shape = batch x n_obs x n_bo
         return - 0.5 * ((diff @ self._sigma_o_1) * diff).sum(-1)
 
