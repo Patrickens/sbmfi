@@ -547,7 +547,7 @@ class LinAlg(object):
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
         'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
-        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum',
+        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum', 'isnan'
     ]
 
     def __getstate__(self):
@@ -729,7 +729,7 @@ class LinAlg(object):
 
     def norm_pdf(self, A, mu=0.0, std=1.0):
         xi = self._compute_xi(A, mu, std)
-        return _ONEBYSQRT2PI * 1.0 / std * self.exp(-xi**2 * 0.5)
+        return _ONEBYSQRT2PI * (1.0 / std) * self.exp(-xi**2 * 0.5)
 
     def norm_log_pdf(self, A, mu=0.0, std=1.0):
         xi = self._compute_xi(A, mu, std)
@@ -748,11 +748,20 @@ class LinAlg(object):
         beta  = self.norm_cdf(hi, mu, std)
         return norm_pdf / (beta - alpha)
 
+    def trunc_norm_pdf2(self, A, lo, hi, mu=0.0, std=1.0):
+        xi = (A - mu) / std
+        alpha = (lo - mu) / std
+        beta = (hi - mu) / std
+        A = 0.5 * (1 + self.erf((alpha / math.sqrt(2))))
+        B = 0.5 * (1 + self.erf((beta / math.sqrt(2))))
+        norm_pdf = (1 / math.sqrt(2* math.pi)) * self.exp(-0.5 * xi**2)
+        return norm_pdf / (std * (B - A))
+
     def trunc_norm_log_pdf(self, A, lo, hi, mu=0.0, std=1.0, *args, **kwargs):
         norm_log_pdf = self.norm_log_pdf(A, mu, std)
         alpha = self.norm_cdf(lo, mu, std)
         beta = self.norm_cdf(hi, mu, std)
-        return norm_log_pdf - self.log(beta - alpha)
+        return norm_log_pdf - self.log((beta - alpha))
 
     def trunc_norm_cdf(self, A, lo, hi, mu=0.0, std=1.0):
         norm_cdf = self.norm_cdf(A, mu, std)
@@ -868,16 +877,17 @@ class LinAlg(object):
     def cartesian(self, A, ):
         pass
 
-    def min_pos_max_neg(self, alpha, return_what=1, tol=1e15, keepdims=False):
+    def min_pos_max_neg(self, alpha, return_what=1, keepdims=False):
+        inf = float('inf')
         if return_what > -1:
             alpha_max = self.vecopy(alpha)
-            alpha_max[alpha_max < 0.0] = tol
+            alpha_max[alpha_max <= 0.0] = inf
             alpha_max = self.min(alpha_max, -1, keepdims)
             if return_what == 1:
                 return alpha_max
         if return_what < 1:
             alpha_min = self.vecopy(alpha)
-            alpha_min[alpha_min > 0.0] = -tol
+            alpha_min[alpha_min >= 0.0] = -inf
             alpha_min = self.max(alpha_min, -1, keepdims)
             if return_what == -1:
                 return alpha_min
@@ -902,10 +912,10 @@ if __name__ == "__main__":
 
     tl = LinAlg(backend='torch')
     tp = tl.get_tensor(values=p)
-    print(tp)
-    for i in range(10):
-        print(tl.multinomial(1, p=tp))
-    print(nl.multinomial(1, p=p))
+    rands = tl.randu(59) * 6 - 3
+
+    print(tl.min_pos_max_neg(rands, return_what=0))
+    print(rands)
 
     # a = torch.zeros((3,3,3))
     # b = torch.zeros((3,3,3,5))

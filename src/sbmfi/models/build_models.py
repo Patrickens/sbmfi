@@ -7,7 +7,7 @@ from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex, excel_polytope
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniformNetPrior
+from sbmfi.inference.priors import UniNetFluxPrior
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os
@@ -1765,7 +1765,7 @@ def _parse_anton_measurements(recompute=False, verbose=False, adduct_name='M-'):
 def read_anton_measurements(
         labelling_ids: Iterable = ['20% [U]Glc', '[1]Glc'],
         measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-        std=0.01
+        std=0.1
 ):
     file = os.path.join(MODEL_DIR, 'parsed_anton_measurements.csv')
 
@@ -2024,10 +2024,11 @@ def build_e_coli_anton_glc(
             total_intensities=total_intensities,
             clip_min=1e-12,  # we need to post-process the measurements to create appropriate annotation_df, hence the low clip_min
         )
-    thermo_fluxes, theta = None, None
+
+    thermo_fluxes, theta, comparison = None, None, None
     if annotation_df is not None:
         bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, _bmid_ANTON)
-        up = UniformNetPrior(model)
+        up = UniNetFluxPrior(model)
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
         thermo_fluxes = read_anton_fluxes()
@@ -2038,10 +2039,35 @@ def build_e_coli_anton_glc(
             measurements = measurements.loc[basebayes.data_id]
         elif which_measurements == 'tomek':
             basebayes = _correct_base_bayes_lcms(basebayes)
-            measurements = basebayes.simulate_true_data(n_obs=1, pandalize=True).iloc[[0]]
+            measurements = basebayes.simulate_true_data(n_obs=0, pandalize=True).iloc[[0]]
 
             # intensities = intensities.loc[intensities > fobmod._cmin * 0.6]
         measurements.name = which_measurements
+
+        if which_measurements == 'tomek':
+            anton_meas, anton_annot = read_anton_measurements(which_labellings, measured_boundary_fluxes)
+            anton_meas = anton_meas.to_frame().T
+
+            anton_cols = pd.Index([f'{i[0]}: {i[1]}' for i in anton_meas.columns.tolist()])
+            new_anton_cols = pd.Index(anton_cols).str.replace(r'\_\{.*\}', '', regex=True)
+            anton_meas.columns = new_anton_cols
+
+            part_mdv_measurements = basebayes.to_partial_mdvs(measurements, pandalize=True)
+            bb = pd.Index([f'{i[0]}: {i[1]}' for i in part_mdv_measurements.columns.tolist()])
+            part_mdv_measurements.columns = bb
+
+            intersect_cols = new_anton_cols.intersection(bb)
+            intersect_cols = intersect_cols.append(pd.Index([f'{i[0]}: {i[1]}' for i in bom.boundary_id.tolist()]))
+
+            full_anton_map = dict(zip(anton_cols, new_anton_cols))
+            intersect_map = {k: v for k, v in full_anton_map.items() if v in intersect_cols}
+            comparison = {
+                'part_mdv_measurements': part_mdv_measurements,
+                'anton_meas':anton_meas,
+                'intersect_cols': intersect_cols,
+                'full_anton_map': full_anton_map,
+                'intersect_map': intersect_map,
+            }
 
     kwargs = {
         'annotation_df': annotation_df,
@@ -2052,6 +2078,7 @@ def build_e_coli_anton_glc(
         'ratio_repo': _gluc_ratio_repo,
         'thermo_fluxes': thermo_fluxes,
         'theta': theta,
+        'comparison': comparison,
     }
 
     return model, kwargs
@@ -2252,6 +2279,12 @@ def simulator_factory(
 
 if __name__ == "__main__":
     import json
+
+    pd.set_option('display.max_rows', 500)
+    pd.set_option('display.max_columns', 500)
+    pd.set_option('display.width', 1000)
+    np.set_printoptions(linewidth=500)
+
     map_back = {}
     # from optlang.gurobi_interface import
     from cobra.flux_analysis import flux_variability_analysis

@@ -467,7 +467,7 @@ class UniXchFluxPrior(_XchFluxPrior):  # TODO rename
         return torch.zeros((*value.shape[:-1], 1))
 
 
-class UniformNetPrior(_NetFluxPrior):
+class UniNetFluxPrior(_NetFluxPrior):
     def __init__(
             self,
             model,
@@ -475,7 +475,7 @@ class UniformNetPrior(_NetFluxPrior):
             cache_size: int = 20000,
             **kwargs,
     ):
-        super(UniformNetPrior, self).__init__(model, cache_size, **kwargs)
+        super(UniNetFluxPrior, self).__init__(model, cache_size, **kwargs)
         if (self._fcm._nx > 0) and (xch_prior is None):
             xch_prior = UniXchFluxPrior(self._fcm)
         self._xch_prior = xch_prior
@@ -511,7 +511,7 @@ class UniformNetPrior(_NetFluxPrior):
         return torch.zeros((*value.shape[:-1], 1))
 
 
-class ProjectionPrior(UniformNetPrior):
+class ProjectionPrior(UniNetFluxPrior):
     # TODO I noticed that for the biomass flux, it is rarely sampled over 0.3, thus here we
     #  sample boundary fluxes in a projected polytope and then constrain and sample just like with ratios
 

@@ -1,5 +1,3 @@
-import torch
-
 from sbmfi.core.simulator import _BaseSimulator, DataSetSim
 from sbmfi.inference.priors import _BasePrior, _NetFluxPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
@@ -9,22 +7,19 @@ import arviz as az
 import numpy as np
 import pandas as pd
 import tqdm
-import multiprocessing as mp
-import psutil
 from typing import Dict
 from functools import partial
 from sbmfi.core.util import profile
 from sbi.inference.posteriors.base_posterior import NeuralPosterior
-
+import time
+from line_profiler import line_profiler
+import xarray as xr
 
 # from line_profiler import line_profiler
 # prof2 = line_profiler.LineProfiler()
 # from sbmfi.core.util import profile
 
-
-from line_profiler import line_profiler
-
-profile2 = line_profiler.LineProfiler()
+# profile2 = line_profiler.LineProfiler()
 class _BaseBayes(_BaseSimulator):
 
     def __init__(
@@ -161,6 +156,7 @@ class _BaseBayes(_BaseSimulator):
             theta,
             return_data=False,
             evaluate_prior=False,
+            **kwargs,
     ):
         if self._x_meas is None:
             raise ValueError('set an observation first')
@@ -195,11 +191,10 @@ class _BaseBayes(_BaseSimulator):
     def compute_distance(
             self,
             theta,
+            epsilon,
             n_obs=5,
             metric='rmse',
-            epsilon=None,
             return_data=False,
-            evaluate_prior=False,
             **kwargs
     ):
         if self._x_meas is None:
@@ -210,23 +205,28 @@ class _BaseBayes(_BaseSimulator):
         if len(vape) > 2:
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
         data = self.__call__(theta, n_obs=n_obs, **kwargs)
+
+        time = None
+        if isinstance(data, tuple):
+            data, time = data
+
         data = self._la.unsqueeze(data, 0)  # artificially add a chains dimension!
         if metric == 'rmse':
-            distances = self._fobmod.rmse(data, self._x_meas).squeeze(0)
+            fobmod = next(iter(self._obmods.values()))
+            distances = fobmod.rmse(data, self._x_meas).squeeze(0)
         else:
             # TODO think of other distance metrics
             raise ValueError
 
         n_obshape = max(1, n_obs)
         distances = self._la.view(distances, shape=vape[:-1])
-        if epsilon is not None:
-            distances <= epsilon
-            raise NotImplementedError
-            # TODO reject all particles that have an
-        if evaluate_prior:
-            pass
+        if epsilon > -float('inf'):
+            distances[distances > epsilon] = float('nan')  # this indicates we reject samples with a large distance!
+        data = self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
         if return_data:
-            return distances, self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
+            distances = distances, data
+        if time is not None:
+            return distances, time
         return distances
 
     def evaluate_neural_density(
@@ -339,6 +339,75 @@ class _BaseBayes(_BaseSimulator):
         }
         return dims, coords
 
+    def simulate_data(
+            self,
+            inference_data: az.InferenceData = None,
+            n=20000,
+            theta=None,
+            include_predictive=True,
+            num_processes=0,
+            n_obs=0,
+            show_progress=True,
+    ):
+        model = self._model
+
+        from_prior = theta is None
+        if from_prior:
+            theta = self._prior.sample(sample_shape=(n,))
+            if model._la.backend != 'torch':
+                # TODO inconsistency between model and prior LinAlg, where prior has torch backend and model has numpy backend
+                theta = self._prior._fcm._la.tonp(theta)
+
+        if (inference_data is None) or not from_prior:
+            result = dict(theta=theta[None, :, :])
+        else:
+            prior_dataset = az.convert_to_dataset(
+                {'theta': theta[None, :, :]},
+                dims={'theta': ['theta_id']},
+                coords={'theta_id': model._fcm.theta_id.tolist()},
+            )
+            inference_data.add_groups(
+                group_dict={'prior': prior_dataset},
+            )
+
+        if include_predictive:
+            if not hasattr(self, '_dss'):
+                dsim = DataSetSim(
+                    model=model,
+                    substrate_df=self._substrate_df,
+                    mdv_observation_models=self._obmods,
+                    boundary_observation_model=self._bom,
+                    num_processes=num_processes,
+                )
+            else:
+                dsim = self._dss
+            data = dsim.simulate_set(theta, n_obs=n_obs, show_progress=show_progress)['data']
+            dims = {'data': ['data_id']}
+            coords = {'data_id': [f'{i[0]}: {i[1]}' for i in self.data_id.tolist()]}
+            if n_obs == 0:
+                data = model._la.transax(data, 0, 1)
+            else:
+                dims['data'] = ['obs_idx', 'data_id']
+                data = data[None, :, :, :]
+
+            if (inference_data is None) or not from_prior:
+                result['data'] = data
+            else:
+                prior_dataset = az.convert_to_dataset(
+                    {'data': data},
+                    dims=dims,
+                    coords=coords,
+                )
+                inference_data.add_groups(
+                    group_dict={'prior_predictive': prior_dataset},
+                )
+
+        if (inference_data is None) or not from_prior:
+            if inference_data is not None:
+                print(
+                    'returning result instead of adding to inference data, since it is not clear where theta originates')
+            return result
+
     def perturb_particles(
             self,
             theta,
@@ -431,9 +500,9 @@ class _BaseBayes(_BaseSimulator):
         directions = directions / self._la.norm(directions, 2, -1, True)
 
         A_dist = self._la.tensormul_T(self._sampler._G, directions)  # this one has wrong sign on first row
-        particle_pol_dist = self._sampler._h.T - self._la.tensormul_T(self._sampler._G, new_pol)
+        particle_pol_dist = self._sampler._h.T - self._la.tensormul_T(self._sampler._G, old_pol)
 
-        allpha = particle_pol_dist / A_dist
+        allpha = -particle_pol_dist / A_dist
         alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
         alpha = diff[..., 0] / directions[..., 0]  # alpha is the same for all dimensions, so we only need to select 1
 
@@ -442,6 +511,9 @@ class _BaseBayes(_BaseSimulator):
         if chord_std.ndim > 1:
             # this means that we passed a covariance matrix and we need to compute std along the line
             chord_std = self._la.sqrt(self._la.sum(((directions @ chord_std) * directions), -1))
+
+        # print(alpha[..., None] * directions + old_pol)
+        # print(new_pol)  # check whether we recover newpol from oldpol
 
         log_probs = self._la.bounded_distribution_log_prob(
             x=alpha, lo=alpha_min, hi=alpha_max, mu=mu, std=chord_std, which=chord_proposal, old_is_new=old_is_new,
@@ -458,7 +530,6 @@ class _BaseBayes(_BaseSimulator):
                 std=xch_std, which=xch_proposal, old_is_new=old_is_new
             )
             log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
-
         return log_probs
 
     def map_chains_2_theta(self, chains):
@@ -485,9 +556,9 @@ class MCMC(_BaseBayes):
             if post_probs.shape != prop_probs.shape:
                 raise ValueError(f'post shape: {post_probs.shape}, proposal shape: {prop_probs.shape}')
             n_cdf_1, n_chains = post_probs.shape
-            k = post_probs + prop_probs
+            P_l = post_probs + prop_probs
         else:
-            k = post_probs
+            P_l = post_probs
 
         if (n_cdf_1 == 2) and peskunize:
             # this is the single proposal Metropolis-Hastings acceptance ratio!
@@ -498,27 +569,105 @@ class MCMC(_BaseBayes):
                 self._rnd = self._la.log(self._la.randu((pre_sample_batch,)))
             self._accept_index[:] = 0
             rnd = self._rnd[ii]
-            log_mh_ratio = k[1] - k[0]
+            log_mh_ratio = P_l[1] - P_l[0]
             self._accept_index[rnd <= log_mh_ratio] = 1
             return self._accept_index
 
-        k -= self._la.max(k, 0)
-        k = self._la.exp(k)
-        k = k / k.sum(0)
+        P_l -= self._la.max(P_l, 0)
+        P_l = self._la.exp(P_l)
+        P_l = P_l / P_l.sum(0)
         if not peskunize:
             # this corresponds to Barkers acceptance probability, which is sub-optimal, thus longer ESS
-            return self._la.multinomial(n=1, p=k.T).T[0]
+            return self._la.multinomial(n=1, p=P_l.T).T[0]
 
         if i == 0:
             self._didx = self._la.arange(n_cdf_1)
+            self._where = self._la.zeros(n_cdf_1, dtype=np.float64)
+            self._ut = self._la.zeros(n_cdf_1)
 
-        P_i = self._la.tile(k, (n_cdf_1, 1, 1))
-        for j in range(n_cdf_1):
-            P_j = self._la.vecopy(P_i)
-            diags = P_j[self._didx, self._didx]
-            print(diags.shape, P_i.shape)
-            raise NotImplementedError('we should finish this after handing in the thesis')
+            self._non_diag = self._la.ones((n_cdf_1, n_cdf_1)) - self._la.eye(n_cdf_1)
 
+        P_kl = self._la.tile(P_l, (n_cdf_1, 1, 1))
+        for chain_i in range(n_chains):
+            P_j = P_kl[..., chain_i]
+            for j in range(n_cdf_1):
+                diags = P_j[self._didx, self._didx]
+                diag_idxs = self._la.where(diags > 0.0)[0]
+
+                if diag_idxs.shape[0] < 2:
+                    print('mah mann')
+                    break
+
+                self._ut[:] = float('inf')
+
+                wheres = []
+                wheres2 = []
+                for k in diag_idxs:
+                    self._where[:] = 1
+                    self._where[k] = 0
+                    numerator = 1 - self._where @ P_j[k]
+                    wheres.append(self._la.vecopy(self._where))
+
+                    self._where[:] = 0
+                    self._where[diag_idxs] = 1
+                    self._where[k] = 0
+                    denominor = self._where @ P_j[k]
+                    wheres2.append(self._la.vecopy(self._where))
+
+                    self._ut[k] = numerator / denominor
+                ut = self._la.min(self._ut)
+
+                print(self._la.stack(wheres))
+                print(self._la.stack(wheres2))
+
+                for k in diag_idxs:
+                    for l in diag_idxs:
+                        if k == l:
+                            continue
+                        P_j[k, l] *= ut
+
+                P_j[diag_idxs, diag_idxs] = (1 - self._non_diag @ P_j)[diag_idxs]
+                print(P_j)
+
+
+
+                # P_j[]
+
+
+
+
+
+
+                # non_diag = self._la.vecopy(self._non_diag)
+
+
+                # self._where[:] = 0
+                # num_select = self._didx != j
+                # self._where[num_select] = 1
+                # numerator = 1 - self._where @ P_j[j, :]
+                #
+                # self._where[:] = 0
+                # self._where[diag_idxs] = 1
+                # self._where[j] = 0
+                # denominor = self._where @ P_j[j, :]
+                #
+                # self._ut[j] = numerator / denominor
+
+            # ut = self._la.min(self._ut)
+            # P_j_1 = self._la.vecopy(P_j)
+            # for diag_k in diag_idxs:
+            #     for diag_l in diag_idxs:
+            #         if diag_l != diag_k:
+            #             P_j_1[diag_k, diag_l] = ut * P_j[diag_k, diag_l]
+            #     self._where[:] = 1
+            #     self._where[diag_k] = 0
+            #     P_j_1[diag_k, diag_k] = 1 - self._where @ P_j_1[diag_k]
+            #
+            # print(P_j_1)
+
+        raise NotImplementedError('we should finish this after handing in the thesis')
+
+    # @profile(profiler=profile2)
     def run(
             self,
             initial_points=None,
@@ -661,7 +810,8 @@ class MCMC(_BaseBayes):
                         accept_idx[accept_idx > 0] = 1
                     accept_rate += accept_idx
                     avg_rate = self._la.mean(accept_rate / j)
-                    pbar.set_postfix(avg_acc=avg_rate.item())
+                    if j % 50 == 0:
+                        pbar.set_postfix(avg_acc=avg_rate.item())
 
                 if (j % thinning_factor == 0) and (j > -1):
                     k = j // thinning_factor
@@ -670,6 +820,8 @@ class MCMC(_BaseBayes):
                     if return_data:
                         sim_data[k] = data
                 i += 1
+        # try:
+        #     pass
         except Exception as e:
             if e is not KeyboardInterrupt:
                 print(e)
@@ -698,6 +850,9 @@ class MCMC(_BaseBayes):
                 'line_variance': self._la.tonp(chord_std),
                 'xch_kernel': xch_proposal,
                 'xch_variance': self._la.tonp(xch_std),
+                'running_time': pbar.format_dict['elapsed'],
+                'pbar_n': pbar.format_dict['n'],
+                'peskunize': int(peskunize),
             }
             if self.true_theta is not None:
                 attrs['true_theta'] = self._la.tonp(self._true_theta)
@@ -744,7 +899,6 @@ class SMC(_BaseBayes):
                                      f'euclidian distance is not defined (data lies on simplices)')
         super(SMC, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
         self._num_processes = num_processes
-        self._fobmod = next(iter(self._obmods.values()))
         self._dss = DataSetSim(
             model=model,
             substrate_df=self._substrate_df,
@@ -758,6 +912,7 @@ class SMC(_BaseBayes):
     def _calculate_new_log_weights(
             self,
             new_particles,
+            potential,
             old_particles,
             old_log_weights,
             chord_proposal,
@@ -766,12 +921,13 @@ class SMC(_BaseBayes):
             xch_std,
             evaluate_prior=True,
             population_batch=1000,
+
     ):
         population_batch = min(old_particles.shape[0], population_batch)
-        prop_probs = self._la.get_tensor(shape=(*new_particles.shape[:-1], *old_particles.shape[:-1]))
+        prop_probs = self._la.get_tensor(shape=(*old_particles.shape[:-1], *new_particles.shape[:-1]))
 
         for i in range(0, old_particles.shape[0], population_batch):
-            aa = self.compute_proposal_prob(
+            prop_probs[i: i + population_batch] = self.compute_proposal_prob(
                 old_particles[i: i + population_batch],
                 new_particles,
                 chord_proposal,
@@ -780,18 +936,17 @@ class SMC(_BaseBayes):
                 xch_std,
                 old_is_new=False
             )
-            print(old_particles[i: i + population_batch].shape, new_particles.shape)
-            print(aa.shape, prop_probs.shape, old_log_weights.shape)
+        log_weighted_sum = self._la.logsumexp(old_log_weights[:, None] + prop_probs, 0)  # computes importance weights
 
-        log_weighted_sum = self._la.logsumexp(prop_probs + old_log_weights, -1)  # computes importance weights
-        aaa = self._prior.log_prob(new_particles)
-        print(aaa.shape)
         if evaluate_prior:
             prior_log_probs = self._prior.log_prob(new_particles)
         else:
             prior_log_probs = -0.1  # for a uniform prior, dont need to evaluate
 
-        return prior_log_probs - log_weighted_sum
+        if self._potentype == 'approx':
+            potential[:] = 0.0  # for ABC, we filter by distance and do not assign a probability
+
+        return potential + prior_log_probs - log_weighted_sum
 
     def _sample_next_population(
             self,
@@ -830,57 +985,65 @@ class SMC(_BaseBayes):
             if self._nx > 0:
                 xch_std = self._la.sqrt(self._la.diagonal(theta_cov[-self._nx:, -self._nx:]))
 
-        self._particle_pol_dist = self._la.transax(
-            self._sampler._h - self._sampler._G @ self._la.transax(particles[..., :self._K])
-        )
-        self._particle_pol_dist[self._particle_pol_dist < 0.0] = 0.0
         pbar = tqdm.tqdm(total=n, ncols=100)
-        while m < n:
-            # Sample from previous population and perturb.
-            sample_indices = self._la.multinomial(population_batch, self._la.exp(log_weights))
-            sampled_particles = particles[sample_indices]
+        pbar.set_postfix(epsilon=float(epsilon))
+        try:
+            sofar = 0
+            while m < n:
+                # Sample from previous population and perturb.
+                sample_indices = self._la.multinomial(population_batch, self._la.exp(log_weights))
+                sampled_particles = particles[sample_indices]
 
-            perturbed_particles = self.perturb_particles(
-                theta=sampled_particles,
-                i=0,
-                batch_shape=(1, population_batch),
-                n_cdf=n_cdf,
-                chord_proposal=chord_proposal,
-                chord_std=chord_cov,
-                xch_proposal=xch_proposal,
-                xch_std=xch_std,
-                return_what=0
-            ).squeeze(0)
+                perturbed_particles = self.perturb_particles(
+                    theta=sampled_particles,
+                    i=0,
+                    batch_shape=(1, population_batch),
+                    n_cdf=n_cdf,
+                    chord_proposal=chord_proposal,
+                    chord_std=chord_cov,
+                    xch_proposal=xch_proposal,
+                    xch_std=xch_std,
+                    return_what=0
+                ).squeeze(0)
 
-            dist = self.potential(perturbed_particles)
-            if return_data:
-                dist, data = dist
-
-            is_accepted = dist <= epsilon
-            num_accepted_batch = is_accepted.sum()
-
-            if num_accepted_batch > 0:
-                pbar.update(self._la.tonp(num_accepted_batch))
-                accepted_particles = perturbed_particles[is_accepted]
-                new_particles.append(accepted_particles)
-                new_distances.append(dist[is_accepted])
-                new_log_weights.append(
-                    self._calculate_new_log_weights(
-                        new_particles=accepted_particles,
-                        old_particles=particles,
-                        old_log_weights=log_weights,
-                        evaluate_prior=evaluate_prior,
-                        chord_proposal=chord_proposal,
-                        chord_std=chord_cov,
-                        xch_proposal=xch_proposal,
-                        xch_std=xch_std,
-                        population_batch=population_batch,
-                    )
-                )
+                dist = self.potential(perturbed_particles, epsilon, show_progress=False)
                 if return_data:
-                    new_data.append(data[is_accepted])
-                m += num_accepted_batch
-        pbar.close()
+                    dist, data = dist
+
+                is_accepted = ~self._la.isnan(dist)  # this is to filter approximations!
+                num_accepted_batch = is_accepted.sum()
+
+                if num_accepted_batch > 0:
+                    n_batch = self._la.tonp(num_accepted_batch)
+                    if sofar + n_batch > n:
+                        n_batch = n - sofar
+                    sofar += n_batch
+                    pbar.update(n_batch)
+                    accepted_particles = perturbed_particles[is_accepted]
+                    new_particles.append(accepted_particles)
+                    new_distances.append(dist[is_accepted])
+                    new_log_weights.append(
+                        self._calculate_new_log_weights(
+                            new_particles=accepted_particles,
+                            potential=dist[is_accepted],
+                            old_particles=particles,
+                            old_log_weights=log_weights,
+                            evaluate_prior=evaluate_prior,
+                            chord_proposal=chord_proposal,
+                            chord_std=chord_cov,
+                            xch_proposal=xch_proposal,
+                            xch_std=xch_std,
+                            population_batch=population_batch,
+                        )
+                    )
+                    if return_data:
+                        new_data.append(data[is_accepted])
+                    m += num_accepted_batch
+        except Exception as e:
+            print(e)
+        finally:
+            pbar.close()
+            self._totime.append(pbar.format_dict['elapsed'])
 
         # collect lists of tensors into tensors
         new_distances   = self._la.cat(new_distances)
@@ -901,6 +1064,59 @@ class SMC(_BaseBayes):
             new_distances,
             new_data,
         )
+
+
+    def _arviz_2_partial_mdv(self, result: az.InferenceData):
+        # this renames stuff so that the data is now partial MDVs and the log-ratio data is called lr_data
+
+        result.posterior_predictive = result.posterior_predictive.rename({'data': 'lr_data', 'data_id': 'lr_data_id'})
+        result.prior_predictive = result.prior_predictive.rename({'data': 'lr_data', 'data_id': 'lr_data_id'})
+        result.observed_data = result.observed_data.rename({'data_id': 'lr_data_id', 'observed_data': 'lr_observed_data'})
+
+        post_pred = result.posterior_predictive.lr_data.values
+        prior_pred = result.prior_predictive.lr_data.values
+        observed = result.observed_data.lr_observed_data.values
+        post_pred = self._la.tonp(self.to_partial_mdvs(post_pred, pandalize=False))
+        prior_pred = self._la.tonp(self.to_partial_mdvs(prior_pred, pandalize=False))
+        observed = self._la.tonp(self.to_partial_mdvs(observed, pandalize=False))
+
+        cols = self.to_partial_mdvs(post_pred[:, 0, 0, :], pandalize=True)
+        cols = [f'{i[0]}: {i[1]}' for i in cols.columns.tolist()]
+
+        post_data = xr.DataArray(
+            data=post_pred,
+            dims=['chain', 'draw', 'obs_idx', 'data_id'],
+            coords={
+                'chain': np.arange(post_pred.shape[0]),
+                'draw': np.arange(post_pred.shape[1]),
+                'obs_idx': np.arange(post_pred.shape[2]),
+                'data_id': cols
+            },
+        )
+        result.posterior_predictive['data'] = post_data
+
+        prior_data = xr.DataArray(
+            data=prior_pred,
+            dims=['chain', 'draw', 'obs_idx', 'data_id'],
+            coords={
+                'chain': np.arange(prior_pred.shape[0]),
+                'draw': np.arange(prior_pred.shape[1]),
+                'obs_idx': np.arange(prior_pred.shape[2]),
+                'data_id': cols
+            },
+        )
+        result.prior_predictive['data'] = prior_data
+
+        observed = xr.DataArray(
+            data=observed,
+            dims=['measurement_id', 'data_id'],
+            coords={
+                'measurement_id': result.observed_data.measurement_id.values,
+                'data_id': cols
+            },
+        )
+        result.observed_data['observed_data'] = observed
+        return result
 
     def run(
             self,
@@ -923,6 +1139,10 @@ class SMC(_BaseBayes):
             return_all_populations=False,
             return_az=True,
     ):
+        if potentype == 'exact':
+            # we dont evaluate the prior in log_probs since we do this is computing the weights!
+            potential_kwargs['evaluate_prior'] = False
+
         xch_std = self._la.get_tensor(values=np.array([xch_std]))
 
         self._set_potential(potentype, **dict(n_obs=n_obs, metric=metric, return_data=return_data, **potential_kwargs))
@@ -933,236 +1153,136 @@ class SMC(_BaseBayes):
             )
 
         data = None
+        self._totime = []
         if n_smc_steps < 2:
             raise ValueError
-        # try:
-        for i in range(n_smc_steps):
-            if i == 0:
-                prior_theta = self._prior.sample(sample_shape=(n * n0_multiplier, ))
-                if self._la.backend != 'torch':
-                    prior_theta = self._prior._fcm._la.tonp(prior_theta)
-                dist = self.potential(prior_theta, fluxes_per_task=500, show_progress=True)
-                if return_data:
-                    dist, data = dist
-                    prior_data = data
+        try:
+            for i in range(n_smc_steps):
+                if i == 0:
+                    prior_theta = self._prior.sample(sample_shape=(int(n * n0_multiplier), ))
+                    if self._la.backend != 'torch':
+                        prior_theta = self._prior._fcm._la.tonp(prior_theta)
 
-                sortidx = self._la.argsort(dist)
-                particles = prior_theta[sortidx][:n]
-                dist = dist[sortidx][:n]
-                epsilon = dist[-1]
-                log_weights = self._la.log(1 / n * self._la.ones(n))
-
-                if return_all_populations:
-                    all_particles = [particles]
-                    all_log_weights = [log_weights]
-                    all_distances = [dist]
-                    all_epsilons = [epsilon]
+                    dist, prior_time = self.potential(prior_theta, epsilon=-float('inf'), show_progress=True, return_time=True)
+                    self._totime.append(prior_time)
                     if return_data:
-                        all_data = [data[sortidx][:n]]
-            else:
-                if distance_based_decay:
-                    # Quantile of last population
-                    epsidx = self.quantile_indices(dist, quantiles=epsilon_decay)
-                    epsilon = dist[epsidx]
+                        dist, data = dist
+                        prior_data = data
+
+                    sortidx = self._la.argsort(dist)
+                    particles = prior_theta[sortidx][:n]
+                    dist = dist[sortidx][:n]
+                    epsilon = dist[-1]
+                    log_weights = self._la.log(1 / n * self._la.ones(n))
+
+                    if return_all_populations:
+                        all_particles = [particles]
+                        all_log_weights = [log_weights]
+                        all_distances = [dist]
+                        all_epsilons = [epsilon]
+                        if return_data:
+                            all_data = [data[sortidx][:n]]
                 else:
-                    # Constant decay.
-                    epsilon *= epsilon_decay
+                    if distance_based_decay:
+                        # Quantile of last population
+                        epsidx = self.quantile_indices(dist, quantiles=1 - epsilon_decay)
+                        epsilon = dist[epsidx]
+                    else:
+                        # Constant decay.
+                        epsilon *= epsilon_decay
 
-                particles, log_weights, dist, data = self._sample_next_population(
-                    particles=particles,
-                    log_weights=log_weights,
-                    epsilon=epsilon,
-                    population_batch=population_batch,
-                    kernel_variance_scale=kernel_std_scale,
-                    chord_proposal=chord_proposal,
-                    xch_proposal=xch_proposal,
-                    return_data=return_data,
-                    evaluate_prior=evaluate_prior,
-                )
-                if return_all_populations:
-                    all_particles.append(particles)
-                    all_log_weights.append(log_weights)
-                    all_distances.append(dist)
-                    all_epsilons.append(epsilon)
-                    if return_data:
-                        all_data.append(data)
-        # except:
-        #     if return_all_populations:
-        #         kwargs = dict(
-        #             all_particles=all_particles,
-        #             all_log_weights=all_log_weights,
-        #             all_distances=all_distances,
-        #             all_epsilons=all_epsilons
-        #         )
-        #         if return_data:
-        #             kwargs['all_data'] = all_data
-        #     else:
-        #         kwargs = dict(particles=particles, log_weights=log_weights, dist=dist, epsilon=epsilon)
-        #         if return_data:
-        #             kwargs['data'] = data
-        #     # could be used to reset the SMC algo!
-        #     pickle.dump(kwargs, open('FAILUREPOPULATIONS.p', 'wb'))
-        if return_all_populations:
-            particles = self._la.stack(all_particles, 0)
-            log_weights = self._la.stack(all_log_weights, 0)
-            dist = self._la.stack(all_distances, 0)
-            epsilon = self._la.stack(all_epsilons, 0)
+                    particles, log_weights, dist, data = self._sample_next_population(
+                        particles=particles,
+                        log_weights=log_weights,
+                        epsilon=epsilon,
+                        population_batch=population_batch,
+                        kernel_variance_scale=kernel_std_scale,
+                        chord_proposal=chord_proposal,
+                        xch_proposal=xch_proposal,
+                        return_data=return_data,
+                        evaluate_prior=evaluate_prior,
+                    )
+                    if return_all_populations:
+                        all_particles.append(particles)
+                        all_log_weights.append(log_weights)
+                        all_distances.append(dist)
+                        all_epsilons.append(epsilon)
+                        if return_data:
+                            all_data.append(data)
+        except Exception as e:
+            print(e)
+        finally:
+            if return_all_populations:
+                particles = self._la.stack(all_particles, 0)
+                log_weights = self._la.stack(all_log_weights, 0)
+                dist = self._la.stack(all_distances, 0)
+                epsilon = self._la.stack(all_epsilons, 0)
+                if return_data:
+                    data = self._la.stack(all_data, 0)
+            else:
+                # add the 'chains' dimension
+                particles = particles[None, ...]
+                log_weights = log_weights[None, ...]
+                dist = dist[None, ...]
+                if return_data:
+                    data = data[None, ...]
+
+            if not return_az:
+                return particles
+
+            posterior_predictive, prior_predictive = None, None
             if return_data:
-                data = self._la.stack(all_data, 0)
-        else:
-            # add the 'chains' dimension
-            particles = particles[None, ...]
-            log_weights = log_weights[None, ...]
-            dist = dist[None, ...]
-            if return_data:
-                data = data[None, ...]
+                posterior_predictive = {
+                    'data': data
+                }
+                prior_predictive = {
+                    'data': prior_data[None, ...],  # add the 'chains' dimension
+                }
 
-        if not return_az:
-            return particles
-
-        posterior_predictive, prior_predictive = None, None
-        if return_data:
-            posterior_predictive = {
-                'data': data
+            attrs = {
+                'potentype': potentype,
+                'population_batch': population_batch,
+                'epsilons': self._la.tonp(epsilon),
+                'evaluate_prior': str(evaluate_prior),
+                'n_smc_steps': n_smc_steps,
+                'potential_kwargs': [(k, v if not isinstance(v, bool) else str(v)) for k, v in potential_kwargs.items()],
+                'n_obs': n_obs,
+                'kernel_variance_scale': kernel_std_scale,
+                'n0_multiplier': n0_multiplier,
+                'distance_based_decay': str(distance_based_decay),
+                'metric': metric,
+                'epsilon_decay': epsilon_decay,
+                'line_kernel': chord_proposal,
+                'xch_kernel': xch_proposal,
+                'xch_variance': self._la.tonp(xch_std),
+                'running_time': np.array(self._totime),
             }
-            prior_predictive = {
-                'data': prior_data[None, ...],  # add the 'chains' dimension
-            }
+            if self.true_theta is not None:
+                attrs['true_theta'] = self._la.tonp(self._true_theta)
+                attrs['true_theta_id'] = self._true_theta_id
 
-        attrs = {
-            'potentype': potentype,
-            'population_batch': population_batch,
-            'epsilons': self._la.tonp(epsilon),
-            'evaluate_prior': str(evaluate_prior),
-            'n_smc_steps': n_smc_steps,
-            'potential_kwargs': [(k, v if not isinstance(v, bool) else str(v)) for k, v in potential_kwargs.items()],
-            'n_obs': n_obs,
-            'kernel_variance_scale': kernel_std_scale,
-            'n0_multiplier': n0_multiplier,
-            'distance_based_decay': str(distance_based_decay),
-            'metric': metric,
-            'epsilon_decay': epsilon_decay,
-            'line_kernel': chord_proposal,
-            'xch_kernel': xch_proposal,
-            'xch_variance': xch_std,
-        }
-        if self.true_theta is not None:
-            attrs['true_theta'] = self._la.tonp(self._true_theta)
-            attrs['true_theta_id'] = self._true_theta_id
+            dims, coords = self._format_dims_coords(n_obs=n_obs if self.potentype == 'approx' else 0)
 
-        dims, coords = self._format_dims_coords(n_obs=n_obs if self.potentype == 'approx' else 0)
-
-        return az.from_dict(
-            posterior={
-                'theta': particles  # chains x draws x param
-            },
-            prior={
-                'theta': prior_theta[None, ...],  # add the 'chains' dimension
-            },
-            dims=dims,
-            coords=coords,
-            observed_data={
-                'observed_data': self.measurements.values,
-            },
-            sample_stats={
-                'log_weights': log_weights,
-                'distances': dist,
-            },
-            posterior_predictive=posterior_predictive,
-            prior_predictive=prior_predictive,
-            attrs=attrs
-        )
-
-
-def check_stuff():
-    model, kwargs = spiro(
-        backend='numpy',
-        batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
-        v2_reversible=True, logit_xch_fluxes=False, include_bom=True, seed=3,
-    )
-    sdf = kwargs['substrate_df']
-    dss = kwargs['datasetsim']
-    simm = dss._obmods
-    bom = dss._bom
-    up = UniformNetPrior(model, cache_size=2000)
-    # from botorch.utils.sampling import sample_polytope
-    mcmc = SMC(
-        model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom,
-        prior=up,
-    )
-    algo = 'rej'
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    mcmc.set_true_theta(theta=kwargs['theta'])
-    run_kwargs = dict(
-        epsilon=5.0,
-        n=50, n_burn=0, n_chains=4, thinning_factor=2, n_cdf=4, return_data=True, line_proposal_std=5.0,
-        evaluate_prior=False, algorithm=algo
-    )
-
-    n_obs = 2
-    result = dss.simulate_prior_predictive(mcmc, num_processes=0, n_obs=n_obs, n=500, include_prior_predictive=False)
-    fluxes = model._fcm.map_theta_2_fluxes(result['theta'])[0]
-    sims = dss.simulate_set(fluxes, n_obs=n_obs, what='mdv')
-    mdvs = sims['mdv']
-    results = []
-    for i, (lid, obmod) in enumerate(dss._obmods.items()):
-        part_mdvss = obmod.compute_observations(mdvs[:, i, :], pandalize=True)
-        part_mdvss_df = part_mdvss.loc[np.sort(np.repeat(np.arange(part_mdvss.shape[0]), n_obs))].reset_index(drop=True)
-        logobs = obmod._la.log10(obmod._la.get_tensor(values=part_mdvss.values) + 1e-12)
-        logI = logobs + obmod._log_scaling  # in log space, multiplication is addition
-        noisy_observations = obmod._la.tile(logI[:, None, :], (1, n_obs, 1))
-        sigma_x = obmod.construct_sigma(logI=logI)
-        obmod.set_sigma(sigma=sigma_x, verify=False)
-        noise_samples = obmod.sample_sigma(shape=(n_obs,))
-        noisy_observations += noise_samples
-        noisy_observations = 10 ** noisy_observations
-        noisy_observations1 = obmod._la.clip(noisy_observations, 750.0, None)
-        noisy_observations2 = obmod.compute_observations(noisy_observations1, select=False)
-
-        transformed = obmod._transformation(noisy_observations2)
-
-        back = obmod._transformation.inv(transformed)
-
-        shaper = noisy_observations.shape
-        newshape = (math.prod(shaper[:-1]), shaper[-1])
-
-        shaper2 = transformed.shape
-        newshape2 = (math.prod(shaper2[:-1]), shaper2[-1])
-
-        logobs = pd.DataFrame(logobs, columns=part_mdvss.columns)
-        logI = pd.DataFrame(logI, columns=part_mdvss.columns)
-        noise_samples = pd.DataFrame(noise_samples.reshape(newshape), columns=part_mdvss.columns)
-        sigma_x = pd.concat([pd.DataFrame(sigma_x[i], index=part_mdvss.columns, columns=part_mdvss.columns) for i in
-                             range(fluxes.shape[0])], axis=0)
-        # sigma_x.to_excel('sx.xlsx')
-        noisy_observations = pd.DataFrame(noisy_observations.reshape(newshape), columns=part_mdvss.columns)
-        noisy_observations1 = pd.DataFrame(noisy_observations1.reshape(newshape), columns=part_mdvss.columns)
-        noisy_observations2 = pd.DataFrame(noisy_observations2.reshape(newshape), columns=part_mdvss.columns)
-        transformed = pd.DataFrame(transformed.reshape(newshape2), columns=obmod._transformation.transformation_id)
-        back = pd.DataFrame(back.reshape(newshape), columns=part_mdvss.columns)
-
-        diff = abs(back - part_mdvss_df)
-
-    printo = True
-    if printo:
-        data = result['data']  # data.flatten(start_dim=0, end_dim=-2)
-        shaper = data.shape
-        new_shape = (math.prod(shaper[:-1]), shaper[-1])
-        transformed = data.reshape(new_shape)
-
-        part_mdvs = mcmc.to_partial_mdvs(transformed)
-
-        fluxes = model._fcm.map_theta_2_fluxes(result['theta'])[0]
-        sims = dss.simulate_set(fluxes, n_obs=2, what='all')
-
-        dang = mcmc.to_partial_mdvs(sims['mdv'], is_mdv=True)
-        dang = dang.loc[np.sort(np.repeat(np.arange(dang.shape[0]), n_obs))].reset_index(drop=True)
-
-        mdvs = pd.concat([pd.DataFrame(mdvs[:, i, :], columns=model.state_id) for i in range(mdvs.shape[1])], axis=1)
-        diff = abs(part_mdvs - dang)
+            return az.from_dict(
+                posterior={
+                    'theta': particles  # chains x draws x param
+                },
+                prior={
+                    'theta': prior_theta[None, ...],  # add the 'chains' dimension
+                },
+                dims=dims,
+                coords=coords,
+                observed_data={
+                    'observed_data': self.measurements.values,
+                },
+                sample_stats={
+                    'log_weights': log_weights,
+                    'distances': dist,
+                },
+                posterior_predictive=posterior_predictive,
+                prior_predictive=prior_predictive,
+                attrs=attrs
+            )
 
 
 if __name__ == "__main__":
@@ -1172,41 +1292,78 @@ if __name__ == "__main__":
     np.set_printoptions(linewidth=500)
 
     from sbmfi.models.small_models import spiro
-    from sbmfi.models.build_models import build_e_coli_anton_glc
-    from sbmfi.inference.priors import UniformNetPrior, ProjectionPrior
+    from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
+    from sbmfi.inference.priors import UniNetFluxPrior, ProjectionPrior
     from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope, fast_FVA
     import pickle
 
-    model, kwargs = spiro(
-        seed=None,
-        batch_size=50,
-        backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
-        which_measurements='lcms', which_labellings=['A', 'B'], v5_reversible=True
+    model, kwargs = build_e_coli_anton_glc(
+        backend='numpy',
+        auto_diff=False,
+        build_simulator=True,
+        ratios=False,
+        batch_size=25,
+        which_measurements='tomek',
+        which_labellings=['20% [U]Glc', '[1]Glc'],
+        measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+        seed=1,
     )
+
     sdf = kwargs['substrate_df']
-    bb = kwargs['basebayes']
-    up = UniformNetPrior(model._fcm)
-    smc = SMC(model, sdf, bb._obmods, prior=up, boundary_observation_model=bb._bom, num_processes=0)
+    dss = kwargs['basebayes']
+    simm = dss._obmods
+    bom = dss._bom
+    up = UniNetFluxPrior(model, cache_size=2000)
+
+    smc = SMC(
+        model=model,
+        substrate_df=sdf,
+        mdv_observation_models=simm,
+        boundary_observation_model=bom,
+        prior=up,
+        num_processes=0,
+    )
     smc.set_measurement(x_meas=kwargs['measurements'])
     smc.set_true_theta(theta=kwargs['theta'])
 
-    smc.run()
+    result = az.from_netcdf("C:/python_projects/sbmfi/SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc")
+
+    result = smc._arviz_2_partial_mdv(result)
+    # model, kwargs = build_e_coli_anton_glc()
+
+    # model, kwargs = spiro(
+    #     seed=None,
+    #     batch_size=50,
+    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+    #     which_measurements='lcms', which_labellings=['A', 'B'], v5_reversible=True
+    # )
+    # sdf = kwargs['substrate_df']
+    # bb = kwargs['basebayes']
+    # up = UniNetFluxPrior(model._fcm)
+    # smc = SMC(model, sdf, bb._obmods, prior=up, boundary_observation_model=bb._bom, num_processes=0)
+    # smc.set_measurement(x_meas=kwargs['measurements'])
+    # smc.set_true_theta(theta=kwargs['theta'])
+    #
+    # res = smc.run(n=5000, n_smc_steps=8, epsilon_decay=0.4, return_all_populations=True, )
+    # az.to_netcdf(res, 'spiro_TEST_SMC.nc')
 
     # model2, kwargs2 = spiro(
     #     seed=9, batch_size=2,
     #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
     #     which_measurements='com', which_labellings=['C', 'D'], v5_reversible=True, include_bom=True
     # )
-    # up = UniformNetPrior(model2._fcm)
+    # up = UniNetFluxPrior(model2._fcm)
     # bb2 = kwargs2['basebayes']
     # sdf = kwargs2['substrate_df']
     # mcmc = MCMC(model2, sdf, bb2._obmods, prior=up, boundary_observation_model=bb2._bom)
     # mcmc.set_measurement(x_meas=kwargs2['measurements'])
     # mcmc.set_true_theta(theta=kwargs2['theta'])
     # res = mcmc.run(
-    #     n=5000, n_burn=500, thinning_factor=3, n_cdf=1, n_chains=3, chord_std=0.2, peskunize=False,
+    #     n=20, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=2, chord_std=0.6, peskunize=True,
     #     chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
     # )
-    # az.to_netcdf(res, 'spiro_TEST.nc')
+    # print(profile2.print_stats())
+    # mcmc.simulate_data(res, n=10000)
+    # az.to_netcdf(res, 'spiro_TEST_MCMC.nc')
 
 

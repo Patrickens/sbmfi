@@ -4,11 +4,11 @@ from normflows.flows.neural_spline.autoregressive import MaskedPiecewiseRational
 from normflows.utils.splines import rational_quadratic_spline
 # from sbi.neural_nets.flow import build_maf, build_nsf
 from functools import partial
-from pyknos.nflows.transforms import PointwiseAffineTransform
+from pyknos.nflows.transforms import PointwiseAffineTransform, MaskedPiecewiseRationalQuadraticAutoregressiveTransform
 from torch import Tensor, nn, relu, tanh, tensor, uint8
 from typing import Optional
 from sbi.utils.torchutils import create_alternating_binary_mask
-from normflows.distributions.base import BaseDistribution, Uniform, UniformGaussian
+from normflows.distributions.base import BaseDistribution, Uniform, UniformGaussian, DiagGaussian
 from normflows.flows import Permute, LULinearPermute
 from sbmfi.inference.normflow_circular import CircularAutoregressiveRationalQuadraticSpline, CircularCoupledRationalQuadraticSpline, EmbeddingConditionalNormalizingFlow
 from sbmfi.core.polytopia import FluxCoordinateMapper
@@ -35,6 +35,7 @@ from ray.tune import Callback
 def flow_constructor(
         fcm: FluxCoordinateMapper = None,
         simulator: _BaseSimulator = None,
+        circular=True,
         embedding_net=None,
         prior_flow=True,
         autoregressive=True,
@@ -56,19 +57,32 @@ def flow_constructor(
     if simulator is not None:
         fcm = simulator._model.flux_coordinate_mapper
 
-    if not ((fcm._sampler.basis_coordinates == 'cylinder') and (fcm._bound is not None)):
-        raise ValueError('needs to have cylinder base_coordinates and a tail_bound or logit ya schmuckington')
+    if fcm._bound is None:
+        raise ValueError('needs to have a tail_bound!')
+
+    if circular and not (fcm._sampler.basis_coordinates == 'cylinder'):
+        raise ValueError('needs to have cylinder base_coordinates or logit ya schmuckington')
+    elif not circular and not (fcm._sampler.basis_coordinates == 'rounded'):
+        raise ValueError('we need to have roonded coordenates ya goon')
 
     n_theta = len(fcm.theta_id)
 
-    if (fcm._nx > 0) and fcm.logit_xch_fluxes:
-        ndim = len(fcm.theta_id)
-        ind = list(range(ndim-fcm._nx, ndim))
-        scale = torch.ones(ndim)
-        scale[-fcm._nx:] *= fcm._bound
-        base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
+    if circular:
+        if (fcm._nx > 0) and fcm.logit_xch_fluxes:
+            ind = list(range(n_theta - fcm._nx))
+            scale = torch.ones(n_theta)
+            scale[:-fcm._nx] *= fcm._bound * 2  # need to pass the width!
+            base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
+        else:
+            base = Uniform(shape=len(fcm.theta_id), low=-fcm._bound, high=fcm._bound)
     else:
-        base = Uniform(shape=len(fcm.theta_id), low=-fcm._bound, high=fcm._bound)
+        if (fcm._nx > 0) and not fcm.logit_xch_fluxes:
+            ind = list(range(n_theta - fcm._nx, n_theta))
+            scale = torch.ones(n_theta)
+            scale[-fcm._nx:] *= fcm._bound * 2  # need to pass the width!
+            base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
+        else:
+            base = DiagGaussian(n_theta, trainable=True)
 
     if prior_flow:
         ncc = None
@@ -95,17 +109,31 @@ def flow_constructor(
             use_batch_norm=use_batch_norm,
             init_identity=init_identity,
         )
-        if autoregressive:
+        if circular and autoregressive:
             transform = CircularAutoregressiveRationalQuadraticSpline(
                 **common_kwargs,
                 permute_mask=True,
             )
-        else:
+        elif circular and not autoregressive:
             transform = CircularCoupledRationalQuadraticSpline(
                 **common_kwargs,
                 reverse_mask=False,
                 mask=None,
             )
+        elif not circular and autoregressive:
+            transform = MaskedPiecewiseRationalQuadraticAutoregressive(
+                features=n_theta,
+                num_blocks=num_blocks,
+                hidden_features=num_hidden_channels,
+                num_bins=num_bins,
+                tail_bound=fcm._bound,
+                activation=nn.ReLU,
+                dropout_probability=dropout_probability,
+                use_batch_norm=use_batch_norm,
+                init_identity=init_identity,
+            )
+        else:
+            raise NotImplementedError
 
         if permute == 'lu':
             perm = LULinearPermute(num_channels=n_theta, identity_init=init_identity)
@@ -125,6 +153,54 @@ def flow_constructor(
     return flow
 
 
+def gauss_base_flow_constructor(
+        fcm: FluxCoordinateMapper = None,
+        embedding_net=None,
+        num_blocks=4,
+        num_hidden_channels=20,
+        num_bins=10,
+        dropout_probability=0.0,
+        use_batch_norm=False,
+        num_transforms = 3,
+        init_identity=True,
+        permute=None,
+        p=None,
+):
+    n_theta = len(fcm.theta_id)
+
+    base = DiagGaussian(n_theta)
+
+    transforms = []
+    for i in range(num_transforms):
+        transform = MaskedPiecewiseRationalQuadraticAutoregressive(
+            features=n_theta,
+            num_blocks=num_blocks,
+            hidden_features=num_hidden_channels,
+            num_bins=num_bins,
+            tail_bound=fcm._bound,
+            activation=nn.ReLU,
+            dropout_probability=dropout_probability,
+            use_batch_norm=use_batch_norm,
+            init_identity=init_identity,
+        )
+
+        if permute == 'lu':
+            perm = LULinearPermute(num_channels=n_theta, identity_init=init_identity)
+        elif permute == 'shuffle':
+            perm = Permute(num_channels=n_theta, mode='shuffle')
+
+        transform_sequence = [transform]
+        if permute is not None:
+            transform_sequence = [transform, perm]
+
+        transforms.extend(transform_sequence)
+
+    if permute is not None:
+        transforms = transforms[:-1]
+
+    flow = EmbeddingConditionalNormalizingFlow(q0=base, flows=transforms, embedding_net=embedding_net, p=p)
+    return flow
+
 
 class MFA_Flow(tune.Trainable):
     def _prior_flow_step(self):
@@ -140,7 +216,6 @@ class MFA_Flow(tune.Trainable):
 
     def _get_data_loaders(self):
         pass
-
 
     def save_checkpoint(self, checkpoint_dir: str) -> Optional[Dict]:
         pass
@@ -259,10 +334,6 @@ class CVStopper(TrialPlateauStopper):
         return current_cv < self._cv
 
 
-
-
-
-
 def main(
         prior: _BasePrior,
         simulator: _BaseSimulator = None,
@@ -347,7 +418,7 @@ def main(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.core.polytopia import sample_polytope
-    from sbmfi.inference.priors import UniformNetPrior
+    from sbmfi.inference.priors import UniNetFluxPrior
 
     model, kwargs = spiro(
         backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='lcms'
@@ -356,10 +427,19 @@ if __name__ == "__main__":
     sim = kwargs['basebayes']
     fcm = FluxCoordinateMapper(
         model,
-        basis_coordinates='cylinder',
+        basis_coordinates='rounded',
         logit_xch_fluxes=False,
         scale_bound=1.0
     )
+    flow_constructor(fcm, circular=False)
+
+    fcm = FluxCoordinateMapper(
+        model,
+        basis_coordinates='cylinder',
+        logit_xch_fluxes=True,
+        scale_bound=1.0
+    )
+    flow_constructor(fcm, circular=True)
 
     # up = UniformNetPrior(fcm, cache_size=1000)
     # main(prior=up)

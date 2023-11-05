@@ -30,6 +30,7 @@ class MDV_ObservationModel(object):
             self,
             model: LabellingModel,
             annotation_df: pd.DataFrame,
+            labelling_id: str,
             transformation=None,
             correct_natab=False,
             clip_min=750.0,
@@ -37,6 +38,9 @@ class MDV_ObservationModel(object):
     ):
         self._la = model._la
         self._annotation_df = annotation_df
+        if labelling_id == 'BOM':
+            raise ValueError('BOM is not a valid labelling_id')
+        self._labelling_id = labelling_id  # TODO make the observation_id incorporate the labelling_id
         self._observation_df = self.generate_observation_df(model=model, annotation_df=annotation_df)
         self._n_o = self._observation_df.shape[0]
         self._natcorr = correct_natab
@@ -61,13 +65,20 @@ class MDV_ObservationModel(object):
                 ilr_basis=ilr_basis
             )
         self._transformation = transformation
-        self._n_d = len(self.observation_id)
+        self._nd = len(self.data_id)
 
     @property
-    def observation_id(self) -> pd.Index:
+    def labelling_id(self):
+        return self._labelling_id
+
+    @property
+    def data_id(self) -> pd.Index:
         if self._transformation is not None:
-            return self._transformation.transformation_id.copy()
-        return self._observation_df.index.copy()
+            did = self._transformation.transformation_id.copy()
+        else:
+            did = self._observation_df.index.copy()
+        did.name = 'data_id'
+        return make_multidex({self._labelling_id: did}, 'labelling_id', 'data_id')
 
     @property
     def transformation(self):
@@ -278,8 +289,8 @@ class MDV_ObservationModel(object):
             index = make_multidex({i: obs_index for i in index}, 'samples_id', 'obs_i')
             if len(result.shape) > 2:
                 result = self._la.tonp(result).transpose(1, 0, 2)
-            result = result.reshape((n_samples*n_obshape, len(self.observation_id)))
-            result = pd.DataFrame(result, index=index, columns=self.observation_id)
+            result = result.reshape((n_samples*n_obshape, len(self.data_id)))
+            result = pd.DataFrame(result, index=index, columns=self.data_id)
         return result
 
 
@@ -567,6 +578,7 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             self,
             model: Union[LabellingModel, RatioMixin],
             annotation_df: pd.DataFrame,
+            labelling_id: str,
             sigma_df: pd.DataFrame = None,
             omega: pd.Series = None,
             transformation = None,
@@ -576,7 +588,7 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             **kwargs,
     ):
         MDV_ObservationModel.__init__(
-            self, model, annotation_df, transformation, correct_natab, clip_min, **kwargs
+            self, model, annotation_df, labelling_id, transformation, correct_natab, clip_min, **kwargs
         )
         _BlockDiagGaussian.__init__(self, linalg=self._la, observation_df=self._observation_df)
         # TODO introduce scaling factor w as in Wiechert publications
@@ -612,6 +624,7 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
                 obsim = ClassicalObservationModel(
                     model,
                     annotation_df=annotation_df,
+                    labelling_id=labelling_id,
                     sigma_df=sigma_df,
                     omega=omega,
                     transformation=transformation,
@@ -825,6 +838,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             model: Union[LabellingModel, RatioMixin],
             annotation_df: pd.DataFrame,
             total_intensities: pd.Series,
+            labelling_id: str,
             parameters = TOF6546Alaa5minParameters(),
             transformation = None,
             correct_natab=False,
@@ -832,7 +846,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             **kwargs
     ):
         MDV_ObservationModel.__init__(
-            self, model, annotation_df, transformation, correct_natab, clip_min, **kwargs
+            self, model, annotation_df, labelling_id, transformation, correct_natab, clip_min, **kwargs
         )
         _BlockDiagGaussian.__init__(self, linalg=self._la, observation_df=self._observation_df)
         self._total_intensities = total_intensities
@@ -858,6 +872,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
                 obsim = LCMS_ObservationModel(
                     model,
                     annotation_df=annotation_df,
+                    labelling_id=labelling_id,
                     total_intensities=total_intensities,
                     parameters=parameters,
                     clip_min=clip_min,
@@ -956,7 +971,8 @@ class BoundaryObservationModel(object):
 
     @property
     def boundary_id(self):
-        return self._bound_id.copy()
+        # return self._bound_id.copy()
+        return make_multidex({'BOM': self._bound_id}, 'BOM', 'boundary_id')
 
     def sample_observation(self, mu_bo, n_obs=1, **kwargs):
         raise NotImplementedError
@@ -1073,9 +1089,9 @@ def exclude_low_massiso(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc
-    from sbmfi.core.polytopia import coordinate_hit_and_run_cpp
+    # from sbmfi.core.polytopia import coordinate_hit_and_run_cpp
     import pickle
-    from sbmfi.inference.priors import UniformNetPrior
+    from sbmfi.inference.priors import UniNetFluxPrior
 
     import pandas as pd
 
@@ -1093,17 +1109,20 @@ if __name__ == "__main__":
     # observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
     # com = ClassicalObservationModel(model, kwargs['annotation_df'])
 
-    observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
-    total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
-    lcms = LCMS_ObservationModel(model, annotation_df, total_intensities, transformation='ilr')
-    model.set_fluxes(fluxes)
-    mdv = model.cascade()
-    obs = lcms(mdv, pandalize=True)
-    aa = pd.DataFrame(lcms._transformation.inv(obs.values), columns=lcms._observation_df.index)
-    # print(aa)
-    obs = lcms(mdv, n_obs=0, pandalize=True)
-    aa = pd.DataFrame(lcms._transformation.inv(obs.values), columns=lcms._observation_df.index)
-    # print(aa)
+    # observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
+    # total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
+    # lcms = LCMS_ObservationModel(model, annotation_df, total_intensities, 'niks', transformation='ilr')
+    sim = kwargs['basebayes']
+    print(sim.data_id)
+
+    # model.set_fluxes(fluxes)
+    # mdv = model.cascade()
+    # obs = lcms(mdv, pandalize=True)
+    # aa = pd.DataFrame(lcms._transformation.inv(obs.values), columns=lcms._observation_df.index)
+    # # print(aa)
+    # obs = lcms(mdv, n_obs=0, pandalize=True)
+    # aa = pd.DataFrame(lcms._transformation.inv(obs.values), columns=lcms._observation_df.index)
+    # # print(aa)
 
 
 
@@ -1135,7 +1154,6 @@ if __name__ == "__main__":
     # # obsmod_b.sample_observations(mdv, n_obs=3)
 
 
-    bs = 2
     # model, kwargs = spiro(backend='numpy', build_simulator=True, batch_size=bs)
     # model, kwargs = build_e_coli_anton_glc(backend='numpy', build_simulator=False, batch_size=bs)
     # model.set_measurements(model.measurements.list_attr('id') + ['glc__D_e'])

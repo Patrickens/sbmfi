@@ -68,8 +68,8 @@ class _BaseSimulator(object):
                 raise ValueError
             self._obmods[labelling_id] = obmod
             has_log_prob.append(hasattr(obmod, 'log_lik'))
-            self._obsize[labelling_id] = i, i + obmod._n_d
-            i += obmod._n_d
+            self._obsize[labelling_id] = i, i + obmod._nd
+            i += obmod._nd
 
         self._is_exact = all(has_log_prob) & (hasattr(boundary_observation_model, 'log_lik') if
                                               boundary_observation_model is not None else True)
@@ -79,7 +79,7 @@ class _BaseSimulator(object):
         self._substrate_df = substrate_df.loc[list(self._obmods.keys())]
 
         if boundary_observation_model is not None:
-            bo_id = boundary_observation_model.boundary_id
+            bo_id = boundary_observation_model.boundary_id.get_level_values(1)
             bo_fluxes_id = bo_id.to_series().replace({v: k for k, v in model._only_rev.items()})
             if not bo_fluxes_id.isin(model.labelling_fluxes_id).all():
                 raise ValueError
@@ -100,15 +100,12 @@ class _BaseSimulator(object):
     @property
     def data_id(self):
         if self._did is None:
-            did = {}
+            did = []
             for labelling_id, obmod in self._obmods.items():
-                did[labelling_id] = obmod.observation_id
-            if 'BOM' in did:
-                raise ValueError
+                did.extend(obmod.data_id.tolist())
             if self._bomsize > 0:
-                did['BOM'] = self._bom.boundary_id
-            self._did = make_multidex(did, 'labelling_id', 'data_id')
-            self._did.name = 'data_id'
+                did.extend(self._bom.boundary_id.tolist())
+            self._did = pd.MultiIndex.from_tuples(did, names=['labelling_id', 'data_id'])
         return self._did.copy()
 
     @property
@@ -212,12 +209,12 @@ class _BaseSimulator(object):
                 j, k = self._obsize[labelling_id]
                 part_mdvs = obmod._transformation.inv(data[..., j:k])  # = intensities
                 if normalize:
-                    part_mdvs = obmod.compute_observations(part_mdvs)
+                    part_mdvs = obmod.compute_observations(part_mdvs, select=False)
                 processed.append(part_mdvs)
             columns[labelling_id] = obmod._observation_df.index.copy()
         if (self._bomsize > 0) and append_bom and not is_mdv:
             processed.append(data[..., -self._bomsize:])
-            columns['BOM'] = self._bom.boundary_id
+            columns['BOM'] = self._bom.boundary_id.get_level_values(1)
         processed = self._la.cat(processed, -1)
         if pandalize:
             processed = pd.DataFrame(self._la.tonp(processed), index=index, columns=make_multidex(columns, name1='data_id'))
@@ -492,11 +489,12 @@ class DataSetSim(_BaseSimulator):
                 mp_pool.join()
         if show_progress:
             pbar.close()
+            result['running_time'] = pbar.format_dict['elapsed']
         return result
 
     def __call__(
             self, theta, n_obs=5, fluxes_per_task=None, close_pool=False, show_progress=False, pandalize=False,
-            **kwargs
+            return_time=False, **kwargs
     ):
         index = None
         if isinstance(theta, pd.DataFrame):
@@ -517,12 +515,15 @@ class DataSetSim(_BaseSimulator):
 
         if pandalize:
             return self._pandalize_data(data, index, n_obs)
-        return self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
+        data = self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
+        if return_time and show_progress:
+            return data, result['running_time']
+        return data
 
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniformNetPrior
+    from sbmfi.inference.priors import UniNetFluxPrior
     import pickle
     # model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0,)
     # bb = kwargs['basebayes']
@@ -539,19 +540,57 @@ if __name__ == "__main__":
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
+    from sbmfi.inference.complotting import SMC_PLOT
+    from sbmfi.inference.bayesian import SMC
+    from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
+    smc_tomek = "C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc"
+    v_rep = pd.read_excel(
+        r"C:\python_projects\sbmfi\src\sbmfi\inference\VREP_MCMC_e_coli_glc_anton_obsmod_copy_NEWWP.xlsx",
+        index_col=None)
+    pol = pickle.load(open(r"C:\python_projects\sbmfi\build_e_coli_anton_glc_F_round_pol.p", 'rb'))
+    psmc = SMC_PLOT(pol, inference_data=smc_tomek, v_rep=v_rep)
+    # model, kwargs = build_e_coli_anton_glc(
+    #     backend='numpy',
+    #     auto_diff=False,
+    #     build_simulator=True,
+    #     ratios=False,
+    #     batch_size=25,
+    #     which_measurements='tomek',
+    #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    #     seed=1,
+    # )
+    import pickle
 
-    model, kwargs = spiro(backend='torch', v2_reversible=True, build_simulator=True, which_measurements='lcms',
-                          which_labellings=list('AB'))
-    up = UniformNetPrior(model._fcm, cache_size=50)
-    dss = DataSetSim(
-        model,
+    # pickle.dump((model, kwargs), open('m_k.p', 'wb'))
+    model, kwargs = pickle.load(open('m_k.p', 'rb'))
+
+    bay = kwargs['basebayes']
+    up = UniNetFluxPrior(model, cache_size=2000)
+    smc = SMC(
+        model=model,
         substrate_df=kwargs['substrate_df'],
-        mdv_observation_models=kwargs['basebayes']._obmods,
-        boundary_observation_model=kwargs['basebayes']._bom,
+        mdv_observation_models=bay._obmods,
+        boundary_observation_model=bay._bom,
+        prior=up,
         num_processes=0,
     )
-    theta = up.sample((10,))
-    result = dss.simulate_set(theta, what='all', n_obs=0, show_progress=True, close_pool=False)
-    mdvs = result['mdv']
 
-    data = dss.simulate(mdvs=mdvs, n_obs=0)
+    smc.to_partial_mdvs(psmc._data.posterior_predictive.data.values[-1], normalize=False, pandalize=False)
+
+    #
+    # model, kwargs = spiro(backend='torch', v2_reversible=True, build_simulator=True, which_measurements='lcms',
+    #                       which_labellings=list('AB'))
+    # up = UniNetFluxPrior(model._fcm, cache_size=50)
+    # dss = DataSetSim(
+    #     model,
+    #     substrate_df=kwargs['substrate_df'],
+    #     mdv_observation_models=kwargs['basebayes']._obmods,
+    #     boundary_observation_model=kwargs['basebayes']._bom,
+    #     num_processes=0,
+    # )
+    # theta = up.sample((10,))
+    # result = dss.simulate_set(theta, what='all', n_obs=0, show_progress=True, close_pool=False)
+    # mdvs = result['mdv']
+    #
+    # data = dss.simulate(mdvs=mdvs, n_obs=0)

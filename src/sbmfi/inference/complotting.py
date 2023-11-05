@@ -1,3 +1,5 @@
+import math
+
 from sbmfi.core.polytopia import PolytopeSamplingModel, V_representation, fast_FVA, LabellingPolytope
 from sbmfi.inference.arviz_monkey import *
 import pandas as pd
@@ -47,12 +49,15 @@ class PlotMonster(object):
         hv.extension(hv_backend)
         self._hvb = hv_backend == 'matplotlib'
         self._pol = polytope
+        if isinstance(inference_data, str):
+            inference_data = az.from_netcdf(inference_data)
         self._data = inference_data
 
         prior_color = '#2855de'
         post_color = '#e02450'
 
         self._colors = {
+            'polytope': '#ffec58',
             'true': '#ff0000',
             'map': '#13f269',
             'prior': prior_color,
@@ -66,26 +71,51 @@ class PlotMonster(object):
             'posterior_predictive': 'data',
             'prior_predictive': 'data',
         }
+        self._var_id_map = {
+            'data': 'data_id',
+            'theta': 'theta_id',
+        }
         self._px = 1/plt.rcParams['figure.dpi']
 
-        if not all(polytope.A.columns.isin(inference_data.posterior.theta_id.values)):
+        self._ingroup = 'posterior'
+        if ('posterior' not in inference_data) and ('prior' in inference_data):
+            self._ingroup = 'prior'
+
+        if not all(polytope.A.columns.isin(inference_data[self._ingroup].theta_id.values)):
             raise ValueError
 
         net_pol = thermo_2_net_polytope(polytope)
         if v_rep is None:
-            v_rep = V_representation(polytope, number_type='fraction')
+            v_rep = V_representation(net_pol, number_type='fraction')
         else:
-            if not v_rep.columns.equals(polytope.A.columns):
+            if not v_rep.columns.equals(net_pol.A.columns):
                 raise ValueError
 
         self._v_rep = v_rep
         self._fva = fast_FVA(polytope)
-        self._odf = self._load_observed_data()
+        if 'observed_data' in self._data:
+            self._odf = self._load_observed_data()
         self._ttdf = self._load_true_theta()
 
     @property
     def obsdat_df(self):
         return self._odf
+
+    @property
+    def theta_id(self):
+        if 'prior' in self._data:
+            return self._data.prior.theta_id.values
+        elif 'posterior' in self._data:
+            return self._data.posterior.theta_id.values
+        else:
+            raise ValueError
+
+    @property
+    def data_id(self):
+        if 'posterior_predictive' in self._data:
+            return self._data.posterior_predictive.data_id.values
+        elif 'prior_predictive' in self._data:
+            return self._data.prior_predictive.data_id.values
 
     def _axes_range(
             self,
@@ -94,13 +124,16 @@ class PlotMonster(object):
             label=None,
             tol=12,
     ):
-        fva_min = self._fva.loc[var_id, 'min']
-        fva_max = self._fva.loc[var_id, 'max']
+        if '_xch' in var_id:
+            range = (-0.05, 1.05)
+        else:
+            fva_min = self._fva.loc[var_id, 'min']
+            fva_max = self._fva.loc[var_id, 'max']
 
-        if tol > 0:
-            tol = abs(fva_min - fva_max) / 10
+            if tol > 0:
+                tol = abs(fva_min - fva_max) / 10
+            range = (fva_min - tol, fva_max + tol)
 
-        range = (fva_min - tol, fva_max + tol)
         if return_dimension:
             kwargs = dict(spec=var_id, range=range)
             if label is not None:
@@ -114,16 +147,42 @@ class PlotMonster(object):
         verts = np.concatenate([verts, [verts[0]]])
         return hull.points[verts]
 
-    def _get_samples(self, *args, group='posterior', num_samples=None):
-        print(*args)
-        return az.extract(
-            self._data,
+    def _get_samples(self, *args, obs_idx=None, group='posterior', num_samples=30000):
+        slicer = list(args)
+        first_item = slicer[0]
+        if len(slicer) == 1 and isinstance(first_item, Iterable) and not isinstance(first_item, str):
+            slicer = slicer[0]
+
+        if isinstance(obs_idx, int):
+            obs_idx = [obs_idx]
+        elif isinstance(obs_idx, Iterable):
+            obs_idx = list(obs_idx)
+
+        if ('epsilons' in self._data.attrs) and ('posterior' in group):  # this signals that we are using an SMC dataset
+            last_chain = self._data[group]['chain'].values[-1]
+            data = self._data.sel(chain=[last_chain])
+        else:
+            data = self._data
+
+        var_names = self._group_var_map[group]
+
+        data = az.extract(
+            data,
             group=group,
-            var_names=self._group_var_map[group],
+            var_names=var_names,
             combined=True,
             num_samples=num_samples,
             rng=True,
-        ).loc[list(args)].values.T
+        )  # <class 'xarray.core.dataarray.DataArray'> FUCK I HATE XARRAY IT IS SO FUCKING COMPLICATED
+
+        coord_id = self._var_id_map[var_names]
+        result = data.sel({coord_id: slicer}).values
+        if 'obs_idx' in data.coords:
+            if obs_idx is None:
+                obs_idx = data.coords['obs_idx'].values
+            result = result[obs_idx].swapaxes(1, 2)
+            result = result.reshape(math.prod(result.shape[:-1]), result.shape[-1]).T
+        return result.T
 
     def _plot_distribution(
             self,
@@ -146,11 +205,13 @@ class PlotMonster(object):
         if self._hvb:
             kwargs.pop('muted', None)
             kwargs.pop('muted_alpha', None)
+            if 'color' in kwargs:
+                kwargs['facecolor'] = kwargs.pop('color')
         return hv.Distribution(to_plot, kdims=[var_id], label=label).opts(**kwargs)
 
-    def _get_chain(self, *args, chain_idx=0, group='posterior'):
+    def _get_chain(self, *args, chain_idx=-1, group='posterior'):
         var = self._group_var_map[group]
-        return self._data[group][var].sel({f'{var}_id': list(args)}).values[chain_idx]
+        return self._data[group][var].sel({f'{var}_id': list(*args)}).values[chain_idx]
 
     def _size_opts(self, width=500, height=400):
         kwargs = dict(height=height, width=width,)
@@ -163,17 +224,30 @@ class PlotMonster(object):
             var_id,
             num_samples=30000,
             group='posterior',
-            include_fva = True,
+            include_fva = False,
+            tol = 12,
+            color=None,
+            label=None,
     ):
         sampled_points = self._get_samples(var_id, group=group, num_samples=num_samples)
-        if group in ['posterior', 'prior']:
-            xax = self._axes_range(var_id)
+        if group in ['posterior', 'prior'] and var_id in self._fva.index:
+            xax = self._axes_range(var_id, tol=tol)
         else:
-            xax = hv.Dimension(var_id)
-        plots = [
-            self._plot_distribution(sampled_points, xax, group, color=self._colors[group])
-        ]
+            maxx = sampled_points.max()
+            minn = sampled_points.min()
+            if tol > 0:
+                tol = abs(minn - maxx) / 10
+            range = (minn - tol, maxx + tol)
+            xax = hv.Dimension(var_id, range=range)
+
+        if color is None:
+            color = self._colors[group]
+        if label is None:
+            label = group
+
+        density = self._plot_distribution(sampled_points, xax, label, color=color)
         if include_fva and (group in ['posterior', 'prior']):
+            plots = [density]
             fva_min, fva_max = self._axes_range(var_id, return_dimension=False, tol=0)
             opts = dict(color='#000000', line_dash='dashed')
             if self._hvb:
@@ -182,30 +256,42 @@ class PlotMonster(object):
                 hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
             ])
 
-        return hv.Overlay(plots).opts(xrotation=90, show_grid=True, fontsize=self._FONTSIZES, show_legend=True, **self._size_opts())
+            return hv.Overlay(plots).opts(
+                xrotation=90, show_grid=True, fontsize=self._FONTSIZES,
+                show_legend=True, legend_position='right', **self._size_opts()
+            )
+        return density.opts(
+                xrotation=90, show_grid=True, fontsize=self._FONTSIZES,
+                show_legend=True, **self._size_opts()
+            )
 
     def _plot_area(self, vertices: np.ndarray, var1_id, var2_id, label=None, color='#ebb821'):
         xax = self._axes_range(var1_id)
         yax = self._axes_range(var2_id)
+
+        opts = dict(color=color)
+        if self._hvb:
+            opts['facecolor'] = opts.pop('color')
+
         plots = [
             hv.Area(vertices, kdims=[xax], vdims=[yax], label=label).opts(
-                alpha=0.2, show_grid=True, width=800, height=600, color=color
+                alpha=0.2, show_grid=True, **{**opts, **self._size_opts()}
             ),
-            hv.Curve(vertices, kdims=[xax], vdims=[yax]).opts(color=color)
+            hv.Curve(vertices, kdims=[xax], vdims=[yax], label=label).opts(color=color)
         ]
         return hv.Overlay(plots).opts(fontsize=self._FONTSIZES)
 
     def _plot_polytope_area(self, var1_id, var2_id):
         pol_verts = self._v_rep.loc[:, [var1_id, var2_id]].drop_duplicates()
         vertices = self._process_points(pol_verts.values)
-        return self._plot_area(vertices, var1_id, var2_id, label='polytope')
+        return self._plot_area(vertices, var1_id, var2_id, label='polytope', color=self._colors['polytope'])
 
     def _data_hull(
             self,
             var1_id,
             var2_id,
             group='posterior',
-            num_samples=None
+            num_samples=30000
     ):
         sampled_points = self._get_samples(var1_id, var2_id, group=group, num_samples=num_samples)
         vertices = self._process_points(sampled_points)
@@ -234,13 +320,13 @@ class PlotMonster(object):
         )
 
     def _load_true_theta(self):
-        theta_id = self._data.posterior['theta_id'].values
+        theta_id = self._data[self._ingroup]['theta_id'].values
         true_theta = self._data.attrs.get('true_theta')
         if true_theta is None:
             return
         return pd.DataFrame(true_theta, index=theta_id).T
 
-    def point_plot(self, var1_id, var2_id=None, what_var='theta', what_point='true', label=None):
+    def point_plot(self, var1_id, var2_id=None, what_var='theta', what_point='true', label=None, color=None):
         if what_var == 'theta':
             xax = self._axes_range(var1_id)
             if var2_id is not None:
@@ -255,6 +341,7 @@ class PlotMonster(object):
             if what_var not in self._map:
                 raise ValueError(f'{what_var} not in InferenceData')
             to_plot = self._map[what_var]
+            linstyle = 'dashed'
         elif what_point == 'true':
             if self._ttdf is None:
                 raise ValueError('no true theta in this InferenceData')
@@ -262,18 +349,24 @@ class PlotMonster(object):
                 to_plot = self._ttdf
             else:
                 to_plot = self._odf
+            linstyle = 'dotted'
 
         if label is None:
             label = what_point
+        if color is None:
+            color = self._colors[what_point]
         if var2_id is None:
             data = to_plot.loc[:, var1_id].values
-            opts = dict(color=self._colors[what_point], line_dash='dashed', xrotation=90, line_width=2.5, show_legend=True)
+            opts = dict(color=color, line_dash=linstyle, xrotation=90, line_width=2.5, show_legend=True)
             if self._hvb:
                 opts['linewidth'] = opts.pop('line_width')
                 opts['linestyle'] = opts.pop('line_dash')
             return hv.VLine(data).opts(**opts) * hv.Spikes(data, label=label).opts(**opts)
+        opts = dict(size=22)
+        if self._hvb:
+            opts['s'] = opts.pop('size')
         return hv.Points(to_plot.loc[:, [var1_id, var2_id]], kdims=[xax, yax], label=what_point).opts(
-            color=self._colors[what_point], size=7, fontsize=self._FONTSIZES
+            color=color, fontsize=self._FONTSIZES, **opts
         )
 
     def observed_data_plot(self, var1_id, var2_id=None, what='map'):
@@ -295,9 +388,10 @@ class PlotMonster(object):
             true = self.point_plot(var_id, what_var='data', what_point='true')
             map = self.point_plot(var_id, what_var='data', what_point='map')
             width = 600 if i % cols == cols - 1 else 400
+            size_opts = self._size_opts(width=width)
             panel = (postpred * priopred * true * map).opts(
-                legend_position='right', show_legend=show_legend, width=width, show_grid=True, fontsize=self._FONTSIZES,
-                ylabel='',
+                legend_position='right', show_legend=show_legend, show_grid=True, fontsize=self._FONTSIZES,
+                ylabel='', **size_opts
             )
             plots.append(panel)
 
@@ -310,10 +404,9 @@ class PlotMonster(object):
             self._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group),
         ]
         if group == 'posterior':
-            plots.extend([
-                self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='map'),
-                self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='true')
-            ])
+            plots.append(self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='true'))
+            if hasattr(self, '_map'):
+                plots.append(self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='map'))
         return hv.Overlay(plots).opts(legend_position='right', show_legend=True, fontsize=self._FONTSIZES)
 
 
@@ -329,6 +422,8 @@ class MCMC_PLOT(PlotMonster):
         self._map = self._load_MAP()
 
     def _load_MAP(self):
+        if 'sample_stats' not in self._data:
+            return
         lp = self._data.sample_stats.lp.values
         chain_idx, draw_idx = np.argwhere(lp == lp.max()).T
         row, col = chain_idx[0], draw_idx[0]
@@ -362,9 +457,11 @@ class SMC_PLOT(PlotMonster):
     ):
         super().__init__(polytope, inference_data, v_rep, hv_backend)
 
-    def plot_evolution(self, var1_id, var2_id=None, include_prior=True):
+    def plot_evolution(self, var1_id, var2_id=None, include_prior=True, include_fva=True):
         plots = []
+
         if var2_id is None:
+            xax = self._axes_range(var1_id)
             num_chains = len(self._data['posterior']['chain'].values)
             addon = 1 if include_prior else 0
             for i in range(num_chains + addon):
@@ -383,9 +480,25 @@ class SMC_PLOT(PlotMonster):
                         color = self._colors['posterior']
                         label = 'posterior'
                 plots.append(
-                    self._plot_distribution(to_plot, var_id=var1_id, label=label, color=color, muted=muted)
+                    self._plot_distribution(to_plot, var_id=xax, label=label, color=color, muted=muted)
                 )
+            if include_fva and (var2_id is None):
+                fva_min, fva_max = self._axes_range(var1_id, return_dimension=False, tol=0)
+                opts = dict(color='#000000', line_dash='dashed')
+                if self._hvb:
+                    opts['linestyle'] = opts.pop('line_dash')
+                plots.extend([
+                    hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
+                ])
         return hv.Overlay(plots).opts(legend_position='right', fontsize=self._FONTSIZES, **self._size_opts(width=600), )
+
+    # def _get_samples(self, *args, chain=None, obs_idx=0, group='posterior', num_samples=30000):
+    #     if (chain is None) and ('posterior' in group):
+    #         chain = -1
+    #     print(args)
+    #     aa = PlotMonster._get_samples(self, *args, chain=chain, obs_idx=obs_idx, group=group, num_samples=num_samples)
+    #     bb = self._get_chain(*args, chain_idx=-1, group=group)
+    #     print(bb.shape, aa.shape)
 
 
 def speed_plot():
@@ -496,9 +609,7 @@ def PPC_PLOT():
     tomek_ids = pd.Series(pmcmc_tomek._data.posterior_predictive.data_id.values)
     anton_ids = anton_ids.str.replace('_{M-}', '', regex=False)
     shared = anton_ids.loc[anton_ids.isin(tomek_ids)].values
-    print(shared)
     varid = shared[1]
-    print(varid)
 
     plot = pmcmc_anton.point_plot(varid, what_var='data')
 
@@ -506,31 +617,85 @@ def PPC_PLOT():
 
 
 
-
-
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
+    from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
     from bokeh.plotting import figure, output_file, save
+    import pickle
+
+    pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
+    v_rep = pd.read_excel(
+        'C:\python_projects\sbmfi\src\sbmfi\inference\VREP_MCMC_e_coli_glc_anton_obsmod_copy_NEWWP.xlsx')
+    smc_res = az.from_netcdf("C:/python_projects/sbmfi/SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc")
+    smc_res = smc_res.sel(draw=slice(5000, None))
+
+    smp = SMC_PLOT(pol, smc_res, v_rep=v_rep, hv_backend='matplotlib')
+
+    var1 = ['[1]Glc: ilr_val__L_c_0', '[1]Glc: ilr_val__L_c_1', '20% [U]Glc: ilr_2pg_c_0']
+
+    data = smp._get_samples(var1, group='posterior_predictive')
+    theta = smp._get_samples('R_svd0', group='posterior')
+    # smp.density_plot(varr, group='posterior_predictive', tol=20, label='konker')
+
+
+    # model, kwargs = build_e_coli_anton_glc(
+    #     backend='torch',
+    #     auto_diff=False,
+    #     build_simulator=True,
+    #     ratios=False,
+    #     batch_size=25,
+    #     which_measurements=None,
+    #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    #     seed=1,
+    # )
+    # print(model._fcm.theta_id)
+
+    # var = 'FUM_xch'
+    # v_rep = pd.read_excel('VREP_MCMC_e_coli_glc_anton_obsmod_copy_NEWWP.xlsx')
+    # print(v_rep.shape)
+    # spres = az.from_netcdf("C:\python_projects\sbmfi\MCMC_e_coli_glc_anton_obsmod_copy_NEWWP.nc")
+    # mc = MCMC_PLOT(model._fcm._sampler._F_round, inference_data=spres, v_rep=v_rep)
+    # aa = mc.density_plot(var, group='posterior')
+    # bb = mc.density_plot(var, group='prior')
+    # output_file(filename="custom_filename.html", title="plot1")
+    # show(hv.render(aa * bb))
+    #
+    # spres = az.from_netcdf("C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc")
+    # mc = SMC_PLOT(model._fcm._sampler._F_round, inference_data=spres, v_rep=v_rep)
+    # # mc._v_rep.to_excel('VREP_MCMC_e_coli_glc_anton_obsmod_copy_NEWWP.xlsx', index=False)
+    # aa = mc.density_plot(var, group='posterior')
+    # bb = mc.density_plot(var, group='prior')
+    # output_file(filename="custom_filename.html", title="plot2")
+    # show(hv.render(aa * bb))
+
     # model, kwargs = spiro(
     #     seed=None,
     #     batch_size=100,
     #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
     #     which_measurements='com', which_labellings=['A'], v5_reversible=True
     # )
-    model, kwargs = spiro(
-        seed=None,
-        batch_size=10,
-        backend='torch', v2_reversible=True, ratios=False, build_simulator=True, which_labellings=['A', 'B'],
-        v5_reversible=True
-    )
-    spres = az.from_netcdf("C:\python_projects\sbmfi\src\sbmfi\inference\spiro_TEST.nc")
-    v_rep = pd.read_excel('vrep.xlsx')
-    mc = MCMC_PLOT(model._fcm.make_theta_polytope(), inference_data=spres, v_rep=v_rep)
-    # R_svd0    R_svd1    R_svd2    R_svd3  v2_xch  v5_xch
-    # aa = mc.point_plot('R_svd0', 'R_svd1')
-    aa = mc.grand_theta_plot('R_svd0', 'v5_xch')
-    # aa = mc.density_plot('R_svd3')
+    # model, kwargs = spiro(
+    #     seed=None,
+    #     batch_size=10,
+    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True, which_labellings=['A', 'B'],
+    #     v5_reversible=True
+    # )
+    # v_rep = pd.read_excel('vrep.xlsx')
+    # var = 'R_svd3'
+    #
+    # spres = az.from_netcdf("C:\python_projects\sbmfi\src\sbmfi\inference\spiro_TEST_SMC.nc")
+    # mc = SMC_PLOT(model._fcm.make_theta_polytope(), inference_data=spres, v_rep=v_rep)
+    # # R_svd0    R_svd1    R_svd2    R_svd3  v2_xch  v5_xch
+    # aa = mc.plot_evolution(var)
     # output_file(filename="custom_filename.html", title="plot2")
-    show(hv.render(aa))
-    # mc._v_rep.to_excel('vrep.xlsx', index=False)
+    # show(hv.render(aa))
+    # # mc._v_rep.to_excel('vrep.xlsx', index=False)
+    # #
+    # spres = az.from_netcdf("C:\python_projects\sbmfi\src\sbmfi\inference\spiro_TEST_MCMC.nc")
+    # spres = spres.sel(draw=slice(1000, None))
+    # mc = MCMC_PLOT(model._fcm.make_theta_polytope(), inference_data=spres, v_rep=v_rep)
+    # aa = mc.density_plot(var)
+    # output_file(filename="custom_filename.html", title="plot1")
+    # show(hv.render(aa))
 

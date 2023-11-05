@@ -115,7 +115,7 @@ def obervervator_worker(task: dict, model=None):
     observation_model = _OBSMODS[task['input_labelling'].name]
     n_obshape = max(1, n_obs)
     slicer = 0 if n_obs == 0 else slice(None)
-    data_chunk = MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], n_obshape, observation_model._n_d))
+    data_chunk = MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], n_obshape, observation_model._nd))
     bs = MODEL._la._batch_size
 
     for i in range(0, mdv_chunk.shape[0], bs):

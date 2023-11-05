@@ -669,7 +669,8 @@ class PolytopeSamplingModel(object):
             basis_coordinates = 'rounded',
             linalg: LinAlg = None,
             hemi_sphere=False,
-            scale_bound = None,
+            scale_bound=1.0,
+            radius_root=0,
             **kwargs
     ):
         if kernel_basis not in ['rref', 'svd']:
@@ -729,6 +730,9 @@ class PolytopeSamplingModel(object):
 
         self._hemi = hemi_sphere
         self._bound = scale_bound if scale_bound is None else abs(scale_bound)
+        self._root = radius_root
+        if self._root == 0:
+            self._root = len(self._reaction_ids)  # I think the best scaling of radius is the number of dimensions
         self._la = linalg
         new = self.to_linalg(linalg)
         self.__dict__.update(new.__dict__)
@@ -1273,9 +1277,6 @@ class FluxCoordinateMapper(object):
             fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.fluxes_id)
         return fluxes
 
-    def append_xch_flux_samples(self, **kwargs):
-        raise NotImplementedError
-
     def map_theta_2_fluxes(self, theta: pd.DataFrame, return_thermo=False, pandalize=False):
         index = None
         if isinstance(theta, pd.DataFrame):
@@ -1624,24 +1625,28 @@ def compute_volume(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
-    from sbmfi.inference.priors import UniformNetPrior
+    from sbmfi.inference.priors import UniNetFluxPrior
     import pandas as pd
 
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    model, kwargs=spiro(backend='numpy', v2_reversible=True, v5_reversible=True, build_simulator=False, which_measurements=None)
+    model, kwargs=spiro(backend='numpy', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None)
     fcm = FluxCoordinateMapper(
         model,
         kernel_basis='rref',
         logit_xch_fluxes=False,
-        basis_coordinates='rounded',
+        basis_coordinates='cylinder',
         pr_verbose=False,
-        hemi_sphere=True,
+        hemi_sphere=False,
         scale_bound=2.0,
     )
-    res = sample_polytope(fcm._sampler, n=50, n_burn=0, n_chains=5, n_cdf=6)
+    sampler = fcm._sampler
+    res = sample_polytope(sampler, n=10, n_burn=0, n_chains=5, n_cdf=6, return_what='rounded')
+    print(pd.DataFrame(res['rounded'], columns=sampler.basis_id))
+    ball = sampler._m
+
     # up = UniformNetPrior(fcm, cache_size=10)
     # s = up.sample((10, ))
     # df = fcm.map_theta_2_fluxes(s, pandalize=True)

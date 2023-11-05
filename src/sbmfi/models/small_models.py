@@ -2,7 +2,7 @@ import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniformNetPrior
+from sbmfi.inference.priors import UniNetFluxPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel, MDV_ObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
@@ -12,7 +12,7 @@ import sys, os
 import cobra
 from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
-
+from sbmfi.lcmsanalysis.formula import Formula
 
 def spiro(
         backend='numpy', auto_diff=False, batch_size=1, add_biomass=True, v2_reversible=False,
@@ -145,34 +145,34 @@ def spiro(
         }
 
     annotation_df = pd.DataFrame([
-        ('H', 1, 'M-H', 3.0, 0.1, None, 3e3),
-        ('H', 0, 'M-H', 2.0, 0.1, None, 3e3),
+        ('H', 1, 'M-H', 3.0, 1.0, 0.1, None, 3e3),
+        ('H', 0, 'M-H', 2.0, 1.0, 0.1, None, 3e3),
 
-        ('H', 1, 'M+F', 5.0, 0.3, None, 3e3),
-        ('H', 1, 'M+Cl', 88.0, 0.3, None, 2e3),
-        ('H', 0, 'M+F', 4.0, 0.3, None, 3e3),  # to indicate that da_df is not yet in any order!
-        ('H', 0, 'M+Cl', 89.0, 0.3, None, 2e3),
+        ('H', 1, 'M+F', 5.0,   1.0, 0.3, None, 3e3),
+        ('H', 1, 'M+Cl', 88.0, 1.0, 0.3, None, 2e3),
+        ('H', 0, 'M+F', 4.0,   1.0, 0.3, None, 3e3),  # to indicate that da_df is not yet in any order!
+        ('H', 0, 'M+Cl', 89.0, 1.0, 0.3, None, 2e3),
 
-        ('P', 1, 'M-H', 3.7, 0.2, None, 2e3),  # an annotated metabolite that is not in the model
-        ('P', 2, 'M-H', 4.7, 0.2, None, 2e3),
-        ('P', 3, 'M-H', 5.7, 0.2, None, 2e3),
+        ('P', 1, 'M-H', 3.7, 3.0, 0.2, None, 2e3),  # an annotated metabolite that is not in the model
+        ('P', 2, 'M-H', 4.7, 3.0, 0.2, None, 2e3),
+        ('P', 3, 'M-H', 5.7, 3.0, 0.2, None, 2e3),
 
-        ('C', 0, 'M-H', 1.5, 0.2, None, 7e5),
-        ('C', 3, 'M-H', 4.5, 0.2, None, 7e5),
-        ('C', 4, 'M-H', 5.5, 0.2, None, 7e5),
+        ('C', 0, 'M-H', 1.5, 4.0, 0.2, None, 7e5),
+        ('C', 3, 'M-H', 4.5, 4.0, 0.2, None, 7e5),
+        ('C', 4, 'M-H', 5.5, 4.0, 0.2, None, 7e5),
 
-        ('D', 2, 'M-H', 12.0, 0.1, None, 1e5),
-        ('D', 0, 'M-H', 9.0, 0.1, None, 1e5),
-        ('D', 3, 'M-H', 13.0, 0.1, None, 1e5),
+        ('D', 2, 'M-H', 12.0, 5.0, 0.1, None, 1e5),
+        ('D', 0, 'M-H', 9.0,  5.0, 0.1, None, 1e5),
+        ('D', 3, 'M-H', 13.0, 5.0, 0.1, None, 1e5),
 
-        ('L|[1,2]', 0, 'M-H', 14.0, 0.1 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
-        ('L|[1,2]', 1, 'M-H', 15.0, 0.1 * L_12_omega, L_12_omega, 4e4),
+        ('L|[1,2]', 0, 'M-H', 14.0, 6.0, 0.1 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
+        ('L|[1,2]', 1, 'M-H', 15.0, 6.0, 0.1 * L_12_omega, L_12_omega, 4e4),
 
-        ('L', 0, 'M-H', 14.0, 0.1, None, 4e5),
-        ('L', 1, 'M-H', 15.0, 0.1, None, 4e5),
-        ('L', 2, 'M-H', 16.0, 0.1, None, 4e5),
-        ('L', 5, 'M-H', 19.0, 0.1, None, 4e5),
-    ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'sigma', 'omega', 'total_I'])
+        ('L', 0, 'M-H', 14.0, 6.0, 0.1, None, 4e5),
+        ('L', 1, 'M-H', 15.0, 6.0, 0.1, None, 4e5),
+        ('L', 2, 'M-H', 16.0, 6.0, 0.1, None, 4e5),
+        ('L', 5, 'M-H', 19.0, 6.0, 0.1, None, 4e5),
+    ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'rt', 'sigma', 'omega', 'total_I'])
     formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
     annotation_df['formula'] = annotation_df['met_id'].map(formap)
 
@@ -265,10 +265,12 @@ def spiro(
     if (batch_size == 1) and build_simulator:
         model.set_fluxes(fluxes=fluxes)
 
+    observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
+    annotation_df['mz'] = 0.0
+    annotation_df.loc[observation_df['annot_df_idx'], 'mz'] = observation_df['isotope_decomposition'].apply(lambda x: Formula(x).mass()).values
+
     measurements, basebay, theta = None, None, None
     if which_measurements is not None:
-        observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
-
         if which_measurements == 'lcms':
             annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}
             total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
@@ -287,7 +289,7 @@ def spiro(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
-        up = UniformNetPrior(model._fcm, cache_size=1000)
+        up = UniNetFluxPrior(model._fcm, cache_size=1000)
 
         basebay = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
@@ -634,8 +636,10 @@ if __name__ == "__main__":
     model, kwargs = spiro(
         seed=9, batch_size=1,
         backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
-        which_measurements='com', which_labellings=['A', 'B'], v5_reversible=True, include_bom=False
+        which_measurements='com', which_labellings=['A', 'B'], v5_reversible=True, include_bom=False, compute_mz=True
     )
+
+    print(kwargs['annotation_df'])
     #
     # dss = kwargs['basebayes']
     # data = kwargs['measurements']

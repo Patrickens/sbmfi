@@ -33,7 +33,7 @@ from pathlib import Path
 import shutil
 from sbmfi.core.model import RatioMixin
 from sbmfi.inference.priors import (
-    UniformNetPrior,
+    UniNetFluxPrior,
 )
 from sbmfi.core.simulator import (
     BoundaryObservationModel,
@@ -748,7 +748,7 @@ def _create_multi_modal_dataset(
     model, kwargs = multi_modal(backend='torch', batch_size=50, ratios=False)
 
     # NB boundary model has to be first, since it might change the order of labelling_reaction!
-    prior = UniformNetPrior(
+    prior = UniNetFluxPrior(
         model=model,
         cache_size=n_train + n_validate,
         num_processes=1,
@@ -804,7 +804,7 @@ def _create_spiro_dataset(
 
     # NB boundary model has to be first, since it might change the order of labelling_reaction!
     bom = BoundaryObservationModel(model, measured_boundary_fluxes=['a_in', 'd_out', 'bm'], check_noise=False)
-    prior = UniformNetPrior(
+    prior = UniNetFluxPrior(
         model=model,
         cache_size=n_train + n_validate,
         num_processes=1,
@@ -863,7 +863,7 @@ def _create_coli_glc_dataset(
     model.reactions.get_by_id('EX_glc__D_e').bounds = (-10.0, -8.0)
 
     bom = BoundaryObservationModel(model, measured_boundary_fluxes=[model.biomass_id, 'EX_glc__D_e'], check_noise=False)
-    prior = UniformNetPrior(model=model, cache_size=n_train, num_processes=1, logit_xch_fluxes=True)
+    prior = UniNetFluxPrior(model=model, cache_size=n_train, num_processes=1, logit_xch_fluxes=True)
 
     substrate_df = kwargs['substrate_df'].loc[labellings]
 
@@ -932,7 +932,7 @@ def _create_designs(from_scratch=True):
     model.reactions.get_by_id(model.biomass_id).bounds = bm_bounds
     model.reactions.get_by_id(ex_id).bounds = (-10.0, -8.0)
 
-    prior = UniformNetPrior(model=model, cache_size=n, num_processes=1, logit_xch_fluxes=True)
+    prior = UniNetFluxPrior(model=model, cache_size=n, num_processes=1, logit_xch_fluxes=True)
     substrate_df = kwargs['substrate_df']
     if labellings is not None:
         substrate_df = substrate_df.loc[labellings]
