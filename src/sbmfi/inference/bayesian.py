@@ -1357,7 +1357,7 @@ if __name__ == "__main__":
     # sdf = kwargs2['substrate_df']
     # mcmc = MCMC(model2, sdf, bb2._obmods, prior=up, boundary_observation_model=bb2._bom)
     # mcmc.set_measurement(x_meas=kwargs2['measurements'])
-    # mcmc.set_true_theta(theta=kwargs2['theta'])
+    mcmc.set_true_theta(theta=kwargs2['theta'])
     # res = mcmc.run(
     #     n=20, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=2, chord_std=0.6, peskunize=True,
     #     chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4

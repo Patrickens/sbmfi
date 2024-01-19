@@ -131,7 +131,7 @@ class _BaseSimulator(object):
 
     def simulate(
             self,
-            theta,
+            theta=None,
             n_obs=3,
             return_mdvs=False, # whether to return mdvs, observation_average or noisy observations
             pandalize=False,
@@ -156,7 +156,7 @@ class _BaseSimulator(object):
             fluxes = self._model._fluxes
         elif return_mdvs:
             raise ValueError('return passed MDVS?')
-        else:
+        else:  # this is for when we pass theta and mdvs and the model batch_size does not match the shape of fluxes
             fluxes = self._fcm.frame_fluxes(fluxes, index, trim=True)
             n_f = mdvs.shape[0]
 
@@ -427,7 +427,6 @@ class DataSetSim(_BaseSimulator):
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
 
         fluxes = self._fcm.map_theta_2_fluxes(theta)
-
         if fluxes.shape[0] <= self._la._batch_size:
             raise ValueError('impossible')
 
@@ -524,59 +523,74 @@ class DataSetSim(_BaseSimulator):
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.inference.priors import UniNetFluxPrior
+    from sbmfi.inference.complotting import SMC_PLOT
+    from sbmfi.inference.bayesian import SMC
+    from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
     import pickle
-    # model, kwargs = spiro(backend='torch', which_measurements='com', build_simulator=True, L_12_omega=1.0,)
-    # bb = kwargs['basebayes']
-    # sdf = kwargs['substrate_df']
-    # dss = DataSetSim(model, sdf, bb._obmods)
-    # up = UniformNetPrior(model)
-    # # theta = up.sample((30,))
-    # #
-    # # result = dss.simulate_set(theta)
-    # # dss.to_hdf('spriro.h5', result=result, dataset_id='niks', append=True)
-    #
-    # theta = dss.read_hdf('spriro.h5', what='theta', dataset_id='niks')
 
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
-    from sbmfi.inference.complotting import SMC_PLOT
-    from sbmfi.inference.bayesian import SMC
-    from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
-    smc_tomek = "C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc"
-    v_rep = pd.read_excel(
-        r"C:\python_projects\sbmfi\src\sbmfi\inference\VREP_MCMC_e_coli_glc_anton_obsmod_copy_NEWWP.xlsx",
-        index_col=None)
-    pol = pickle.load(open(r"C:\python_projects\sbmfi\build_e_coli_anton_glc_F_round_pol.p", 'rb'))
-    psmc = SMC_PLOT(pol, inference_data=smc_tomek, v_rep=v_rep)
-    # model, kwargs = build_e_coli_anton_glc(
-    #     backend='numpy',
-    #     auto_diff=False,
-    #     build_simulator=True,
-    #     ratios=False,
-    #     batch_size=25,
-    #     which_measurements='tomek',
-    #     which_labellings=['20% [U]Glc', '[1]Glc'],
-    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-    #     seed=1,
-    # )
-    import pickle
 
-    # pickle.dump((model, kwargs), open('m_k.p', 'wb'))
-    model, kwargs = pickle.load(open('m_k.p', 'rb'))
+    model, kwargs = spiro(
+        backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='com',
+        which_labellings=['A', 'B']
 
-    bay = kwargs['basebayes']
-    up = UniNetFluxPrior(model, cache_size=2000)
-    smc = SMC(
+    )
+    up = UniNetFluxPrior(model.flux_coordinate_mapper, cache_size=20)
+    dss = DataSetSim(
         model=model,
         substrate_df=kwargs['substrate_df'],
-        mdv_observation_models=bay._obmods,
-        boundary_observation_model=bay._bom,
-        prior=up,
-        num_processes=0,
+        mdv_observation_models=kwargs['basebayes']._obmods,
+        boundary_observation_model=kwargs['basebayes']._bom,
+        num_processes=1,
     )
 
-    smc.to_partial_mdvs(psmc._data.posterior_predictive.data.values[-1], normalize=False, pandalize=False)
+    samples = up.sample((50,))
+
+    result = dss.simulate_set(
+        theta=samples,
+        n_obs=2,
+        show_progress=True,
+        close_pool=False,
+    )
+    print(result['theta'].shape)
+
+
+    # smc_tomek = "C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc"
+    # v_rep = pd.read_excel(
+    #     r"C:\python_projects\sbmfi\src\sbmfi\inference\VREP_MCMC_e_coli_glc_anton_obsmod_copy_NEWWP.xlsx",
+    #     index_col=None)
+    # pol = pickle.load(open(r"C:\python_projects\sbmfi\build_e_coli_anton_glc_F_round_pol.p", 'rb'))
+    # psmc = SMC_PLOT(pol, inference_data=smc_tomek, v_rep=v_rep)
+    # # model, kwargs = build_e_coli_anton_glc(
+    # #     backend='numpy',
+    # #     auto_diff=False,
+    # #     build_simulator=True,
+    # #     ratios=False,
+    # #     batch_size=25,
+    # #     which_measurements='tomek',
+    # #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    # #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    # #     seed=1,
+    # # )
+    # import pickle
+    #
+    # # pickle.dump((model, kwargs), open('m_k.p', 'wb'))
+    # model, kwargs = pickle.load(open('m_k.p', 'rb'))
+    #
+    # bay = kwargs['basebayes']
+    # up = UniNetFluxPrior(model, cache_size=2000)
+    # smc = SMC(
+    #     model=model,
+    #     substrate_df=kwargs['substrate_df'],
+    #     mdv_observation_models=bay._obmods,
+    #     boundary_observation_model=bay._bom,
+    #     prior=up,
+    #     num_processes=0,
+    # )
+    #
+    # smc.to_partial_mdvs(psmc._data.posterior_predictive.data.values[-1], normalize=False, pandalize=False)
 
     #
     # model, kwargs = spiro(backend='torch', v2_reversible=True, build_simulator=True, which_measurements='lcms',

@@ -19,7 +19,7 @@ def spiro(
         ratios=True, build_simulator=False, add_cofactors=True, which_measurements=None, seed=2,
         which_labellings=None, include_bom=True, v5_reversible=False, n_obs=0,
         kernel_basis='svd', basis_coordinates='rounded', logit_xch_fluxes=False,
-        L_12_omega = 1.0, clip_min=750.0,
+        L_12_omega = 1.0, clip_min=None, transformation='ilr',
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -145,33 +145,33 @@ def spiro(
         }
 
     annotation_df = pd.DataFrame([
-        ('H', 1, 'M-H', 3.0, 1.0, 0.1, None, 3e3),
-        ('H', 0, 'M-H', 2.0, 1.0, 0.1, None, 3e3),
+        ('H', 1, 'M-H', 3.0, 1.0, 0.01, None, 3e3),
+        ('H', 0, 'M-H', 2.0, 1.0, 0.01, None, 3e3),
 
-        ('H', 1, 'M+F', 5.0,   1.0, 0.3, None, 3e3),
-        ('H', 1, 'M+Cl', 88.0, 1.0, 0.3, None, 2e3),
-        ('H', 0, 'M+F', 4.0,   1.0, 0.3, None, 3e3),  # to indicate that da_df is not yet in any order!
-        ('H', 0, 'M+Cl', 89.0, 1.0, 0.3, None, 2e3),
+        ('H', 1, 'M+F', 5.0,   1.0, 0.03, None, 3e3),
+        ('H', 1, 'M+Cl', 88.0, 1.0, 0.03, None, 2e3),
+        ('H', 0, 'M+F', 4.0,   1.0, 0.03, None, 3e3),  # to indicate that da_df is not yet in any order!
+        ('H', 0, 'M+Cl', 89.0, 1.0, 0.03, None, 2e3),
 
-        ('P', 1, 'M-H', 3.7, 3.0, 0.2, None, 2e3),  # an annotated metabolite that is not in the model
-        ('P', 2, 'M-H', 4.7, 3.0, 0.2, None, 2e3),
-        ('P', 3, 'M-H', 5.7, 3.0, 0.2, None, 2e3),
+        ('P', 1, 'M-H', 3.7, 3.0, 0.02, None, 2e3),  # an annotated metabolite that is not in the model
+        ('P', 2, 'M-H', 4.7, 3.0, 0.02, None, 2e3),
+        ('P', 3, 'M-H', 5.7, 3.0, 0.02, None, 2e3),
 
-        ('C', 0, 'M-H', 1.5, 4.0, 0.2, None, 7e5),
-        ('C', 3, 'M-H', 4.5, 4.0, 0.2, None, 7e5),
-        ('C', 4, 'M-H', 5.5, 4.0, 0.2, None, 7e5),
+        ('C', 0, 'M-H', 1.5, 4.0, 0.02, None, 7e5),
+        ('C', 3, 'M-H', 4.5, 4.0, 0.02, None, 7e5),
+        ('C', 4, 'M-H', 5.5, 4.0, 0.02, None, 7e5),
 
-        ('D', 2, 'M-H', 12.0, 5.0, 0.1, None, 1e5),
-        ('D', 0, 'M-H', 9.0,  5.0, 0.1, None, 1e5),
-        ('D', 3, 'M-H', 13.0, 5.0, 0.1, None, 1e5),
+        ('D', 2, 'M-H', 12.0, 5.0, 0.01, None, 1e5),
+        ('D', 0, 'M-H', 9.0,  5.0, 0.01, None, 1e5),
+        ('D', 3, 'M-H', 13.0, 5.0, 0.01, None, 1e5),
 
-        ('L|[1,2]', 0, 'M-H', 14.0, 6.0, 0.1 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
-        ('L|[1,2]', 1, 'M-H', 15.0, 6.0, 0.1 * L_12_omega, L_12_omega, 4e4),
+        ('L|[1,2]', 0, 'M-H', 14.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
+        ('L|[1,2]', 1, 'M-H', 15.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),
 
-        ('L', 0, 'M-H', 14.0, 6.0, 0.1, None, 4e5),
-        ('L', 1, 'M-H', 15.0, 6.0, 0.1, None, 4e5),
-        ('L', 2, 'M-H', 16.0, 6.0, 0.1, None, 4e5),
-        ('L', 5, 'M-H', 19.0, 6.0, 0.1, None, 4e5),
+        ('L', 0, 'M-H', 14.0, 6.0, 0.01, None, 4e5),
+        ('L', 1, 'M-H', 15.0, 6.0, 0.01, None, 4e5),
+        ('L', 2, 'M-H', 16.0, 6.0, 0.01, None, 4e5),
+        ('L', 5, 'M-H', 19.0, 6.0, 0.01, None, 4e5),
     ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'rt', 'sigma', 'omega', 'total_I'])
     formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
     annotation_df['formula'] = annotation_df['met_id'].map(formap)
@@ -274,14 +274,22 @@ def spiro(
         if which_measurements == 'lcms':
             annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}
             total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
+            if clip_min is None:
+                clip_min = 750.0
             obsmods = LCMS_ObservationModel.build_models(
-                model, annotation_dfs, total_intensities=total_intensities, clip_min=clip_min
+                model, annotation_dfs, total_intensities=total_intensities, clip_min=clip_min, transformation=transformation
             )
         elif which_measurements == 'com':
             sigma_ii = observation_df['sigma']
             omegas = observation_df.drop_duplicates('ion_id').set_index('ion_id')['omega']
             annotation_dfs = {labelling_id: (annotation_df, sigma_ii, omegas) for labelling_id in substrate_df.index}
-            obsmods = ClassicalObservationModel.build_models(model, annotation_dfs)
+            if clip_min is None:
+                clip_min = 1e-5
+            elif clip_min > 1.0:
+                raise ValueError('not a valid clip_min for the the classical observation model')
+            obsmods = ClassicalObservationModel.build_models(
+                model, annotation_dfs, clip_min=clip_min, transformation=transformation
+            )
         else:
             raise ValueError
 

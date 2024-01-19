@@ -547,7 +547,7 @@ class LinAlg(object):
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
         'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
         'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
-        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum', 'isnan'
+        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum', 'isnan', 'float_power'
     ]
 
     def __getstate__(self):

@@ -720,7 +720,7 @@ class PolytopeSamplingModel(object):
         elif basis_coordinates == 'cylinder':
             basis_str = 'C' if not hemi_sphere else 'HC'
             self._basis_id = pd.Index(
-                ['phi'] + [f'{basis_str}_{self._kerbas}_{i}' for i in range(0, self._F_round.A.shape[-1]-2)] + ['R']
+                ['phi'] + [f'{basis_str}_{self._kerbas}_{i}' for i in range(self._F_round.A.shape[-1]-2)] + ['R']
             )
 
         self._reaction_ids = polytope.A.columns.tolist()
@@ -732,7 +732,7 @@ class PolytopeSamplingModel(object):
         self._bound = scale_bound if scale_bound is None else abs(scale_bound)
         self._root = radius_root
         if self._root == 0:
-            self._root = len(self._reaction_ids)  # I think the best scaling of radius is the number of dimensions
+            self._root = self._F_round.A.shape[-1]  # I think the best scaling of radius is the number of dimensions
         self._la = linalg
         new = self.to_linalg(linalg)
         self.__dict__.update(new.__dict__)
@@ -791,6 +791,9 @@ class PolytopeSamplingModel(object):
         else:
             alpha_frac = norm / alpha_max  # fraction of max distance from polytope boundary
 
+        if self._root is not None:
+            alpha_frac = self._la.float_power(alpha_frac, self._root)
+
         result = self._la.cat([directions, alpha_frac], dim=-1)
 
         if pandalize:
@@ -806,6 +809,9 @@ class PolytopeSamplingModel(object):
 
         directions = ball[..., :-1]
         alpha_frac = ball[..., [-1]]
+
+        if self._root is not None:
+            alpha_frac = self._la.float_power(alpha_frac, 1.0 / self._root)
 
         allpha = self._h.T / self._la.tensormul_T(self._G, directions)
         alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if self._hemi else 1, keepdims=True)
@@ -1632,7 +1638,7 @@ if __name__ == "__main__":
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    model, kwargs=spiro(backend='numpy', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None)
+    model, kwargs=spiro(backend='numpy', v2_reversible=False, v5_reversible=False, build_simulator=False, which_measurements=None)
     fcm = FluxCoordinateMapper(
         model,
         kernel_basis='rref',
@@ -1644,8 +1650,12 @@ if __name__ == "__main__":
     )
     sampler = fcm._sampler
     res = sample_polytope(sampler, n=10, n_burn=0, n_chains=5, n_cdf=6, return_what='rounded')
-    print(pd.DataFrame(res['rounded'], columns=sampler.basis_id))
-    ball = sampler._m
+    rounded = res['rounded']
+    print(pd.DataFrame(rounded, columns=sampler.basis_id))
+    ball = sampler._map_rounded_2_ball(rounded, pandalize=False)
+    print(ball)
+    ball = sampler._map_ball_2_rounded(ball, pandalize=False)
+    print(ball)
 
     # up = UniformNetPrior(fcm, cache_size=10)
     # s = up.sample((10, ))

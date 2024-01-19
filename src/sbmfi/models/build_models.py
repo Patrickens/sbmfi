@@ -2289,5 +2289,8 @@ if __name__ == "__main__":
     # from optlang.gurobi_interface import
     from cobra.flux_analysis import flux_variability_analysis
 
-    model, kwargs = build_e_coli_anton_glc(backend='torch', build_simulator=True, which_measurements='tomek')
+    # model, kwargs = build_e_coli_anton_glc(backend='torch', build_simulator=True, which_measurements='tomek')
+    model, kwargs = build_e_coli_anton_glc(backend='torch', build_simulator=False, which_measurements=None)
+
+    print(len(model.labelling_reactions))
 

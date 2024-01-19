@@ -211,7 +211,7 @@ class PlotMonster(object):
 
     def _get_chain(self, *args, chain_idx=-1, group='posterior'):
         var = self._group_var_map[group]
-        return self._data[group][var].sel({f'{var}_id': list(*args)}).values[chain_idx]
+        return self._data[group][var].sel({f'{var}_id': list(args)}).values[chain_idx]
 
     def _size_opts(self, width=500, height=400):
         kwargs = dict(height=height, width=width,)
@@ -324,7 +324,7 @@ class PlotMonster(object):
         true_theta = self._data.attrs.get('true_theta')
         if true_theta is None:
             return
-        return pd.DataFrame(true_theta, index=theta_id).T
+        return pd.DataFrame(true_theta, columns=theta_id)
 
     def point_plot(self, var1_id, var2_id=None, what_var='theta', what_point='true', label=None, color=None):
         if what_var == 'theta':
@@ -463,22 +463,22 @@ class SMC_PLOT(PlotMonster):
         if var2_id is None:
             xax = self._axes_range(var1_id)
             num_chains = len(self._data['posterior']['chain'].values)
-            addon = 1 if include_prior else 0
-            for i in range(num_chains + addon):
+            for i in range(num_chains):
                 color = colorcet.glasbey[i]
                 if i == 0:
                     color = self._colors['prior']
-                    to_plot = self._get_chain(var1_id, chain_idx=0, group='prior')
+                    to_plot = self._get_samples(var1_id, group='prior')
                     label = 'prior'
                     muted = False
                 else:
-                    to_plot = self._get_chain(var1_id, chain_idx=i-1, group='posterior')
+                    to_plot = self._get_chain(var1_id, chain_idx=i, group='posterior')
                     label = f'pop_{i}'
                     muted = True
-                    if i == num_chains - 1:
+                    if i == num_chains-1:
                         muted = False
                         color = self._colors['posterior']
                         label = 'posterior'
+                        print(i)
                 plots.append(
                     self._plot_distribution(to_plot, var_id=xax, label=label, color=color, muted=muted)
                 )
@@ -490,6 +490,8 @@ class SMC_PLOT(PlotMonster):
                 plots.extend([
                     hv.VLine(fva_min).opts(**opts), hv.VLine(fva_max).opts(**opts),
                 ])
+
+        plots.append(self.point_plot(var1_id))
         return hv.Overlay(plots).opts(legend_position='right', fontsize=self._FONTSIZES, **self._size_opts(width=600), )
 
     # def _get_samples(self, *args, chain=None, obs_idx=0, group='posterior', num_samples=30000):
@@ -621,6 +623,7 @@ if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
     from bokeh.plotting import figure, output_file, save
+    import matplotlib
     import pickle
 
     pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
@@ -629,12 +632,16 @@ if __name__ == "__main__":
     smc_res = az.from_netcdf("C:/python_projects/sbmfi/SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc")
     smc_res = smc_res.sel(draw=slice(5000, None))
 
-    smp = SMC_PLOT(pol, smc_res, v_rep=v_rep, hv_backend='matplotlib')
+    smp = SMC_PLOT(pol, smc_res, v_rep=v_rep, hv_backend='bokeh')
 
-    var1 = ['[1]Glc: ilr_val__L_c_0', '[1]Glc: ilr_val__L_c_1', '20% [U]Glc: ilr_2pg_c_0']
+    ding = smp.plot_evolution('R_svd0')
+    output_file(filename="custom_filename.html", title="plot1")
+    show(hv.render(ding))
 
-    data = smp._get_samples(var1, group='posterior_predictive')
-    theta = smp._get_samples('R_svd0', group='posterior')
+    # var1 = ['[1]Glc: ilr_val__L_c_0', '[1]Glc: ilr_val__L_c_1', '20% [U]Glc: ilr_2pg_c_0']
+    #
+    # data = smp._get_samples(var1, group='posterior_predictive')
+    # theta = smp._get_samples('R_svd0', group='posterior')
     # smp.density_plot(varr, group='posterior_predictive', tol=20, label='konker')
 
 

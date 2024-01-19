@@ -42,7 +42,7 @@ class MDVAE(nn.Module):
         decoder_layers.extend([nn.Linear(n_latent, n_hidden)])
         self.decoder = nn.Sequential(*decoder_layers[::-1])
 
-    def forward(self, x):
+    def encode_and_sample(self, x):
         hidden = self.encoder(x)
         mean = self.mean_lay(hidden)
         log_var = self.log_var_lay(hidden)
@@ -51,35 +51,80 @@ class MDVAE(nn.Module):
         std = torch.exp(0.5 * log_var)
         epsilon = torch.randn_like(std)
         z = mean + std * epsilon
+        return z, mean, log_var
+
+    def forward(self, x):
+        z, mean, log_var = self.encode_and_sample(x)
         return self.decoder(z), mean, log_var
 
 
-class _MDV_Dataset(Dataset):
-    def __init__(self, data: torch.Tensor, mu: torch.Tensor):
-        if (len(data.shape) != 3) or (len(mu.shape) != 3):
+class MDVAE_Dataset(Dataset):
+    def __init__(self, data: torch.Tensor, mu: torch.Tensor = None, standardize=True):
+        if data.ndim == 3:
+            n, n_obs, n_d = data.shape
+            shape = (n * n_obs, n_d)
+            data = data.view(shape)
+            if mu is not None:
+                if mu.ndim != 3:
+                    raise ValueError
+                if mu.shape[1] != n_obs:
+                    mu = torch.tile(mu, (1, n_obs, 1))
+                mu = mu.view(shape)
+        elif (data.ndim == 2) and (mu.ndim == 2) and (data.shape != mu.shape):
             raise ValueError
-        mu = torch.tile(mu, (1, data.shape[1], 1)).view((math.prod(data.shape[:-1]), data.shape[-1]))
-        data = data.view(mu.shape)
+        else:
+            raise ValueError
+
+        if standardize:
+            ding = data if mu is None else mu
+
+            self.mean = ding.mean(-1, keepdims=True)
+            self.std = ding.std(-1, keepdims=True)
+            data = (data - self.mean) / self.std
+            if mu is not None:
+                mu = (mu - self.mean) / self.std
+
         self.data = data
         self.mu = mu
+
+    def standardize(self, data, reverse=False):
+        mu = None
+        if isinstance(data, MDVAE_Dataset):
+            data, mu = data[:]
+
+        if reverse:
+            data = (data * self.std) + self.mean
+            if (mu is not None) and (self.mu is not None):
+                mu = (mu * self.std) + self.mean
+        else:
+            data = (data - self.mean) / self.std
+            if (mu is not None) and (self.mu is not None):
+                mu = (mu - self.mean) / self.std
+        if mu is None:
+            return data
+        if self.mu is None:
+            return MDVAE_Dataset(data)
+        return MDVAE_Dataset(data, mu)
 
     def __len__(self):
         return self.data.shape[0]
 
     def __getitem__(self, idx):
+        if self.mu is None:
+            return self.data[idx], self.data[idx]
         return self.data[idx], self.mu[idx]
 
-class Affine(nn.Module):
-    def __init__(self, mu, std, inverse=False):
-        self.mu = mu
-        self.std = torch.clip(std, min=1e-5)
-        self.inverse = inverse
 
-    def forward(self):
+class Standardize:
+    def __init__(self, dataset: MDVAE_Dataset):
+        noiseless = dataset[:][1]  # select all the means
+        self.mu = noiseless.mean(-1, keepdims=True)
+        self.std = noiseless.std(-1, keepdims=True)
+
+    def forward(self, dataset: MDVAE_Dataset):
         pass
 
 
-@hdf_opener_and_closer()
 def train_mdv_encoder(
         hdf,
         simulator: _BaseSimulator,
@@ -97,7 +142,7 @@ def train_mdv_encoder(
     data = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='data')
     theta = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='theta')
     mu = simulator.simulate(theta=theta, mdvs=mdvs, n_obs=0)
-    dataset = _MDV_Dataset(data, mu)
+    dataset = MDVAE_Dataset(data, mu)
 
     n_validate = math.ceil(0.10 * len(dataset))
 
@@ -122,10 +167,11 @@ def train_mdv_encoder(
     loss_f = nn.MSELoss()
     optimizer = torch.optim.Adam(mdvae.parameters(), lr=lr, weight_decay=weight_decay)
 
-    print(f'MSE between all mu and data: {loss_f(*dataset[:]).numpy().round(4)}')
+    # print(f'MSE between all mu and data: {loss_f(*dataset[:]).numpy().round(4)}')
 
     pbar = tqdm.tqdm(total=n_epochs * len(train_loader), ncols=100)
     prr = lambda x: x.to('cpu').data.numpy().round(4)
+    losses = []
     try:
         for epoch in range(n_epochs):
             for i, (x, y) in enumerate(train_loader):
@@ -133,6 +179,7 @@ def train_mdv_encoder(
                 reconstruct = loss_f(x_hat, y)
                 KL_div = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
                 loss = reconstruct + KL_div
+                optimizer.zero_grad()
                 if ~(torch.isnan(loss) | torch.isinf(loss)):
                     loss.backward()
                     optimizer.step()
