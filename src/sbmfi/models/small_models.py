@@ -15,11 +15,26 @@ from cobra import Reaction, Metabolite, DictList, Model
 from sbmfi.lcmsanalysis.formula import Formula
 
 def spiro(
-        backend='numpy', auto_diff=False, batch_size=1, add_biomass=True, v2_reversible=False,
-        ratios=True, build_simulator=False, add_cofactors=True, which_measurements=None, seed=2,
-        which_labellings=None, include_bom=True, v5_reversible=False, n_obs=0,
-        kernel_basis='svd', basis_coordinates='rounded', logit_xch_fluxes=False,
-        L_12_omega = 1.0, clip_min=None, transformation='ilr',
+        backend='numpy',
+        auto_diff=False,
+        batch_size=1,
+        add_biomass=True,
+        v2_reversible=False,
+        ratios=True,
+        build_simulator=False,
+        add_cofactors=True,
+        which_measurements=None,
+        seed=2,
+        which_labellings=None,
+        include_bom=True,
+        v5_reversible=False,
+        n_obs=0,
+        kernel_basis='svd',
+        basis_coordinates='rounded',
+        logit_xch_fluxes=False,
+        L_12_omega = 1.0,
+        clip_min=None,
+        transformation='ilr',
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -269,7 +284,7 @@ def spiro(
     annotation_df['mz'] = 0.0
     annotation_df.loc[observation_df['annot_df_idx'], 'mz'] = observation_df['isotope_decomposition'].apply(lambda x: Formula(x).mass()).values
 
-    measurements, basebay, theta = None, None, None
+    measurements, basebayes, true_theta = None, None, None
     if which_measurements is not None:
         if which_measurements == 'lcms':
             annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}
@@ -299,13 +314,13 @@ def spiro(
 
         up = UniNetFluxPrior(model._fcm, cache_size=1000)
 
-        basebay = _BaseBayes(model, substrate_df, obsmods, up, bom)
+        basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
-        theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
-        basebay.set_true_theta(theta.iloc[0])
+        true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
+        basebayes.set_true_theta(true_theta.iloc[0])
         if which_measurements == 'lcms':
-            _correct_base_bayes_lcms(basebay, clip_min=clip_min)
-        measurements = basebay.simulate_true_data(n_obs=n_obs).iloc[[0]]
+            _correct_base_bayes_lcms(basebayes, clip_min=clip_min)
+        measurements = basebayes.simulate_true_data(n_obs=n_obs).iloc[[0]]
 
     kwargs = {
         'annotation_df': annotation_df,
@@ -313,8 +328,8 @@ def spiro(
         'measured_boundary_fluxes': measured_boundary_fluxes,
         'measurements': measurements,
         'fluxes': fluxes,
-        'theta': theta,
-        'basebayes': basebay,
+        'true_theta': true_theta,
+        'basebayes': basebayes,
     }
 
     return model, kwargs
@@ -395,12 +410,28 @@ def multi_modal(
         backend='numpy',
         auto_diff=False,
         batch_size=1,
-        ratios=True,
-        prepend_input=False,
+        ratios=False,
+        which_measurements='com',
+        clip_min=None,
+        transformation=None,
+        include_bom=True,
+        a_in_lb = 5.0,
+        a_in = 7.5,
+        kernel_basis = 'rref',
+        top_frac = 0.3,
+        basis_coordinates = 'rounded',
+        include_D = False,
+        n_obs=1,
 ):
+    if a_in_lb > 10.0:
+        raise ValueError
+    elif a_in_lb < 10.0:
+        if (a_in < a_in_lb) or (a_in > 10.0):
+            raise ValueError
+
     reaction_kwargs = {
         'a_in': {
-            'upper_bound': 10.0, 'lower_bound': 10.0,
+            'upper_bound': 10.0, 'lower_bound': a_in_lb,
             'atom_map_str': '∅ --> A/abc'
         },
         'co2_out': {
@@ -430,22 +461,13 @@ def multi_modal(
     }
     metabolite_kwargs = {
         'E': {'formula': 'C2H4O2'},
+        'D': {'formula': 'CH4'},
     }
     input_met = 'A'
-    if prepend_input:
-        tol = 0.01
-        reaction_kwargs['I_in'] = {
-            'upper_bound': 10 + tol, 'lower_bound': 10.0 - tol,
-            'atom_map_str': '∅ --> I/abc'
-        }
-        reaction_kwargs['a_in'] = {
-            'upper_bound': 10 + tol, 'lower_bound': 10.0 - tol,
-            'atom_map_str': 'I/abc --> A/abc'
-        }
-        input_met = 'I'
+
     input_labelling = pd.Series(OrderedDict({
         f'{input_met}/011': 1.0,
-    }), name='input')
+    }), name='A')
 
     ratio_repo = {
         'r1': {
@@ -454,8 +476,23 @@ def multi_modal(
         },
     }
 
-    measurements=['E']
-    m = simulator_factory(
+    free_reaction_id = ['v4']
+    if a_in_lb < 10.0:
+        free_reaction_id.insert(0, 'a_in')
+
+    annotation_df = pd.DataFrame([
+        ['E', 'M-H', 0, 0.01, 1e4, None],
+        ['E', 'M-H', 1, 0.01, 1e4, None],
+        ['E', 'M-H', 2, 0.01, 1e4, None],
+        ['D', 'M-H', 0, 0.01, 1e5, None],
+        ['D', 'M-H', 1, 0.01, 1e5, None],
+    ], columns=['met_id', 'adduct_name', 'nC13', 'sigma', 'total_I', 'omega'])
+    formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
+    annotation_df['formula'] = annotation_df['met_id'].map(formap)
+    if not include_D:
+        annotation_df = annotation_df.iloc[:3]
+
+    model = simulator_factory(
         id_or_file_or_model='multi_modal',
         backend=backend,
         auto_diff=auto_diff,
@@ -463,26 +500,95 @@ def multi_modal(
         metabolite_kwargs=metabolite_kwargs,
         input_labelling=input_labelling,
         ratio_repo=ratio_repo,
-        measurements=measurements,
+        free_reaction_id=free_reaction_id,
+        measurements=annotation_df['met_id'].unique(),
         batch_size=batch_size,
         ratios=ratios,
+        kernel_basis=kernel_basis,
+        basis_coordinates=basis_coordinates,
+        build_simulator=True
     )
-    m.set_input_labelling(input_labelling=input_labelling)
-    sdf = m.input_labelling.to_frame().T
+    substrate_df = model.input_labelling.to_frame().T
 
-    annotation_df = pd.DataFrame([
-        ['E', 'C2H4O2', 'M-H', 0],
-        ['E', 'C2H4O2', 'M-H', 1],
-        ['E', 'C2H4O2', 'M-H', 2],
-    ], columns=['met_id', 'formula', 'adduct_name', 'nC13'])
-    hdfile = os.path.join(SIM_DIR, 'multi_modal.h5')
-    kwargs = {
-        'substrate_df': sdf,
-        'hdfile': hdfile,
-        'annotation_df': annotation_df,
-        'total_intensities': pd.Series([1e4], index=['E']),
+    observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
+    annotation_df['mz'] = 0.0
+    annotation_df.loc[observation_df['annot_df_idx'], 'mz'] = observation_df['isotope_decomposition'].apply(
+        lambda x: Formula(x).mass()).values
+
+    top_flux = top_frac * 10.0
+    bot_flux = 10.0 - top_flux
+    fluxes = {
+        'a_in': 10.0,
+        'co2_out': 10.0,
+        'e_out': 10.0,
+        'v1': top_flux,
+        'v2': bot_flux,
+        'v3': top_flux,
+        'v4': bot_flux,
     }
-    return m, kwargs
+    if a_in_lb < 10.0:
+        top_flux = top_frac * a_in
+        bot_flux = a_in - top_flux
+        fluxes = {
+            'a_in': a_in,
+            'co2_out': a_in,
+            'e_out': a_in,
+            'v1': top_flux,
+            'v2': bot_flux,
+            'v3': top_flux,
+            'v4': bot_flux,
+        }
+    fluxes = pd.Series(fluxes, name='v')
+    if batch_size == 1:
+        model.set_fluxes(fluxes=fluxes)
+
+    measurements, basebayes, true_theta = None, None, None
+    if which_measurements is not None:
+        if which_measurements == 'lcms':
+            annotation_dfs = {'A': annotation_df}
+            total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
+            if clip_min is None:
+                clip_min = 750.0
+            obsmods = LCMS_ObservationModel.build_models(
+                model, annotation_dfs, total_intensities=total_intensities, clip_min=clip_min,
+                transformation=transformation
+            )
+        elif which_measurements == 'com':
+            sigma_ii = observation_df['sigma']
+            omegas = observation_df.drop_duplicates('ion_id').set_index('ion_id')['omega']
+            annotation_dfs = {'A': (annotation_df, sigma_ii, omegas)}
+            if clip_min is None:
+                clip_min = 1e-5
+            elif clip_min > 1.0:
+                raise ValueError('not a valid clip_min for the the classical observation model')
+            obsmods = ClassicalObservationModel.build_models(
+                model, annotation_dfs, clip_min=clip_min, transformation=transformation
+            )
+        else:
+            raise ValueError
+
+        bom = None
+        if include_bom:
+            bom = MVN_BoundaryObservationModel(model, ['a_in'], None)
+
+        up = UniNetFluxPrior(model._fcm, cache_size=1000)
+
+        basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
+        true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
+        basebayes.set_true_theta(true_theta.iloc[0])
+        if which_measurements == 'lcms':
+            _correct_base_bayes_lcms(basebayes, clip_min=clip_min)
+        measurements = basebayes.simulate_true_data(n_obs=n_obs).iloc[[0]]
+
+    kwargs = {
+        'true_theta': true_theta,
+        'measurements': measurements,
+        'substrate_df': substrate_df,
+        'hdfile': os.path.join(SIM_DIR, 'multi_modal.h5'),
+        'annotation_df': annotation_df,
+        'basebayes': basebayes,
+    }
+    return model, kwargs
 
 def polytope_volume(algorithm='emu', backend='numpy', auto_diff=False, return_type='mdv', batch_size=1):
     reaction_kwargs = {
@@ -641,13 +747,15 @@ if __name__ == "__main__":
     #     kernel_basis='rref',
     # )
 
-    model, kwargs = spiro(
-        seed=9, batch_size=1,
-        backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
-        which_measurements='com', which_labellings=['A', 'B'], v5_reversible=True, include_bom=False, compute_mz=True
-    )
+    m,k=multi_modal()
 
-    print(kwargs['annotation_df'])
+    # model, kwargs = spiro(
+    #     seed=9, batch_size=1,
+    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+    #     which_measurements='com', which_labellings=['A', 'B'], v5_reversible=True, include_bom=False, compute_mz=True
+    # )
+    #
+    # print(kwargs['annotation_df'])
     #
     # dss = kwargs['basebayes']
     # data = kwargs['measurements']

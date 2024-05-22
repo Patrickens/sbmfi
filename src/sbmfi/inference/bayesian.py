@@ -132,10 +132,20 @@ class _BaseBayes(_BaseSimulator):
 
         log_lik = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
 
+        # FUCKING AROOND
+        # difff = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
+        truedist = ((theta - self._true_theta) ** 2).mean(1)
+
         if self._bomsize > 0:
             bo_meas = self._x_meas[:, -self._bomsize:]
             mu_bo = mu_o[:, 0, -self._bomsize:]
             log_lik[..., -1] = self._bom.log_lik(bo_meas=bo_meas, mu_bo=mu_bo)
+
+            # FUCKING AROOND
+            # mu_bo = self._la.atleast_2d(mu_bo)  # shape = batch x n_bo
+            # bo_meas = self._la.atleast_2d(bo_meas)  # shape = n_obs x n_bo
+            # diff_bo = mu_bo[:, None, :] - bo_meas[:, None, :]  # shape = batch x n_obs x n_bo
+            # difff[..., -1] = (diff_bo ** 2).sum(-1)
 
         for i, (labelling_id, obmod) in enumerate(self._obmods.items()):
             j, k = self._obsize[labelling_id]
@@ -144,8 +154,18 @@ class _BaseBayes(_BaseSimulator):
             ll = obmod.log_lik(x_meas_o, mu_o_i)
             log_lik[..., i] = ll
 
+            # FUCKING AROOND
+            # x_meas = self._la.atleast_2d(x_meas_o)  # shape = n_meas x n_mdv
+            # mu_oo = self._la.atleast_2d(mu_o_i)  # shape = batch x n_d
+            # diff = mu_oo[:, None, :] - x_meas[:, None, :]  # shape = n_obs x batch x n_d
+            # difff[..., i] = (diff ** 2).sum(-1)
+
         if sum:
             log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
+
+        # print(truedist)
+        # print(self._la.sum(log_lik, axis=(1, 2), keepdims=False))
+        # print()
 
         if return_data:
             return log_lik, mu_o
@@ -686,7 +706,8 @@ class MCMC(_BaseBayes):
             potential_kwargs={},
             return_az=True,
             peskunize=True,
-            pre_sample_batch=5000
+            pre_sample_batch=5000,
+            debug=True,
     ) -> az.InferenceData:
         # TODO: this publication talks about this algo, but has a different acceptance procedure:
         #  doi:10.1080/01621459.2000.10473908
@@ -713,9 +734,10 @@ class MCMC(_BaseBayes):
             sim_data = self._la.get_tensor(shape=(n, n_chains, len(self.data_id)))
 
         if initial_points is None:
-            net_basis_points = self._sampler.get_initial_points(num_points=n_chains)
-            xch_basis_points = self._prior._xch_prior.sample((n_chains, ))
-            y = self._la.cat([net_basis_points, xch_basis_points], dim=-1)
+            y = self._sampler.get_initial_points(num_points=n_chains)
+            if self._prior._xch_prior is not None:
+                xch_basis_points = self._prior._xch_prior.sample((n_chains, ))
+                y = self._la.cat([y, xch_basis_points], dim=-1)
         else:
             y = initial_points
 
@@ -763,65 +785,68 @@ class MCMC(_BaseBayes):
         )
         pbar = tqdm.tqdm(total=n_tot, ncols=100)
         i = 0
-        try:
-            while i < n_tot:
-                pert_ys = self.perturb_particles(y, i, **perturb_kwargs)
-                if return_what:
-                    pert_ys, pert_prop_probs = pert_ys
-                    # two lines below only hold for symmetric proposals, otherwise we need to compute exactly
-                    chord_prop_probs[0, 1] = pert_prop_probs
-                    chord_prop_probs[1, 0] = pert_prop_probs
-
-                chord_ys[1:] = pert_ys
-                pert_post_probs = self.potential(pert_ys)
-
-                if self.potentype == 'approx':
-                    raise NotImplementedError('reject ABC proposals if all are too distant!')
-
-                if return_data:
-                    pert_post_probs, data = pert_post_probs
-                    chord_data[1:] = data
-
-                chord_post_probs[1:] = pert_post_probs
-
-                if not return_what:
-                    chord_prop_probs = self.compute_proposal_prob(
-                        old_particles=chord_ys,
-                        new_particles=chord_ys,
-                        chord_proposal=chord_proposal,
-                        chord_std=chord_std,
-                        xch_proposal=xch_proposal,
-                        xch_std=xch_std,
-                        old_is_new=True,
-                    )
-                accept_idx = self.accept_reject(i, chord_post_probs, chord_prop_probs, pre_sample_batch, peskunize)
-                accepted_probs = chord_post_probs[accept_idx, chain_selector]
-                chord_post_probs[0] = accepted_probs  # set the log-probs of the current sample
-                y = chord_ys[accept_idx, chain_selector]
-                chord_ys[0] = y  # set the log-probs of the current sample
-                if return_data:
-                    data = chord_data[accept_idx, chain_selector]
-                    chord_data[0] = data
-
-                j = i - n_burn
-                pbar.update(1)
-                if j > 0:
-                    if n_cdf > 1:
-                        accept_idx[accept_idx > 0] = 1
-                    accept_rate += accept_idx
-                    avg_rate = self._la.mean(accept_rate / j)
-                    if j % 50 == 0:
-                        pbar.set_postfix(avg_acc=avg_rate.item())
-
-                if (j % thinning_factor == 0) and (j > -1):
-                    k = j // thinning_factor
-                    post_probs[k] = accepted_probs
-                    chains[k] = y
-                    if return_data:
-                        sim_data[k] = data
-                i += 1
         # try:
-        #     pass
+        while i < n_tot:
+            pert_ys = self.perturb_particles(y, i, **perturb_kwargs)
+            if return_what:
+                pert_ys, pert_prop_probs = pert_ys
+                # two lines below only hold for symmetric proposals, otherwise we need to compute exactly
+                chord_prop_probs[0, 1] = pert_prop_probs
+                chord_prop_probs[1, 0] = pert_prop_probs
+
+            chord_ys[1:] = pert_ys
+            pert_post_probs = self.potential(pert_ys)
+
+            if self.potentype == 'approx':
+                raise NotImplementedError('reject ABC proposals if all are too distant!')
+
+            if return_data:
+                pert_post_probs, data = pert_post_probs
+                chord_data[1:] = data
+
+            chord_post_probs[1:] = pert_post_probs
+
+            if not return_what:
+                chord_prop_probs = self.compute_proposal_prob(
+                    old_particles=chord_ys,
+                    new_particles=chord_ys,
+                    chord_proposal=chord_proposal,
+                    chord_std=chord_std,
+                    xch_proposal=xch_proposal,
+                    xch_std=xch_std,
+                    old_is_new=True,
+                )
+            accept_idx = self.accept_reject(i, chord_post_probs, chord_prop_probs, pre_sample_batch, peskunize)
+            accepted_probs = chord_post_probs[accept_idx, chain_selector]
+            chord_post_probs[0] = accepted_probs  # set the log-probs of the current sample
+            y = chord_ys[accept_idx, chain_selector]
+            # print(chord_post_probs)
+            # print(accept_idx)
+            # print()
+            chord_ys[0] = y  # set the log-probs of the current sample
+            if return_data:
+                data = chord_data[accept_idx, chain_selector]
+                chord_data[0] = data
+
+            j = i - n_burn
+            pbar.update(1)
+            if j > 0:
+                if n_cdf > 1:
+                    accept_idx[accept_idx > 0] = 1
+                accept_rate += accept_idx
+                avg_rate = self._la.mean(accept_rate / j)
+                if j % 50 == 0:
+                    pbar.set_postfix(avg_acc=avg_rate.item())
+
+            if (j % thinning_factor == 0) and (j > -1):
+                k = j // thinning_factor
+                post_probs[k] = accepted_probs
+                chains[k] = y
+                if return_data:
+                    sim_data[k] = data
+            i += 1
+        try:
+            pass
         except Exception as e:
             if e is not KeyboardInterrupt:
                 print(e)
@@ -1138,6 +1163,7 @@ class SMC(_BaseBayes):
             xch_std=0.4,
             return_all_populations=False,
             return_az=True,
+            debug=False,
     ):
         if potentype == 'exact':
             # we dont evaluate the prior in log_probs since we do this is computing the weights!
@@ -1291,79 +1317,147 @@ if __name__ == "__main__":
     pd.set_option('display.width', 1000)
     np.set_printoptions(linewidth=500)
 
-    from sbmfi.models.small_models import spiro
+    from sbmfi.models.small_models import spiro, multi_modal
     from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
     from sbmfi.inference.priors import UniNetFluxPrior, ProjectionPrior
+    from sbmfi.inference.complotting import PlotMonster
     from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope, fast_FVA
     import pickle
+    from sbmfi.core.observation import MVN_BoundaryObservationModel
 
-    model, kwargs = build_e_coli_anton_glc(
-        backend='numpy',
-        auto_diff=False,
-        build_simulator=True,
-        ratios=False,
-        batch_size=25,
-        which_measurements='tomek',
-        which_labellings=['20% [U]Glc', '[1]Glc'],
-        measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
-        seed=1,
-    )
-
-    sdf = kwargs['substrate_df']
-    dss = kwargs['basebayes']
-    simm = dss._obmods
-    bom = dss._bom
-    up = UniNetFluxPrior(model, cache_size=2000)
-
-    smc = SMC(
+    model, kwargs = multi_modal(backend='torch')
+    mcmc = MCMC(
         model=model,
-        substrate_df=sdf,
-        mdv_observation_models=simm,
-        boundary_observation_model=bom,
-        prior=up,
-        num_processes=0,
+        substrate_df=kwargs['substrate_df'],
+        mdv_observation_models=kwargs['basebayes']._obmods,
+        prior=kwargs['basebayes']._prior,
+        boundary_observation_model=kwargs['basebayes']._bom
     )
-    smc.set_measurement(x_meas=kwargs['measurements'])
-    smc.set_true_theta(theta=kwargs['theta'])
+    mcmc.set_measurement(x_meas=kwargs['measurements']) # [:, :-3]
+    mcmc.set_true_theta(theta=kwargs['true_theta'])
+    res = mcmc.run(
+        n=200, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=4, chord_std=0.1, peskunize=True,
+        chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
+    )
+    pm = PlotMonster(model._fcm._sampler.basis_polytope, res)
+    pm.grand_theta_plot()
 
-    result = az.from_netcdf("C:/python_projects/sbmfi/SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc")
 
-    result = smc._arviz_2_partial_mdv(result)
-    # model, kwargs = build_e_coli_anton_glc()
-
+    # hdf = r"C:\python_projects\sbmfi\spiro_flow_lowsigma.h5"
+    # did = 'sims'
+    #
     # model, kwargs = spiro(
-    #     seed=None,
-    #     batch_size=50,
-    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
-    #     which_measurements='lcms', which_labellings=['A', 'B'], v5_reversible=True
+    #     backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='com',
+    #     which_labellings=['A', 'B'], transformation='ilr'
     # )
+    # dss = DataSetSim(
+    #     model=model,
+    #     substrate_df=kwargs['substrate_df'],
+    #     mdv_observation_models=kwargs['basebayes']._obmods,
+    #     boundary_observation_model=kwargs['basebayes']._bom,
+    #     num_processes=0,
+    # )
+    # ilr_data = dss.read_hdf(hdf, dataset_id=did, what='data', stop=1000)
+    # theta = dss.read_hdf(hdf=hdf, dataset_id=did, what='theta', stop=1000)
+    # mdv_data = dss.to_partial_mdvs(ilr_data, pandalize=False)
+    #
+    # model, kwargs = spiro(
+    #     backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='com',
+    #     which_labellings=['A', 'B'], transformation=None
+    #
+    # )
+    # up = UniNetFluxPrior(model.flux_coordinate_mapper, cache_size=100000)
+    #
+    # bom = MVN_BoundaryObservationModel(model, kwargs['basebayes']._bom._bound_id.values, biomass_std=0.01, boundary_std=0.03)
+    #
+    # dss = DataSetSim(
+    #     model=model,
+    #     substrate_df=kwargs['substrate_df'],
+    #     mdv_observation_models=kwargs['basebayes']._obmods,
+    #     boundary_observation_model=kwargs['basebayes']._bom,
+    #     num_processes=0,
+    # )
+    # mcmc = MCMC(model, dss._substrate_df, dss._obmods, prior=up, boundary_observation_model=dss._bom)
+    #
+    #
+    # idx = 265
+    # x = mdv_data[[idx], 0]
+    # y = theta[[idx]]
+    # mcmc.set_measurement(x_meas=x) # [:, :-3]
+    # mcmc.set_true_theta(theta=pd.Series(y[0].numpy(), mcmc.theta_id))
+    # res = mcmc.run(
+    #     n=10000, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=4, chord_std=0.0000000001, peskunize=True,
+    #     chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
+    # )
+
+
+    # model, kwargs = build_e_coli_anton_glc(
+    #     backend='numpy',
+    #     auto_diff=False,
+    #     build_simulator=True,
+    #     ratios=False,
+    #     batch_size=25,
+    #     which_measurements='tomek',
+    #     which_labellings=['20% [U]Glc', '[1]Glc'],
+    #     measured_boundary_fluxes=[_bmid_ANTON, 'EX_glc__D_e', 'EX_ac_e'],
+    #     seed=1,
+    # )
+    #
     # sdf = kwargs['substrate_df']
-    # bb = kwargs['basebayes']
-    # up = UniNetFluxPrior(model._fcm)
-    # smc = SMC(model, sdf, bb._obmods, prior=up, boundary_observation_model=bb._bom, num_processes=0)
+    # dss = kwargs['basebayes']
+    # simm = dss._obmods
+    # bom = dss._bom
+    # up = UniNetFluxPrior(model, cache_size=2000)
+    #
+    # smc = SMC(
+    #     model=model,
+    #     substrate_df=sdf,
+    #     mdv_observation_models=simm,
+    #     boundary_observation_model=bom,
+    #     prior=up,
+    #     num_processes=0,
+    # )
     # smc.set_measurement(x_meas=kwargs['measurements'])
     # smc.set_true_theta(theta=kwargs['theta'])
     #
-    # res = smc.run(n=5000, n_smc_steps=8, epsilon_decay=0.4, return_all_populations=True, )
-    # az.to_netcdf(res, 'spiro_TEST_SMC.nc')
-
-    # model2, kwargs2 = spiro(
-    #     seed=9, batch_size=2,
-    #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
-    #     which_measurements='com', which_labellings=['C', 'D'], v5_reversible=True, include_bom=True
-    # )
-    # up = UniNetFluxPrior(model2._fcm)
-    # bb2 = kwargs2['basebayes']
-    # sdf = kwargs2['substrate_df']
-    # mcmc = MCMC(model2, sdf, bb2._obmods, prior=up, boundary_observation_model=bb2._bom)
-    # mcmc.set_measurement(x_meas=kwargs2['measurements'])
-    mcmc.set_true_theta(theta=kwargs2['theta'])
-    # res = mcmc.run(
-    #     n=20, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=2, chord_std=0.6, peskunize=True,
-    #     chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
-    # )
-    # print(profile2.print_stats())
-    # mcmc.simulate_data(res, n=10000)
-    # az.to_netcdf(res, 'spiro_TEST_MCMC.nc')
+    # result = az.from_netcdf("C:/python_projects/sbmfi/SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc")
+    #
+    # result = smc._arviz_2_partial_mdv(result)
+    # # model, kwargs = build_e_coli_anton_glc()
+    #
+    # # model, kwargs = spiro(
+    # #     seed=None,
+    # #     batch_size=50,
+    # #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+    # #     which_measurements='lcms', which_labellings=['A', 'B'], v5_reversible=True
+    # # )
+    # # sdf = kwargs['substrate_df']
+    # # bb = kwargs['basebayes']
+    # # up = UniNetFluxPrior(model._fcm)
+    # # smc = SMC(model, sdf, bb._obmods, prior=up, boundary_observation_model=bb._bom, num_processes=0)
+    # # smc.set_measurement(x_meas=kwargs['measurements'])
+    # # smc.set_true_theta(theta=kwargs['theta'])
+    # #
+    # # res = smc.run(n=5000, n_smc_steps=8, epsilon_decay=0.4, return_all_populations=True, )
+    # # az.to_netcdf(res, 'spiro_TEST_SMC.nc')
+    #
+    # # model2, kwargs2 = spiro(
+    # #     seed=9, batch_size=2,
+    # #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,
+    # #     which_measurements='com', which_labellings=['C', 'D'], v5_reversible=True, include_bom=True
+    # # )
+    # # up = UniNetFluxPrior(model2._fcm)
+    # # bb2 = kwargs2['basebayes']
+    # # sdf = kwargs2['substrate_df']
+    # # mcmc = MCMC(model2, sdf, bb2._obmods, prior=up, boundary_observation_model=bb2._bom)
+    # # mcmc.set_measurement(x_meas=kwargs2['measurements'])
+    # mcmc.set_true_theta(theta=kwargs2['theta'])
+    # # res = mcmc.run(
+    # #     n=20, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=2, chord_std=0.6, peskunize=True,
+    # #     chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
+    # # )
+    # # print(profile2.print_stats())
+    # # mcmc.simulate_data(res, n=10000)
+    # # az.to_netcdf(res, 'spiro_TEST_MCMC.nc')
 
 
