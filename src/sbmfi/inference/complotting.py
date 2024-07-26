@@ -82,6 +82,9 @@ class PlotMonster(object):
             self._ingroup = 'prior'
 
         if not all(polytope.A.columns.isin(inference_data[self._ingroup].theta_id.values)):
+            print(self._ingroup, )
+            print(polytope.A.columns)
+            print(inference_data[self._ingroup].theta_id.values)
             raise ValueError
 
         net_pol = thermo_2_net_polytope(polytope)

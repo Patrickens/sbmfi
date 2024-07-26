@@ -1340,7 +1340,8 @@ if __name__ == "__main__":
         chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
     )
     pm = PlotMonster(model._fcm._sampler.basis_polytope, res)
-    pm.grand_theta_plot()
+    plot = pm.grand_theta_plot()
+
 
 
     # hdf = r"C:\python_projects\sbmfi\spiro_flow_lowsigma.h5"
