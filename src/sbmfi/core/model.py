@@ -355,7 +355,6 @@ class LabellingModel(Model):
             free_reaction_id.index(_rev_reactions_rex.sub('', x.id)) if x.id not in free_reaction_id else x.id
         )
         self._chosen_rid = user_chosen.list_attr('id')
-        self._zero_faced_rid = zero_facet.list_attr('id')
         self._labelling_reactions = fwd + boundary + bm + user_chosen + zero_facet + rev
 
     def _fix_metabolite_reference_mess(self, reaction, atom_map):

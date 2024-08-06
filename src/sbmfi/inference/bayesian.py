@@ -1336,13 +1336,17 @@ if __name__ == "__main__":
     mcmc.set_measurement(x_meas=kwargs['measurements']) # [:, :-3]
     mcmc.set_true_theta(theta=kwargs['true_theta'])
     res = mcmc.run(
-        n=200, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=4, chord_std=0.1, peskunize=True,
+        n=4000, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=1, chord_std=0.3, peskunize=True,
         chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
     )
-    pm = PlotMonster(model._fcm._sampler.basis_polytope, res)
-    plot = pm.grand_theta_plot()
+    # pm = PlotMonster(model._fcm._sampler.basis_polytope, res)
+    import holoviews as hv
 
+    # hv.save(pm.grand_theta_plot(var1_id='R_a_in', var2_id='R_v4'), 'ding', fmt='html', backend='bokeh')
 
+    print(
+        (res.posterior['theta'].values[:,:,-1] > 0.).sum() / len(res.posterior['chain'])
+    )
 
     # hdf = r"C:\python_projects\sbmfi\spiro_flow_lowsigma.h5"
     # did = 'sims'

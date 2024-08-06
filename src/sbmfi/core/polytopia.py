@@ -702,6 +702,9 @@ class PolytopeSamplingModel(object):
             self._T = pd.DataFrame(np.eye(F_simp.A.shape[1]), index=F_simp.A.columns, columns=F_simp.A.columns)
             self._T_1 = self._T.copy()
             self._tau = np.zeros(F_simp.A.shape[1])
+
+        self._free_reaction_id = F_trans.A.columns
+
         F_round, self._E, self._E_1, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
         self._F_round = LabellingPolytope.from_Polytope(F_round)
         self._basis_pol = self._F_round if basis_coordinates == 'rounded' else F_trans
@@ -1054,6 +1057,7 @@ class FluxCoordinateMapper(object):
     @property
     def fcm_kwargs(self):
         return {
+            'free_reaction_id': self._sampler._free_reaction_id,
             'kernel_basis': self._sampler.kernel_basis,
             'basis_coordinates': self._sampler.basis_coordinates,
             'logit_xch_fluxes': self._logxch,
@@ -1638,24 +1642,25 @@ if __name__ == "__main__":
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    model, kwargs=spiro(backend='numpy', v2_reversible=False, v5_reversible=False, build_simulator=False, which_measurements=None)
+    model, kwargs = spiro(backend='numpy', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None)
     fcm = FluxCoordinateMapper(
         model,
         kernel_basis='rref',
         logit_xch_fluxes=False,
-        basis_coordinates='cylinder',
+        basis_coordinates='transformed',
         pr_verbose=False,
         hemi_sphere=False,
         scale_bound=2.0,
     )
-    sampler = fcm._sampler
-    res = sample_polytope(sampler, n=10, n_burn=0, n_chains=5, n_cdf=6, return_what='rounded')
-    rounded = res['rounded']
-    print(pd.DataFrame(rounded, columns=sampler.basis_id))
-    ball = sampler._map_rounded_2_ball(rounded, pandalize=False)
-    print(ball)
-    ball = sampler._map_ball_2_rounded(ball, pandalize=False)
-    print(ball)
+    print(fcm.fcm_kwargs)
+    # sampler = fcm._sampler
+    # res = sample_polytope(sampler, n=10, n_burn=0, n_chains=5, n_cdf=6, return_what='rounded')
+    # rounded = res['rounded']
+    # print(pd.DataFrame(rounded, columns=sampler.basis_id))
+    # ball = sampler._map_rounded_2_ball(rounded, pandalize=False)
+    # print(ball)
+    # ball = sampler._map_ball_2_rounded(ball, pandalize=False)
+    # print(ball)
 
     # up = UniformNetPrior(fcm, cache_size=10)
     # s = up.sample((10, ))

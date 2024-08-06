@@ -77,7 +77,6 @@ class _BaseSimulator(object):
         self._la = model._la
         self._fcm = model._fcm
         self._substrate_df = substrate_df.loc[list(self._obmods.keys())]
-
         if boundary_observation_model is not None:
             bo_id = boundary_observation_model.boundary_id.get_level_values(1)
             bo_fluxes_id = bo_id.to_series().replace({v: k for k, v in model._only_rev.items()})

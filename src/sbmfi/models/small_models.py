@@ -559,8 +559,7 @@ def multi_modal(
             annotation_dfs = {'A': (annotation_df, sigma_ii, omegas)}
             if clip_min is None:
                 clip_min = 1e-5
-            elif clip_min > 1.0:
-                raise ValueError('not a valid clip_min for the the classical observation model')
+
             obsmods = ClassicalObservationModel.build_models(
                 model, annotation_dfs, clip_min=clip_min, transformation=transformation
             )

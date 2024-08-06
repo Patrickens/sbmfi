@@ -587,6 +587,8 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             normalize=True,
             **kwargs,
     ):
+        if clip_min > 1.0:
+            raise ValueError('not a valid clip_min for the the classical observation model')
         MDV_ObservationModel.__init__(
             self, model, annotation_df, labelling_id, transformation, correct_natab, clip_min, **kwargs
         )
