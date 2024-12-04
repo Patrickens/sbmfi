@@ -28,6 +28,7 @@ def spiro(
         which_labellings=None,
         include_bom=True,
         v5_reversible=False,
+        measured_boundary_fluxes = ('h_out', ),
         n_obs=0,
         kernel_basis='svd',
         basis_coordinates='rounded',
@@ -192,9 +193,10 @@ def spiro(
     annotation_df['formula'] = annotation_df['met_id'].map(formap)
 
     biomass_id = 'bm' if add_biomass else None
-    measured_boundary_fluxes = ['d_out', 'h_out']
     if add_biomass:
+        measured_boundary_fluxes = list(measured_boundary_fluxes)
         measured_boundary_fluxes.append(biomass_id)
+        measured_boundary_fluxes = tuple(measured_boundary_fluxes)
 
     model = simulator_factory(
         id_or_file_or_model='spiro',
@@ -284,26 +286,44 @@ def spiro(
     annotation_df['mz'] = 0.0
     annotation_df.loc[observation_df['annot_df_idx'], 'mz'] = observation_df['isotope_decomposition'].apply(lambda x: Formula(x).mass()).values
 
+    labelling_specific_annots = {
+        'A': ['C+0', 'C+3', 'C+4', 'D+0', 'D+2', 'D+3', 'H+0', 'H+1', 'L+0', 'L+1', 'L+2', 'L+5', 'L|[1,2]+0', 'L|[1,2]+1'],
+        'B': ['C+0', 'C+3', 'D+0', 'D+2', 'H+0', 'H+1', 'H_{M+Cl}+0', 'H_{M+Cl}+1', 'L|[1,2]+0', 'L|[1,2]+1'],
+        'C': None,
+        'D': None,
+        'E': None,
+    }
     measurements, basebayes, true_theta = None, None, None
     if which_measurements is not None:
+
+        annotation_dfs = {}
+        for labelling_id in substrate_df.index:
+            labelling_ion_ids = labelling_specific_annots[labelling_id]
+            if labelling_ion_ids is None:
+                labelling_annot_df = annotation_df.copy()
+            else:
+                labelling_obs_df = observation_df.loc[labelling_specific_annots[labelling_id]].copy()
+                labelling_annot_df = annotation_df.iloc[labelling_obs_df['annot_df_idx'].values].copy()
+            annotation_dfs[labelling_id] = labelling_annot_df
+
         if which_measurements == 'lcms':
-            annotation_dfs = {labelling_id: annotation_df for labelling_id in substrate_df.index}
             total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
             if clip_min is None:
                 clip_min = 750.0
             obsmods = LCMS_ObservationModel.build_models(
-                model, annotation_dfs, total_intensities=total_intensities, clip_min=clip_min, transformation=transformation
+                model, annotation_dfs, total_intensities=total_intensities, clip_min=clip_min,
+                transformation=transformation
             )
         elif which_measurements == 'com':
             sigma_ii = observation_df['sigma']
             omegas = observation_df.drop_duplicates('ion_id').set_index('ion_id')['omega']
-            annotation_dfs = {labelling_id: (annotation_df, sigma_ii, omegas) for labelling_id in substrate_df.index}
+            com_annotation_dfs = {labelling_id: (adf, sigma_ii, omegas) for labelling_id, adf in annotation_dfs.items()}
             if clip_min is None:
                 clip_min = 1e-5
             elif clip_min > 1.0:
                 raise ValueError('not a valid clip_min for the the classical observation model')
             obsmods = ClassicalObservationModel.build_models(
-                model, annotation_dfs, clip_min=clip_min, transformation=transformation
+                model, com_annotation_dfs, clip_min=clip_min, transformation=transformation
             )
         else:
             raise ValueError
@@ -319,11 +339,11 @@ def spiro(
         true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
         basebayes.set_true_theta(true_theta.iloc[0])
         if which_measurements == 'lcms':
-            _correct_base_bayes_lcms(basebayes, clip_min=clip_min)
+            _correct_base_bayes_lcms(basebayes, total_intensities=total_intensities, clip_min=clip_min)
         measurements = basebayes.simulate_true_data(n_obs=n_obs).iloc[[0]]
 
     kwargs = {
-        'annotation_df': annotation_df,
+        'annotation_df': annotation_dfs,
         'substrate_df': substrate_df,
         'measured_boundary_fluxes': measured_boundary_fluxes,
         'measurements': measurements,
@@ -746,8 +766,28 @@ if __name__ == "__main__":
     #     kernel_basis='rref',
     # )
 
-    m,k=multi_modal()
-
+    model, kwargs = spiro(
+        backend='torch',
+        auto_diff=False,
+        batch_size=1,
+        add_biomass=True,
+        v2_reversible=True,
+        ratios=True,
+        build_simulator=True,
+        add_cofactors=True,
+        which_measurements='lcms',
+        seed=2,
+        which_labellings=['A', 'B'],
+        include_bom=True,
+        v5_reversible=False,
+        n_obs=0,
+        kernel_basis='svd',
+        basis_coordinates='rounded',
+        logit_xch_fluxes=False,
+        L_12_omega=1.0,
+        clip_min=None,
+        transformation='ilr',
+    )
     # model, kwargs = spiro(
     #     seed=9, batch_size=1,
     #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,

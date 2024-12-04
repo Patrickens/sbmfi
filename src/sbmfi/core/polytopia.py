@@ -434,11 +434,11 @@ def extract_labelling_polytope(
 
     wherrev = A_index.str.contains(_rev_reactions_rex)
     if coordinates == 'thermo':
-        xchid = A_index[wherrev].str.replace(_rev_reactions_rex, '_xch')
+        xchid = A_index[wherrev].str.replace(_rev_reactions_rex, '_xch', regex=True)
         mapper = dict([(k, v) for k, v in zip(A_index[wherrev], xchid)])
         A_index = A_index.map(lambda x: mapper[x] if x in mapper else x)
     else:
-        fwdid = A_index[wherrev].str.replace(_rev_reactions_rex, '')
+        fwdid = A_index[wherrev].str.replace(_rev_reactions_rex, '', regex=True)
         mapper = dict([(k, v) for v, k in zip(A_index[wherrev], fwdid) if v not in model._only_rev])
 
     Avar = pd.DataFrame(np.eye(n, n), index=A_index, columns=bvar.index)

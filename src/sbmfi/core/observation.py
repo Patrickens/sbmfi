@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import math
 from typing import Iterable, Union, Dict, Tuple
 from itertools import product, cycle
 
@@ -497,7 +496,10 @@ class _BlockDiagGaussian(object):
         if isinstance(diagonal_std, float):
             diagonal_std = pd.Series(diagonal_std, index=observation_df.index)
         elif isinstance(diagonal_std, pd.Series) and (len(diagonal_std) != observation_df.shape[0]):
-            raise ValueError('wrong shape')
+            try:
+                diagonal_std = diagonal_std.loc[observation_df.index]
+            except:
+                raise ValueError('wrong shape')
 
         diagonal_std = diagonal_std.loc[observation_df.index]
         idx = _BlockDiagGaussian(linalg=la, observation_df=observation_df)
@@ -566,7 +568,7 @@ class _BlockDiagGaussian(object):
         return observations
 
     def sample_sigma(self, shape=(1, )):
-        noise = self._la.randn((*shape, self._no,1))
+        noise = self._la.randn((*shape, self._no, 1))
         res =  (self._la.unsqueeze(self._chol, 1) @ noise).squeeze(-1)
         return res
 

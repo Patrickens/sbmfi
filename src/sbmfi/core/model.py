@@ -676,7 +676,7 @@ class LabellingModel(Model):
         net_pol = thermo_2_net_polytope(thermo_pol, verbose)
         fva_df = fast_FVA(polytope=net_pol)
         never_net = (abs(fva_df) < self.tolerance).all(axis=1)
-        never_net_rids = never_net.index[never_net].str.replace(_rev_reactions_rex, '')
+        never_net_rids = never_net.index[never_net].str.replace(_rev_reactions_rex, '', regex=True)
         for rid in never_net_rids:
             self.reactions.get_by_id(rid).bounds = (0.0, 0.0)
 

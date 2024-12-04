@@ -1912,7 +1912,7 @@ def _parse_anton_model():
     return anton_model
 
 
-def _correct_base_bayes_lcms(basebayes, clip_min=750.0, min_intensity_factor=500.0/750.0):
+def _correct_base_bayes_lcms(basebayes, total_intensities=None, clip_min=750.0, min_intensity_factor=500.0/750.0):
     measurements = basebayes.simulate_true_data(n_obs=1, pandalize=True).iloc[[0]]
     # these are slightly clipped intensities!
     partial_mdvs = basebayes.to_partial_mdvs(measurements, normalize=False, pandalize=True).iloc[[0]]
@@ -1922,8 +1922,8 @@ def _correct_base_bayes_lcms(basebayes, clip_min=750.0, min_intensity_factor=500
         if labelling_id == 'BOM':
             continue
         obmod = basebayes._obmods[labelling_id]
-        total_intensities = basebayes._la.tonp(obmod._scaling)
-        intensities = (part_mdv.T * total_intensities).T
+        total_intens = basebayes._la.tonp(obmod._scaling)
+        intensities = (part_mdv.T * total_intens).T
         measurable = part_mdv.loc[(intensities > min_intensity_factor * clip_min).values].droplevel(0)
         multiple_signals = measurable.index.str.rsplit('+', n=1, expand=True).to_frame(name=['met_id', 'nC13'])
         measurable = measurable.loc[multiple_signals['met_id'].duplicated(keep=False).values]
@@ -1933,7 +1933,7 @@ def _correct_base_bayes_lcms(basebayes, clip_min=750.0, min_intensity_factor=500
     obsmods = LCMS_ObservationModel.build_models(
         basebayes._model,
         corrected_annot_dfs,
-        total_intensities=obmod.scaling,
+        total_intensities=total_intensities if total_intensities is not None else obmod.scaling,
         clip_min=clip_min,  # now we create the real observation models!
     )
     corrected_basebayes = _BaseBayes(basebayes._model, basebayes._substrate_df, obsmods, basebayes._prior, basebayes._bom)

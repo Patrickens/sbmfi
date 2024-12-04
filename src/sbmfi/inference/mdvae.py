@@ -1,10 +1,21 @@
 import torch
 from torch import Tensor, nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, random_split, TensorDataset
 from sbmfi.core.simulator import _BaseSimulator
 from sbmfi.core.util import hdf_opener_and_closer
 import math
 import tqdm
+import os
+
+import ray
+from ray import tune, train
+from ray.tune.schedulers import ASHAScheduler
+from ray.tune.search.hyperopt import HyperOptSearch
+from ray.tune.tune import Trial
+
+import numpy as np
+
+from sbmfi.settings import BASE_DIR
 
 class MDVAE(nn.Module):
     # denoising auto-encoder; pass in noisy features, decode to noise-free features; use latent variables for inference
@@ -12,7 +23,7 @@ class MDVAE(nn.Module):
             self,
             n_data: int,
             n_latent = 0.3,
-            n_hidden=0.6,
+            n_hidden = 0.6,
             n_hidden_layers = 1,
             bias = True,
             activation=nn.LeakyReLU(0.01),
@@ -23,7 +34,7 @@ class MDVAE(nn.Module):
         if isinstance(n_hidden, float):
             n_hidden = math.ceil(n_hidden * n_data)
 
-        if n_latent > n_hidden:
+        if (n_latent > n_hidden) or (n_latent > n_data):
             raise ValueError
 
         endocer_layers = [nn.Linear(n_data, n_hidden, bias=bias), activation]
@@ -115,89 +126,153 @@ class MDVAE_Dataset(Dataset):
         return self.data[idx], self.mu[idx]
 
 
-class Standardize:
-    def __init__(self, dataset: MDVAE_Dataset):
-        noiseless = dataset[:][1]  # select all the means
-        self.mu = noiseless.mean(-1, keepdims=True)
-        self.std = noiseless.std(-1, keepdims=True)
-
-    def forward(self, dataset: MDVAE_Dataset):
-        pass
+_prr = lambda x: x.to('cpu').data.numpy()
+def short_dirname(trial: Trial):
+    return "trial_" + str(trial.trial_id)
 
 
-def train_mdv_encoder(
-        hdf,
-        simulator: _BaseSimulator,
-        dataset_id,
-        standardize=False,
-        n_epochs = 3,
-        lr = 1e-4,
-        weight_decay=1e-5,
-        batch_size=32,
-        **kwargs,
-):
-    if not simulator._la.backend == 'torch':
-        raise ValueError
-    mdvs = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='mdv')
-    data = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='data')
-    theta = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='theta')
-    mu = simulator.simulate(theta=theta, mdvs=mdvs, n_obs=0)
-    dataset = MDVAE_Dataset(data, mu)
+def ray_train(config, cwd, show_progress=False):
+    n_epoch = float(config.get('n_epoch', 3))
+    n_hidden = float(config.get('n_hidden', 0.6))
+    n_latent = int(config.get('n_latent', 0.3))
+    n_hidden_layers = int(config.get('n_hidden_layers', 2))
+    batch_size = int(config.get('batch_size', 64))
+    learning_rate = float(config.get('learning_rate', 1e-3))
+    weight_decay = float(config.get('weight_decay', 1e-4))
+    LR_gamma = float(config.get('LR_gamma', 1.0))
+    beta = float(config.get('beta', 1.0))
+    bias = bool(config.get('bias', True))
 
-    n_validate = math.ceil(0.10 * len(dataset))
-
-    train_ds, val_ds = random_split(
-        dataset,
-        lengths=(len(dataset) - n_validate, n_validate),
-        generator=simulator._la._BACKEND._rng
-    )
-
+    train_ds = torch.load(os.path.join(cwd, 'train_ds.pt'))
+    val_ds = torch.load(os.path.join(cwd, 'val_ds.pt'))
+    x_val, y_val = val_ds[:]
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-    if 'n_latent' not in kwargs:
-        kwargs['n_latent'] = len(simulator.theta_id)
-
     mdvae = MDVAE(
-        n_data=data.shape[-1],
-        **kwargs,
+        n_data=x_val.shape[-1],
+        n_hidden=n_hidden,
+        n_latent=n_latent,
+        n_hidden_layers=n_hidden_layers,
+        bias=bias,
     )
-    if standardize:
-        nn.Sequential # standardize data and make a sequential (subtract mean and divide by std)
 
     loss_f = nn.MSELoss()
-    optimizer = torch.optim.Adam(mdvae.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(mdvae.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if LR_gamma < 1.0:
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=LR_gamma, last_epoch=-1)
 
-    # print(f'MSE between all mu and data: {loss_f(*dataset[:]).numpy().round(4)}')
+    if show_progress:
+        pbar = tqdm.tqdm(total=n_epoch * len(train_loader), ncols=100)
+        prr = lambda x: x.to('cpu').data.numpy().round(4)
 
-    pbar = tqdm.tqdm(total=n_epochs * len(train_loader), ncols=100)
-    prr = lambda x: x.to('cpu').data.numpy().round(4)
     losses = []
     try:
-        for epoch in range(n_epochs):
+        for epoch in range(n_epoch):
             for i, (x, y) in enumerate(train_loader):
                 x_hat, mean, log_var = mdvae.forward(x)
                 reconstruct = loss_f(x_hat, y)
                 KL_div = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
-                loss = reconstruct + KL_div
+                loss = reconstruct + beta * KL_div
+
+                losses.append(x.to('cpu').data.numpy())
+
                 optimizer.zero_grad()
                 if ~(torch.isnan(loss) | torch.isinf(loss)):
                     loss.backward()
                     optimizer.step()
-                pbar.update()
-                if i % 50 == 0:
-                    pbar.set_postfix(loss=prr(loss), KL_div=prr(KL_div),  mse=prr(reconstruct))
+                if (i % 50 == 0) and show_progress:
+                    pbar.set_postfix(loss=prr(loss), KL_div=prr(KL_div), mse=prr(reconstruct))
+            if LR_gamma < 1.0:
+                scheduler.step()
+
             with torch.no_grad():
-                x_val, y_val = val_ds[:]
                 x_val_hat, mean, log_var = mdvae.forward(x_val)
                 reconstruct_val = loss_f(x_val_hat, y_val)
                 KL_div_val = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
-                loss_val = reconstruct_val + KL_div_val
-                print(f'loss: {prr(loss_val)}, KL_div: {prr(KL_div_val)}, MSE: {prr(reconstruct_val)}', flush=True)
+                val_loss = reconstruct_val + beta * KL_div_val
+                if show_progress:
+                    print(f'loss: {prr(val_loss)}, KL_div: {prr(KL_div_val)}, MSE: {prr(reconstruct_val)}', flush=True)
     except KeyboardInterrupt:
         pass
     finally:
-        pbar.close()
-        return mdvae
+        if show_progress:
+            pbar.close()
+        return mdvae, losses
+
+
+def ray_main(
+        hdf,
+        simulator: _BaseSimulator,
+        dataset_id: str,
+        denoising: bool=False,
+        val_frac: float=0.1,
+        max_n_hidden=0.8,
+):
+    if not simulator._la.backend == 'torch':
+        raise ValueError
+
+    mdvs = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='mdv')
+    data = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='data')
+    theta = simulator.read_hdf(hdf=hdf, dataset_id=dataset_id, what='theta')
+    mu = simulator.simulate(theta=theta, mdvs=mdvs, n_obs=0) if denoising else None
+    dataset = MDVAE_Dataset(data, mu)
+
+    n_validate = math.ceil(val_frac * len(dataset))
+
+    # prepare datasets
+    train_ds, val_ds = random_split(
+        dataset,
+        lengths=(len(dataset) - n_validate, n_validate),
+        # generator=simulator._la._BACKEND._rng
+    )
+    train_file = os.path.join(BASE_DIR, 'train_ds.pt')
+    val_file = os.path.join(BASE_DIR, 'val_ds.pt')
+    torch.save(train_ds, train_file)
+    torch.save(val_ds, val_file)
+
+    # figure out dimensions of the VAE n_data -> n_hidden -> n_latent == n_free_vars
+    n_data, n_latent = data.shape[-1], len(simulator.theta_id)
+    min_n_hidden = n_latent / n_data
+    if min_n_hidden > max_n_hidden:
+        raise ValueError
+
+    config = {
+        'batch_size': tune.choice(list(2 ** np.arange(3, 9))),
+        'n_hidden': tune.uniform(min_n_hidden, max_n_hidden),
+        'n_data': n_data,
+        'n_latent': n_latent,
+        'n_hidden_layers': tune.randint(1, 4),
+        'learning_rate': tune.loguniform(1e-5, 3e-1),
+    }
+    if not ray.is_initialized():
+        ray.init(
+            local_mode=True,
+            log_to_driver=False,
+            num_cpus=2,
+            include_dashboard=True
+        )
+    metric = 'val_loss'
+    mode = 'min'
+    hyperopt_search = HyperOptSearch(metric=metric, mode=mode)
+    tuner = tune.Tuner(
+        ray_train,
+        param_space=config,
+        tune_config=tune.TuneConfig(
+            num_samples=40,
+            search_alg=hyperopt_search,
+            max_concurrent_trials=6,
+            scheduler=ASHAScheduler(time_attr='epoch', metric=metric, mode=mode),
+            trial_dirname_creator=short_dirname
+        ),
+        run_config=train.RunConfig(storage_path=os.path.join(BASE_DIR, 'ray_mdvae'), name="test_experiment")
+    )
+    results = tuner.fit()
+
+    os.remove(train_file)
+    os.remove(val_file)
+    return results
+
+
 
 
 if __name__ == "__main__":
@@ -213,8 +288,8 @@ if __name__ == "__main__":
         which_labellings=list('AB')
     )
     sim = kwargs['basebayes']
-    hdf = r"C:\python_projects\sbmfi\spiro_AB2.h5"
-    did = 'mdvae'
+    hdf = r"C:\python_projects\sbmfi\spiro_mdvae_test.h5"
+    did = 'test1'
 
-    mdvae = train_mdv_encoder(hdf, sim, 'mdvae')
+    results = ray_main(hdf, sim, did)
 

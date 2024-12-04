@@ -37,7 +37,7 @@ import shutil
 from pathlib import Path
 import ray
 from ray import tune
-from ray.air.checkpoint import Checkpoint
+from ray.train import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.stopper import TrialPlateauStopper
 from ray.tune import Callback

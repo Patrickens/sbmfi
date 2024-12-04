@@ -1,6 +1,6 @@
 import numpy as np
 import copy
-np.seterr(all='raise')
+# np.seterr(all='raise')  # throws errors with np.nextafter(0, 1, 'float32')
 import scipy
 from scipy.special import expit, logit
 import random
