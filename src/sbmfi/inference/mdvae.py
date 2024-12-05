@@ -17,56 +17,77 @@ import numpy as np
 
 from sbmfi.settings import BASE_DIR
 
-class MDVAE(nn.Module):
-    # denoising auto-encoder; pass in noisy features, decode to noise-free features; use latent variables for inference
-    def __init__(
-            self,
-            n_data: int,
-            n_latent = 0.3,
-            n_hidden = 0.6,
-            n_hidden_layers = 1,
-            bias = True,
-            activation=nn.LeakyReLU(0.01),
-    ):
-        super().__init__()
-        if isinstance(n_latent, float):
-            n_latent = math.ceil(n_latent * n_data)
-        if isinstance(n_hidden, float):
-            n_hidden = math.ceil(n_hidden * n_data)
 
-        if (n_latent > n_hidden) or (n_latent > n_data):
-            raise ValueError
+def ray_train_MDVAE(config, cwd, show_progress=False):
+    n_epoch = int(config.get('n_epoch', 3))
+    n_hidden = float(config.get('n_hidden', 0.6))
+    n_latent = float(config.get('n_latent', 0.3))
+    n_hidden_layers = int(config.get('n_hidden_layers', 2))
+    batch_size = int(config.get('batch_size', 64))
+    learning_rate = float(config.get('learning_rate', 1e-3))
+    weight_decay = float(config.get('weight_decay', 1e-4))
+    LR_gamma = float(config.get('LR_gamma', 1.0))
+    beta = float(config.get('beta', 1.0))
+    bias = bool(config.get('bias', True))
 
-        endocer_layers = [nn.Linear(n_data, n_hidden, bias=bias), activation]
-        for i in range(n_hidden_layers):
-            endocer_layers.extend([nn.Linear(n_hidden, n_hidden, bias=bias), activation])
+    train_ds = torch.load(os.path.join(cwd, 'train_ds.pt'))
+    val_ds = torch.load(os.path.join(cwd, 'val_ds.pt'))
+    x_val, y_val = val_ds[:]
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-        self.encoder = nn.Sequential(*endocer_layers)
-        self.mean_lay = nn.Linear(n_hidden, n_latent)
-        self.log_var_lay  = nn.Linear(n_hidden, n_latent)
+    mdvae = MDVAE(
+        n_data=x_val.shape[-1],
+        n_hidden=n_hidden,
+        n_latent=n_latent,
+        n_hidden_layers=n_hidden_layers,
+        bias=bias,
+    )
 
-        decoder_layers = []
-        for layer in endocer_layers:
-            if layer == activation:
-                continue
-            decoder_layers.extend([nn.Linear(layer.out_features, layer.in_features), activation])
-        decoder_layers.extend([nn.Linear(n_latent, n_hidden)])
-        self.decoder = nn.Sequential(*decoder_layers[::-1])
+    loss_f = nn.MSELoss()
+    optimizer = torch.optim.Adam(mdvae.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if LR_gamma < 1.0:
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=LR_gamma, last_epoch=-1)
 
-    def encode_and_sample(self, x):
-        hidden = self.encoder(x)
-        mean = self.mean_lay(hidden)
-        log_var = self.log_var_lay(hidden)
+    get_val = lambda x: x.to('cpu').data.numpy().round(4)
+    if show_progress:
+        pbar = tqdm.tqdm(total=n_epoch * len(train_loader), ncols=100, position=0)
 
-        # reparametrization trick
-        std = torch.exp(0.5 * log_var)
-        epsilon = torch.randn_like(std)
-        z = mean + std * epsilon
-        return z, mean, log_var
+    losses = []
+    try:
+        for epoch in range(n_epoch):
+            for i, (x, y) in enumerate(train_loader):
+                x_hat, mean, log_var = mdvae.forward(x)
+                reconstruct = loss_f(x_hat, y)
+                KL_div = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+                loss = reconstruct + beta * KL_div
 
-    def forward(self, x):
-        z, mean, log_var = self.encode_and_sample(x)
-        return self.decoder(z), mean, log_var
+                optimizer.zero_grad()
+                if ~(torch.isnan(loss) | torch.isinf(loss)):
+                    loss.backward()
+                    optimizer.step()
+                pbar.update()
+                losses.append((0, get_val(loss), get_val(KL_div), get_val(reconstruct)))
+
+                if (i % 50 == 0) and show_progress:
+                    pbar.set_postfix(loss=losses[-1][1].round(4), KL_div=losses[-1][2].round(4), mse=losses[-1][3].round(4))
+            if LR_gamma < 1.0:
+                scheduler.step()
+
+            with torch.no_grad():
+                x_val_hat, mean, log_var = mdvae.forward(x_val)
+                reconstruct = loss_f(x_val_hat, y_val)
+                KL_div = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+                loss = reconstruct + beta * KL_div
+                losses.append((1, get_val(loss), get_val(KL_div), get_val(reconstruct)))
+    # try:
+    #     pass
+    except KeyboardInterrupt:
+        pass
+    finally:
+        losses = pd.DataFrame(losses, columns=['train0_val1', 'loss', 'KL_div', 'mse'])
+        if show_progress:
+            pbar.close()
+        return mdvae, losses
 
 
 class MDVAE_Dataset(Dataset):
@@ -131,7 +152,7 @@ def short_dirname(trial: Trial):
     return "trial_" + str(trial.trial_id)
 
 
-def ray_train(config, cwd, show_progress=False):
+def ray_train_MDVAE(config, cwd, ray=False, show_progress=False):
     n_epoch = float(config.get('n_epoch', 3))
     n_hidden = float(config.get('n_hidden', 0.6))
     n_latent = int(config.get('n_latent', 0.3))
@@ -155,6 +176,8 @@ def ray_train(config, cwd, show_progress=False):
         n_hidden_layers=n_hidden_layers,
         bias=bias,
     )
+    if ray:
+        raise NotImplemented
 
     loss_f = nn.MSELoss()
     optimizer = torch.optim.Adam(mdvae.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -163,7 +186,7 @@ def ray_train(config, cwd, show_progress=False):
 
     if show_progress:
         pbar = tqdm.tqdm(total=n_epoch * len(train_loader), ncols=100)
-        prr = lambda x: x.to('cpu').data.numpy().round(4)
+        get_val = lambda x: x.to('cpu').data.numpy().round(4)
 
     losses = []
     try:
@@ -174,14 +197,15 @@ def ray_train(config, cwd, show_progress=False):
                 KL_div = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
                 loss = reconstruct + beta * KL_div
 
-                losses.append(x.to('cpu').data.numpy())
-
                 optimizer.zero_grad()
                 if ~(torch.isnan(loss) | torch.isinf(loss)):
                     loss.backward()
                     optimizer.step()
+
+                losses.append((0, get_val(loss), get_val(KL_div), get_val(reconstruct)))
+
                 if (i % 50 == 0) and show_progress:
-                    pbar.set_postfix(loss=prr(loss), KL_div=prr(KL_div), mse=prr(reconstruct))
+                    pbar.set_postfix(loss=losses[-1][0].round(4), KL_div=losses[-1][1].round(4), mse=losses[-1][2].round(4))
             if LR_gamma < 1.0:
                 scheduler.step()
 
@@ -190,11 +214,12 @@ def ray_train(config, cwd, show_progress=False):
                 reconstruct_val = loss_f(x_val_hat, y_val)
                 KL_div_val = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
                 val_loss = reconstruct_val + beta * KL_div_val
-                if show_progress:
-                    print(f'loss: {prr(val_loss)}, KL_div: {prr(KL_div_val)}, MSE: {prr(reconstruct_val)}', flush=True)
+                losses.append((1, get_val(val_loss), get_val(KL_div_val), get_val(reconstruct_val)))
+
     except KeyboardInterrupt:
         pass
     finally:
+        losses = pd.DataFrame(losses, index=['train0_val1', 'loss', 'KL_div', 'mse']).T
         if show_progress:
             pbar.close()
         return mdvae, losses
