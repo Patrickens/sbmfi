@@ -54,7 +54,7 @@ def flow_constructor(
         dropout_probability=0.0,
         num_transforms = 3,
         init_identity=True,
-        permute=None,
+        permute='lu',
         p=None,
         scale=0.3,
 ):
@@ -393,6 +393,8 @@ if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.core.polytopia import sample_polytope
     from sbmfi.inference.priors import UniNetFluxPrior
+    from normflows import NormalizingFlowVAE
+    from normflows.distributions import NNDiagGaussian
 
     mdv_ds = torch.load(r"C:\python_projects\sbmfi\mdv_ds.pt")
     model, kwargs = spiro(
