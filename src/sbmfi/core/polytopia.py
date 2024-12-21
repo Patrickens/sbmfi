@@ -12,6 +12,7 @@ from sympy.core.numbers import One
 import pypoman
 import cvxpy as cp
 import cdd
+import cdd.gmp
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
     _rev_reactions_rex, _xch_reactions_rex
 from sbmfi.core.linalg import NumpyBackend, LinAlg
@@ -20,7 +21,8 @@ import copy
 from PolyRound.api import PolyRoundApi, Polytope, PolyRoundSettings
 from PolyRound.static_classes.lp_utils import ChebyshevFinder
 from PolyRound.static_classes.rounding.maximum_volume_ellipsoid import MaximumVolumeEllipsoidFinder
-
+from fractions import Fraction
+from importlib.metadata import version
 
 class LabellingPolytope(Polytope):
     tolerance = 1e-12
@@ -41,13 +43,7 @@ class LabellingPolytope(Polytope):
         Polytope.__init__(self, A=A, b=b, S=S, h=h)
         self._mapper: dict = mapper if mapper else {}
         self._objective: dict = objective if objective else {}
-        self._cvx_result = None
         self._nlr = non_labelling_reactions if non_labelling_reactions is not None else pd.Index([])
-
-    def __getstate__(self):
-        dct = self.__dict__
-        dct['_cvx_result'] = None
-        return dct
 
     @property
     def mapper(self):
@@ -86,18 +82,18 @@ class LabellingPolytope(Polytope):
         b_cp = cp.Parameter(n_ineq, name='b', value=self.b.values)
         constraints = [A_cp @ v_cp <= b_cp]
 
-        self._cvx_result = {}
+        cvx_result = {}
         if self.S is not None:
             n_met = self.S.shape[0]
             S_cp = cp.Parameter(self.S.shape, name='S', value=self.S.values)
             h_cp = cp.Parameter(n_met, name='h', value=self.h.values)
             constraints.append(S_cp @ v_cp == h_cp)
-            self._cvx_result['S'] = S_cp
-            self._cvx_result['h'] = h_cp
+            cvx_result['S'] = S_cp
+            cvx_result['h'] = h_cp
 
         problem = cp.Problem(objective=cp.Maximize(objective @ v_cp), constraints=constraints)
 
-        self._cvx_result.update({
+        cvx_result.update({
             'v': v_cp,  # easiest way to change bounds in the cvxpy problem
             'A': A_cp,  # easiest way to change bounds in the cvxpy problem
             'b': b_cp,
@@ -109,9 +105,9 @@ class LabellingPolytope(Polytope):
 
         if solve and len(self._objective) > 0:
             problem.solve(solver=cp.GUROBI, verbose=False)
-            self._cvx_result['solution'] = pd.Series(v_cp.value, index=self.A.columns, name=f'optimum', dtype=np.float64)
-            self._cvx_result['optimum'] = problem.value
-        return self._cvx_result
+            cvx_result['solution'] = pd.Series(v_cp.value, index=self.A.columns, name=f'optimum', dtype=np.float64)
+            cvx_result['optimum'] = problem.value
+        return cvx_result
 
     @staticmethod
     def from_Polytope(polytope:Polytope, labellingpolytope: 'LabellingPolytope' = None):
@@ -155,27 +151,82 @@ def fast_FVA(polytope: LabellingPolytope, full=False):
     return pd.DataFrame(result, index=['min', 'max']).T
 
 
+def _set_cdd_lib(number_type='fraction'):
+    global _CDD
+    if number_type == 'float':
+        _CDD = cdd
+    elif number_type == 'fraction':
+        _CDD = cdd.gmp
+
+
+def _cdd_mat_pol(mat_vec, eq=None, return_polyhedron=True, number_type='fraction', reptype=cdd.RepType.INEQUALITY, canonicalize=True):
+    cdd_version = [int(_) for _ in version('pycddlib').split('.')]
+
+    (A, b) = mat_vec
+    if b.ndim < 2:
+        b = b[:, None]
+    np_arr = np.hstack([b, -A])
+
+    lin_set = ()
+    if eq is not None:
+        (S, h) = mat_vec
+        if h.ndim < 2:
+            h = h[:, None]
+        if cdd_version[0] > 2:
+            eq_arr = np.hstack([h, S])
+            np_arr = np.vstack([np_arr, eq_arr])
+            lin_set = np.arange(b.shape[0], np_arr.shape[0])
+
+    if cdd_version[0] > 2:  # changes from version 3:  https://pycddlib.readthedocs.io/en/stable/changes.html#version-3-0-0-4-october-2024
+        _set_cdd_lib(number_type)
+        if number_type == 'fraction':
+            fractionater = np.vectorize(lambda x: Fraction(x))
+            np_arr = fractionater(np_arr)
+
+        matrix = _CDD.matrix_from_array(np_arr, rep_type=reptype, lin_set=lin_set)
+        return _CDD.polyhedron_from_matrix(matrix) if return_polyhedron else matrix
+    else:
+        matrix = cdd.Matrix(np_arr, number_type=number_type)
+        matrix.rep_type = reptype
+        matrix.lin_set = lin_set
+        if canonicalize:
+            matrix = matrix.canonicalize()
+        return cdd.Polyhedron(matrix) if return_polyhedron else matrix
+
+
+def _cdd_dual(polyhedron: cdd.Polyhedron | cdd.gmp.Polyhedron, to_V_rep=True):
+    cdd_version = [int(_) for _ in version('pycddlib').split('.')]
+    if cdd_version[0] > 2:
+        return _CDD.copy_output(polyhedron)
+    else:
+        if to_V_rep:
+            return polyhedron.get_generators()
+        return polyhedron.get_inequalities()
+
+
+def _cdd_mat_ar(mat: cdd.Matrix | cdd.gmp.Matrix):
+    cdd_version = [int(_) for _ in version('pycddlib').split('.')]
+    if cdd_version[0] > 2:
+        mat = np.array(mat.array).astype(float)
+    return np.array(mat)
+
+
+# function copied from https://github.com/stephane-caron/pypoman
 def project_polyhedron(proj, ineq, eq=None, canonicalize=True, number_type='fraction'):
-    (A, b) = ineq
-    b = b.reshape((b.shape[0], 1))
-    linsys = cdd.Matrix(np.hstack([b, -A]), number_type=number_type)
-    linsys.rep_type = cdd.RepType.INEQUALITY
+    raise ValueError('does not yet work after update of the pycddlib API for version >= 3.x.x')
+    P = _cdd_mat_pol(ineq, eq, True, number_type=number_type, reptype=cdd.RepType.INEQUALITY)
+
+    # OLD code
+    # linsys = cdd.Matrix(np.hstack([b, -A]), number_type=number_type)
+    # linsys.rep_type = cdd.RepType.INEQUALITY
 
     # the input [d, -C] to cdd.Matrix.extend represents (d - C * x == 0)
     # see ftp://ftp.ifor.math.ethz.ch/pub/fukuda/cdd/cddlibman/node3.html
-    if eq is not None:
-        (C, d) = eq
-        d = d.reshape((d.shape[0], 1))
-        linsys.extend(np.hstack([d, -C]), linear=True)
-        if canonicalize:
-            linsys.canonicalize()
-
     # Convert from H- to V-representation
-    P = cdd.Polyhedron(linsys)
-    generators = P.get_generators()
+    generators = _cdd_dual(P)
     if generators.lin_set:
         print("Generators have linear set: {}".format(generators.lin_set))
-    V = np.array(generators)
+    V = _cdd_mat_ar(generators)
 
     # Project output wrenches to 2D set
     (E, f) = proj
@@ -191,13 +242,10 @@ def project_polyhedron(proj, ineq, eq=None, canonicalize=True, number_type='frac
     return vertices, rays
 
 
-def compute_polytope_vertices(A, b, number_type='fraction'):
-    b = b.reshape((b.shape[0], 1))
-    mat = cdd.Matrix(np.hstack([b, -A]), number_type=number_type)
-    mat.rep_type = cdd.RepType.INEQUALITY
-    P = cdd.Polyhedron(mat)
-    g = P.get_generators()
-    V = np.array(g)
+def compute_polytope_vertices(ineq, number_type='fraction'):
+    P = _cdd_mat_pol(ineq, None, True, number_type, cdd.RepType.INEQUALITY)
+    g = _cdd_dual(P)
+    V = _cdd_mat_ar(g)
     vertices = []
     for i in range(V.shape[0]):
         if V[i, 0] != 1:  # 1 = vertex, 0 = ray
@@ -222,13 +270,13 @@ def simplify_vertices(vertices: pd.DataFrame, tolerance=1e-10):
 def V_representation(polytope: Polytope, number_type='fraction', vertices_tol=1e-10):
     if polytope.S is not None:
         raise ValueError('must be in cannonical form!')
-    vertices = compute_polytope_vertices(A=polytope.A.values, b=polytope.b.values, number_type=number_type)
+    vertices = compute_polytope_vertices(ineq=(polytope.A.values, polytope.b.values), number_type=number_type)
     # # TODO try bretl, somehow give it some equality constraints...
     # vertices = compute_polytope_vertices(A=polytope.A.values, b=polytope.b.values, number_type='float')
     # pypoman.duality.compute_polytope_vertices(A=self.A.values, b=self.b.values)
     vertices = pd.DataFrame(vertices, columns=polytope.A.columns)
     if number_type == 'fraction':
-        vertices = vertices.applymap(lambda x: float(x))
+        vertices = vertices.astype(float)
     if vertices_tol > 0.0:
         vertices = simplify_vertices(vertices, vertices_tol)
     return vertices
@@ -257,13 +305,16 @@ def H_representation(vertices: List[np.array], number_type='fraction'):
     b : array, shape=(m,)
         Vector of halfspace representation.
     """
-    V = np.vstack(vertices)
+
+    raise ValueError('this does not work after the new API of pycddlib...')
+    if isinstance(vertices, pd.DataFrame):
+        V = vertices.values
+    elif isinstance(vertices, list):
+        V = np.vstack(vertices)
     t = np.ones((V.shape[0], 1))  # first column is 1 for vertices
-    tV = np.hstack([t, V])
-    mat = cdd.Matrix(tV, number_type=number_type)
-    mat.rep_type = cdd.RepType.GENERATOR
-    P = cdd.Polyhedron(mat)
-    bA = np.array(P.get_inequalities())
+    P = _cdd_mat_pol((-V, t), None,True, number_type, cdd.RepType.GENERATOR)
+    bA = _cdd_dual(P, to_V_rep=False)
+    bA = _cdd_mat_ar(bA)
     if bA.shape == (0,):  # bA == []
         return bA
     # the polyhedron is given by b + A x >= 0 where bA = [b|A]
@@ -279,6 +330,7 @@ def project_polytope(
         vertices_tol=1e-10,
         number_type='fraction'
 ):
+    raise ValueError('not yet tested after pycddlib API change with version >= 3.x.x')
     # computes the projection/ infinite shadow of the labelling-polytope onto the exchange flux dimensions
     # https://github.com/stephane-caron/pypoman
     # https://pycddlib.readthedocs.io/en/latest/index.html
@@ -661,6 +713,7 @@ def transform_polytope_keep_transform(
 class PolytopeSamplingModel(object):
     # combine stuff from labelling polytope and mapping things
     # this one is meant to be used by
+    # TODO: it is better to refactor this into a class for the sampling model and a class for the ball and cylinder
     def __init__(
             self,
             polytope: LabellingPolytope,
@@ -1637,7 +1690,6 @@ if __name__ == "__main__":
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
     from sbmfi.inference.priors import UniNetFluxPrior
     import pandas as pd
-
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
@@ -1652,7 +1704,69 @@ if __name__ == "__main__":
         hemi_sphere=False,
         scale_bound=2.0,
     )
-    print(fcm.fcm_kwargs)
+    polytope = fcm._sampler._F_round
+    polytope = thermo_2_net_polytope(polytope)
+
+    #
+    # A,b = H_representation(v_rep)
+
+    np_arr = np.hstack([polytope.b.values[:, None], -polytope.A.values])
+    # P = _cdd_mat_pol(ineq, None, True, number_type, cdd.RepType.INEQUALITY)
+    # g = _cdd_dual(P)
+    # V = _cdd_mat_ar(g)
+    print(np_arr)
+    print(np_arr.dtype)
+    matrix = cdd.matrix_from_array(np_arr, rep_type=cdd.RepType.INEQUALITY)
+    print(matrix)
+    polyhedron = cdd.polyhedron_from_matrix(matrix)
+    matrix = cdd.copy_output(polyhedron)
+    V = np.array(matrix.array).astype(float)
+    vertices = []
+    for i in range(V.shape[0]):
+        if V[i, 0] != 1:  # 1 = vertex, 0 = ray
+            raise Exception("Polyhedron is not a polytope")
+        elif i not in matrix.lin_set:
+            vertices.append(V[i, 1:])
+
+    vertices = pd.DataFrame(vertices, columns=polytope.A.columns)
+
+    v_rep = V_representation(polytope, number_type='float')
+
+
+
+
+
+    # import numpy as np
+    # from fractions import Fraction
+    # import cdd
+    #
+    # np_arr = np.array([[7.249999945E-01, 1.371176147E-02, -1.360247711E-01, -7.119931354E-01, 0],
+    #                    [7.250000055E-01, -1.371176147E-02, 1.360247711E-01, 7.119931354E-01, 0],
+    #                    [1.498749967E+00, 4.937720011E-01, -1.349053111E+00, 4.271958812E-01, 0],
+    #                    [4.496250042E+00, -2.492627158E+00, 7.697439067E-01, 2.847972552E-01, -3.650953109E+00],
+    #                    [4.263750037E+00, 4.837167589E-01, 1.856347346E+00, 3.559965672E-01, 1.825476554E+00],
+    #                    [2.248125002E+00, 1.734143892E+00, 1.430667973E+00, 0, 0],
+    #                    [3.746875071E+00, -2.739513184E+00, 1.444270450E+00, 7.119931354E-02, 0],
+    #                    [2.248125033E+00, -1.246313605E+00, 3.848719418E-01, 1.423986266E-01, 1.825476554E+00]])
+    #
+    # # fractionater = np.vectorize(lambda x: Fraction(x))
+    # # np_arr = fractionater(np_arr)
+    # mat = cdd.matrix_from_array(np_arr, rep_type=cdd.RepType.INEQUALITY)
+
+    # print(cdd.polyhedron_from_matrix(mat))
+
+    # import numpy as np
+    # from fractions import Fraction
+    # import cdd.gmp as cdd_gmp
+    #
+    # np_arr = np.array([[1.1, 1.2, 1.3], [1.4, 1.5, 1.6]])
+    # fractionater = np.vectorize(lambda x: Fraction(x))
+    # np_arr = fractionater(np_arr)
+    # print(cdd_gmp.matrix_from_array(np_arr, rep_type=cdd_gmp.RepType.INEQUALITY))
+    # from importlib.metadata import version
+    #
+    # print(version("pycddlib"))
+
     # sampler = fcm._sampler
     # res = sample_polytope(sampler, n=10, n_burn=0, n_chains=5, n_cdf=6, return_what='rounded')
     # rounded = res['rounded']

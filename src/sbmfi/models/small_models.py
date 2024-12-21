@@ -294,18 +294,18 @@ def spiro(
         'E': None,
     }
     measurements, basebayes, true_theta = None, None, None
+
+    annotation_dfs = {}
+    for labelling_id in substrate_df.index:
+        labelling_ion_ids = labelling_specific_annots[labelling_id]
+        if labelling_ion_ids is None:
+            labelling_annot_df = annotation_df.copy()
+        else:
+            labelling_obs_df = observation_df.loc[labelling_specific_annots[labelling_id]].copy()
+            labelling_annot_df = annotation_df.iloc[labelling_obs_df['annot_df_idx'].values].copy()
+        annotation_dfs[labelling_id] = labelling_annot_df
+
     if which_measurements is not None:
-
-        annotation_dfs = {}
-        for labelling_id in substrate_df.index:
-            labelling_ion_ids = labelling_specific_annots[labelling_id]
-            if labelling_ion_ids is None:
-                labelling_annot_df = annotation_df.copy()
-            else:
-                labelling_obs_df = observation_df.loc[labelling_specific_annots[labelling_id]].copy()
-                labelling_annot_df = annotation_df.iloc[labelling_obs_df['annot_df_idx'].values].copy()
-            annotation_dfs[labelling_id] = labelling_annot_df
-
         if which_measurements == 'lcms':
             total_intensities = observation_df.drop_duplicates('ion_id').set_index('ion_id')['total_I']
             if clip_min is None:

@@ -9,6 +9,7 @@ from typing import Optional
 from sbi.utils.torchutils import create_alternating_binary_mask
 from normflows.distributions.base import BaseDistribution, Uniform, UniformGaussian, DiagGaussian
 from normflows.flows import Permute, LULinearPermute
+from normflows import ConditionalNormalizingFlow
 from sbmfi.inference.normflows_patch import (
     CircularAutoregressiveRationalQuadraticSpline,
     CircularCoupledRationalQuadraticSpline,
@@ -49,7 +50,7 @@ def flow_constructor(
         num_context_channels=None,
         autoregressive=True,
         num_blocks=4,
-        num_hidden_channels=20,
+        num_hidden_channels=5,
         num_bins=10,
         dropout_probability=0.0,
         num_transforms = 3,
@@ -120,6 +121,8 @@ def flow_constructor(
             transform = CoupledRationalQuadraticSpline(**common_kwargs)
 
         if permute == 'lu':
+            if isinstance(transform, CircularAutoregressiveRationalQuadraticSpline):
+                raise ValueError('this CircularAutoregressiveRationalQuadraticSpline and LU transforms do not play together!')
             perm = LULinearPermute(num_channels=n_theta, identity_init=init_identity)
         elif permute == 'shuffle':
             perm = Permute(num_channels=n_theta, mode='shuffle')
@@ -133,7 +136,9 @@ def flow_constructor(
     if permute is not None:
         transforms = transforms[:-1]
 
+
     flow = EmbeddingConditionalNormalizingFlow(q0=base, flows=transforms, embedding_net=embedding_net, p=p)
+
     return flow
 
 
@@ -389,6 +394,7 @@ def flow_trainer(
             pbar.close()
     return np.array(losses)
 
+
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.core.polytopia import sample_polytope
@@ -396,43 +402,106 @@ if __name__ == "__main__":
     from normflows import NormalizingFlowVAE
     from normflows.distributions import NNDiagGaussian
 
-    mdv_ds = torch.load(r"C:\python_projects\sbmfi\mdv_ds.pt")
-    model, kwargs = spiro(
-        backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='com',
-        which_labellings=['A', 'B']
+    import pickle
 
-    )
-    up = UniNetFluxPrior(model.flux_coordinate_mapper, cache_size=100000)
-    fcm_cyl = FluxCoordinateMapper(
-        model,
-        kernel_basis='svd',  # basis for null-space of simplified polytope
-        basis_coordinates='cylinder',  # which variables will be considered free (basis or simplified)
-        logit_xch_fluxes=False,  # whether to logit exchange fluxes
-        hemi_sphere=False,
-        scale_bound=1.0,
-    )
+    cyl_fcm = pickle.load(open("C:\python_projects\sbmfi\cyl_fcm.p",'rb'))
+    dataloader = pickle.load(open(r"C:\python_projects\sbmfi\50k_dataloader.p",'rb'))
 
-    mdv_flow = flow_constructor(
-        fcm=fcm_cyl,
+    prior_flow = flow_constructor(
+        fcm=cyl_fcm,
         circular=True,
         embedding_net=None,
-        num_context_channels=mdv_ds.data.shape[-1],
+        num_context_channels=None,
         autoregressive=True,
         num_blocks=4,
         num_hidden_channels=20,
         num_bins=10,
         dropout_probability=0.0,
-        num_transforms=3,
+        num_transforms=5,
         init_identity=True,
-        permute=None,
+        permute='lu',
         p=None,
         scale=0.3,
     )
 
-    # flow_trainer(mdv_flow, mdv_ds, max_iter=50)
+    n_epoch = 5
+    LR_gamma = 1.0
+    learning_rate = 1e-3
+    weight_decay = 1e-4
+
+    n_steps = n_epoch * len(dataloader)
+    pbar = tqdm.tqdm(total=n_steps, ncols=120, position=0)
+    optimizer = torch.optim.Adam(prior_flow.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    if LR_gamma < 1.0:
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=LR_gamma, last_epoch=-1)
+
+
+
+    try:
+        get_val = lambda x: x.to('cpu').data.numpy()
+        losses = []
+        for epoch in range(n_epoch):
+            for i, (chunk,) in enumerate(dataloader):
+                loss = prior_flow.forward_kld(chunk)
+                optimizer.zero_grad()
+                if ~(torch.isnan(loss) | torch.isinf(loss)):
+                    loss.backward()
+                    optimizer.step()
+                else:
+                    raise ValueError(f'loss: {loss}')
+                np_loss = get_val(loss)
+                losses.append(float(np_loss))
+                pbar.update()
+                pbar.set_postfix(loss=np_loss.round(4))
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(e)
+        raise e
+    finally:
+        pbar.close()
+
+
+
+
+    # mdv_ds = torch.load(r"C:\python_projects\sbmfi\mdv_ds.pt")
+    # model, kwargs = spiro(
+    #     backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='com',
+    #     which_labellings=['A', 'B']
     #
-    x, y = mdv_ds[[123456]]
-    num_samples = 50
-    xx = torch.tile(x, (num_samples, 1))
-    samples = mdv_flow.sample(num_samples=num_samples, context=x)
+    # )
+    # up = UniNetFluxPrior(model.flux_coordinate_mapper, cache_size=100000)
+    # fcm_cyl = FluxCoordinateMapper(
+    #     model,
+    #     kernel_basis='svd',  # basis for null-space of simplified polytope
+    #     basis_coordinates='cylinder',  # which variables will be considered free (basis or simplified)
+    #     logit_xch_fluxes=False,  # whether to logit exchange fluxes
+    #     hemi_sphere=False,
+    #     scale_bound=1.0,
+    # )
+
+    # mdv_flow = flow_constructor(
+    #     fcm=fcm_cyl,
+    #     circular=True,
+    #     embedding_net=None,
+    #     num_context_channels=mdv_ds.data.shape[-1],
+    #     autoregressive=True,
+    #     num_blocks=4,
+    #     num_hidden_channels=20,
+    #     num_bins=10,
+    #     dropout_probability=0.0,
+    #     num_transforms=3,
+    #     init_identity=True,
+    #     permute=None,
+    #     p=None,
+    #     scale=0.3,
+    # )
+    #
+    # # flow_trainer(mdv_flow, mdv_ds, max_iter=50)
+    # #
+    # x, y = mdv_ds[[123456]]
+    # num_samples = 50
+    # xx = torch.tile(x, (num_samples, 1))
+    # samples = mdv_flow.sample(num_samples=num_samples, context=x)
 

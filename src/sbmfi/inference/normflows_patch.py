@@ -19,6 +19,10 @@ import inspect
 from torch.utils.data import Dataset, DataLoader, random_split
 from normflows.nets.made import MaskedLinear
 
+from sbmfi.core.util import profile
+from line_profiler import line_profiler
+
+prof = line_profiler.LineProfiler()
 
 class DiagGaussianScale(DiagGaussian):
     def __init__(self, shape, trainable=True, scale=0.3):
@@ -170,7 +174,7 @@ class CircularAutoregressiveRationalQuadraticSpline(Flow):
         tail_bound=3,
         activation=nn.ReLU,
         dropout_probability=0.0,
-        use_batch_norm=True,
+        use_batch_norm=False,
         permute_mask=True,
         init_identity=True,
     ):
@@ -253,7 +257,7 @@ class EmbeddingConditionalNormalizingFlow(ConditionalNormalizingFlow):
     which is also called context, to both the base distribution
     and the flow layers
     """
-    def __init__(self, q0, flows, p=None, embedding_net=None):
+    def __init__(self, q0=None, flows=None, p=None, embedding_net=None):
         super().__init__(q0, flows, p)
         self._embnet = embedding_net
         if embedding_net is not None:
@@ -357,8 +361,19 @@ normflows.nets.made.MaskedResidualBlock = MaskedResidualBlockFixed
 if __name__ == "__main__":
     from normflows.distributions.base import BaseDistribution, Uniform, UniformGaussian
     from normflows.flows import Permute, LULinearPermute
+    from normflows import ConditionalNormalizingFlow
+    from normflows.flows.neural_spline import CircularAutoregressiveRationalQuadraticSpline, AutoregressiveRationalQuadraticSpline, CircularCoupledRationalQuadraticSpline
+    import pickle
+    #
+    # dataloader = pickle.load(open(r"C:\python_projects\sbmfi\50k_dataloader.p", 'rb'))
+    # chunk = next(dataloader)
+    #
+    # n_dim = chunk.shape[-1]
+    #
+    # CircularAutoregressiveRationalQuadraticSpline(
+    #     num_input_channels=n_dim,
+    #     num_blocks=n_dim,
+    #
+    # )
 
-    transform = LULinearPermute(num_channels=5)
-    base = Uniform(shape=5, low=-1.0, high=1.0)
-    aa = EmbeddingConditionalNormalizingFlow(base, [transform])
-    aa.sample(20)
+

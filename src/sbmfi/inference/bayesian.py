@@ -520,8 +520,7 @@ class _BaseBayes(_BaseSimulator):
         directions = directions / self._la.norm(directions, 2, -1, True)
 
         A_dist = self._la.tensormul_T(self._sampler._G, directions)  # this one has wrong sign on first row
-        particle_pol_dist = self._sampler._h.T - self._la.tensormul_T(self._sampler._G, old_pol)
-
+        particle_pol_dist = self._la.unsqueeze(self._sampler._h.T - self._la.tensormul_T(self._sampler._G, old_pol), 1)
         allpha = -particle_pol_dist / A_dist
         alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
         alpha = diff[..., 0] / directions[..., 0]  # alpha is the same for all dimensions, so we only need to select 1
@@ -785,71 +784,66 @@ class MCMC(_BaseBayes):
         )
         pbar = tqdm.tqdm(total=n_tot, ncols=100)
         i = 0
-        # try:
-        while i < n_tot:
-            pert_ys = self.perturb_particles(y, i, **perturb_kwargs)
-            if return_what:
-                pert_ys, pert_prop_probs = pert_ys
-                # two lines below only hold for symmetric proposals, otherwise we need to compute exactly
-                chord_prop_probs[0, 1] = pert_prop_probs
-                chord_prop_probs[1, 0] = pert_prop_probs
-
-            chord_ys[1:] = pert_ys
-            pert_post_probs = self.potential(pert_ys)
-
-            if self.potentype == 'approx':
-                raise NotImplementedError('reject ABC proposals if all are too distant!')
-
-            if return_data:
-                pert_post_probs, data = pert_post_probs
-                chord_data[1:] = data
-
-            chord_post_probs[1:] = pert_post_probs
-
-            if not return_what:
-                chord_prop_probs = self.compute_proposal_prob(
-                    old_particles=chord_ys,
-                    new_particles=chord_ys,
-                    chord_proposal=chord_proposal,
-                    chord_std=chord_std,
-                    xch_proposal=xch_proposal,
-                    xch_std=xch_std,
-                    old_is_new=True,
-                )
-            accept_idx = self.accept_reject(i, chord_post_probs, chord_prop_probs, pre_sample_batch, peskunize)
-            accepted_probs = chord_post_probs[accept_idx, chain_selector]
-            chord_post_probs[0] = accepted_probs  # set the log-probs of the current sample
-            y = chord_ys[accept_idx, chain_selector]
-            # print(chord_post_probs)
-            # print(accept_idx)
-            # print()
-            chord_ys[0] = y  # set the log-probs of the current sample
-            if return_data:
-                data = chord_data[accept_idx, chain_selector]
-                chord_data[0] = data
-
-            j = i - n_burn
-            pbar.update(1)
-            if j > 0:
-                if n_cdf > 1:
-                    accept_idx[accept_idx > 0] = 1
-                accept_rate += accept_idx
-                avg_rate = self._la.mean(accept_rate / j)
-                if j % 50 == 0:
-                    pbar.set_postfix(avg_acc=avg_rate.item())
-
-            if (j % thinning_factor == 0) and (j > -1):
-                k = j // thinning_factor
-                post_probs[k] = accepted_probs
-                chains[k] = y
-                if return_data:
-                    sim_data[k] = data
-            i += 1
         try:
-            pass
+            while i < n_tot:
+                pert_ys = self.perturb_particles(y, i, **perturb_kwargs)
+                if return_what:
+                    pert_ys, pert_prop_probs = pert_ys
+                    # two lines below only hold for symmetric proposals, otherwise we need to compute exactly
+                    chord_prop_probs[0, 1] = pert_prop_probs
+                    chord_prop_probs[1, 0] = pert_prop_probs
+
+                chord_ys[1:] = pert_ys
+                pert_post_probs = self.potential(pert_ys)
+
+                if self.potentype == 'approx':
+                    raise NotImplementedError('reject ABC proposals if all are too distant!')
+
+                if return_data:
+                    pert_post_probs, data = pert_post_probs
+                    chord_data[1:] = data
+
+                chord_post_probs[1:] = pert_post_probs
+
+                if not return_what:
+                    chord_prop_probs = self.compute_proposal_prob(
+                        old_particles=chord_ys,
+                        new_particles=chord_ys,
+                        chord_proposal=chord_proposal,
+                        chord_std=chord_std,
+                        xch_proposal=xch_proposal,
+                        xch_std=xch_std,
+                        old_is_new=True,
+                    )
+                accept_idx = self.accept_reject(i, chord_post_probs, chord_prop_probs, pre_sample_batch, peskunize)
+                accepted_probs = chord_post_probs[accept_idx, chain_selector]
+                chord_post_probs[0] = accepted_probs  # set the log-probs of the current sample
+                y = chord_ys[accept_idx, chain_selector]
+                chord_ys[0] = y  # set the log-probs of the current sample
+                if return_data:
+                    data = chord_data[accept_idx, chain_selector]
+                    chord_data[0] = data
+
+                j = i - n_burn
+                pbar.update(1)
+                if j > 0:
+                    if n_cdf > 1:
+                        accept_idx[accept_idx > 0] = 1
+                    accept_rate += accept_idx
+                    avg_rate = self._la.mean(accept_rate / j)
+                    if j % 50 == 0:
+                        pbar.set_postfix(avg_acc=avg_rate.item())
+
+                if (j % thinning_factor == 0) and (j > -1):
+                    k = j // thinning_factor
+                    post_probs[k] = accepted_probs
+                    chains[k] = y
+                    if return_data:
+                        sim_data[k] = data
+                i += 1
         except Exception as e:
             if e is not KeyboardInterrupt:
-                print(e)
+                raise
         finally:
             pbar.close()
             chains = self.map_chains_2_theta(chains)
@@ -997,7 +991,7 @@ class SMC(_BaseBayes):
         n = particles.shape[0]
         population_batch = min(n, population_batch)
 
-        chord_cov, xch_std = None, None
+        theta_cov, chord_cov, xch_std = None, None, None
         if (chord_proposal == 'gauss') or (xch_proposal == 'gauss'):
             theta_cov = self.mvn_kernel_variance(
                 particles,
@@ -1065,7 +1059,9 @@ class SMC(_BaseBayes):
                         new_data.append(data[is_accepted])
                     m += num_accepted_batch
         except Exception as e:
-            print(e)
+            if e is not KeyboardInterrupt:
+                raise
+            # print(e)
         finally:
             pbar.close()
             self._totime.append(pbar.format_dict['elapsed'])
@@ -1088,6 +1084,7 @@ class SMC(_BaseBayes):
             new_log_weights,
             new_distances,
             new_data,
+            theta_cov,
         )
 
 
@@ -1206,6 +1203,7 @@ class SMC(_BaseBayes):
                         all_log_weights = [log_weights]
                         all_distances = [dist]
                         all_epsilons = [epsilon]
+                        all_theta_cov = [self._la.get_tensor((self._K, self._K))]
                         if return_data:
                             all_data = [data[sortidx][:n]]
                 else:
@@ -1217,7 +1215,7 @@ class SMC(_BaseBayes):
                         # Constant decay.
                         epsilon *= epsilon_decay
 
-                    particles, log_weights, dist, data = self._sample_next_population(
+                    particles, log_weights, dist, data, theta_cov = self._sample_next_population(
                         particles=particles,
                         log_weights=log_weights,
                         epsilon=epsilon,
@@ -1233,10 +1231,12 @@ class SMC(_BaseBayes):
                         all_log_weights.append(log_weights)
                         all_distances.append(dist)
                         all_epsilons.append(epsilon)
+                        all_epsilons.append(epsilon)
                         if return_data:
                             all_data.append(data)
         except Exception as e:
-            print(e)
+            if e is not KeyboardInterrupt:
+                raise
         finally:
             if return_all_populations:
                 particles = self._la.stack(all_particles, 0)
@@ -1325,28 +1325,88 @@ if __name__ == "__main__":
     import pickle
     from sbmfi.core.observation import MVN_BoundaryObservationModel
 
-    model, kwargs = multi_modal(backend='torch')
-    mcmc = MCMC(
+    model, kwargs = spiro(
+        backend='torch',
+        auto_diff=False,
+        batch_size=1,
+        add_biomass=True,
+        v2_reversible=True,
+        ratios=True,
+        build_simulator=True,
+        add_cofactors=True,
+        which_measurements='lcms',
+        seed=1,
+        measured_boundary_fluxes=('h_out',),
+        which_labellings=['A', 'B'],
+        include_bom=True,
+        v5_reversible=False,
+        n_obs=0,
+        kernel_basis='svd',
+        basis_coordinates='rounded',
+        logit_xch_fluxes=False,
+        L_12_omega=1.0,
+        clip_min=None,
+        transformation='ilr',
+    )
+    prior = UniNetFluxPrior(model, cache_size=100)
+    smc = SMC(
         model=model,
         substrate_df=kwargs['substrate_df'],
         mdv_observation_models=kwargs['basebayes']._obmods,
-        prior=kwargs['basebayes']._prior,
-        boundary_observation_model=kwargs['basebayes']._bom
+        boundary_observation_model=kwargs['basebayes']._bom,
+        prior=prior,
+        num_processes=3,
     )
-    mcmc.set_measurement(x_meas=kwargs['measurements']) # [:, :-3]
-    mcmc.set_true_theta(theta=kwargs['true_theta'])
-    res = mcmc.run(
-        n=4000, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=1, chord_std=0.3, peskunize=True,
-        chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
+    smc.set_measurement(x_meas=kwargs['measurements'])
+    smc.set_true_theta(theta=kwargs['true_theta'])
+    smc_result = smc.run(
+        n_smc_steps=10,
+        n=20000,
+        n_obs=3,
+        n0_multiplier=1.5,
+        population_batch=1000,
+        distance_based_decay=True,
+        epsilon_decay=0.8,
+        kernel_std_scale=1.0,
+        evaluate_prior=False,
+        potentype='approx',
+        return_data=True,
+        potential_kwargs={},
+        metric='rmse',
+        chord_proposal='gauss',
+        xch_proposal='gauss',
+        xch_std=0.4,
+        return_all_populations=True,
+        return_az=True,
+        debug=False,
     )
-    # pm = PlotMonster(model._fcm._sampler.basis_polytope, res)
-    import holoviews as hv
+    smc_result.to_netcdf('spiro_20000samples_10steps_alldata.nc')
 
-    # hv.save(pm.grand_theta_plot(var1_id='R_a_in', var2_id='R_v4'), 'ding', fmt='html', backend='bokeh')
 
-    print(
-        (res.posterior['theta'].values[:,:,-1] > 0.).sum() / len(res.posterior['chain'])
-    )
+
+
+    # model, kwargs = multi_modal(backend='torch')
+    # mcmc = MCMC(
+    #     model=model,
+    #     substrate_df=kwargs['substrate_df'],
+    #     mdv_observation_models=kwargs['basebayes']._obmods,
+    #     prior=kwargs['basebayes']._prior,
+    #     boundary_observation_model=kwargs['basebayes']._bom
+    # )
+    # mcmc.set_measurement(x_meas=kwargs['measurements']) # [:, :-3]
+    # mcmc.set_true_theta(theta=kwargs['true_theta'])
+    # res = mcmc.run(
+    #     n=4000, n_burn=0, thinning_factor=1, n_cdf=1, n_chains=1, chord_std=0.3, peskunize=True,
+    #     chord_proposal='gauss', xch_proposal='gauss', xch_std=0.4
+    # )
+    # # pm = PlotMonster(model._fcm._sampler.basis_polytope, res)
+    # import holoviews as hv
+    #
+    # # hv.save(pm.grand_theta_plot(var1_id='R_a_in', var2_id='R_v4'), 'ding', fmt='html', backend='bokeh')
+    #
+    # print(
+    #     (res.posterior['theta'].values[:,:,-1] > 0.).sum() / len(res.posterior['chain'])
+    # )
 
     # hdf = r"C:\python_projects\sbmfi\spiro_flow_lowsigma.h5"
     # did = 'sims'
