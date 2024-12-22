@@ -7,7 +7,7 @@ from sbmfi.inference.bayesian import _BaseBayes, MCMC, SMC
 import torch
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.observation import BoundaryObservationModel, MDV_ObservationModel
-from sbmfi.inference.priors import _NetFluxPrior
+from sbmfi.inference.priors import BaseRoundedPrior
 from sbmfi.core.simulator import _BaseSimulator
 import pandas as pd
 from typing import Dict, Optional, Callable, Any, Union
@@ -96,7 +96,7 @@ class NeuralPolytopePosterior(NeuralPosterior):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _NetFluxPrior,
+            prior: BaseRoundedPrior,
             boundary_observation_model: BoundaryObservationModel = None,
             x_shape=None,
             device='cpu',
@@ -221,7 +221,7 @@ class SNPE_P(_BaseBayes, SNPE_C):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _NetFluxPrior,
+            prior: BaseRoundedPrior,
             boundary_observation_model: BoundaryObservationModel = None,
     ):
         # https://arxiv.org/abs/2210.04815
@@ -338,7 +338,7 @@ class SNPE_P(_BaseBayes, SNPE_C):
                     f'because of the difficult support of the the ratio-prior, '
                     f'its not currently possible to use {sample_with}'
                 )
-            elif isinstance(self._prior, _NetFluxPrior):
+            elif isinstance(self._prior, BaseRoundedPrior):
                 npp_kwargs = dict(
                     model=self._model,
                     substrate_df=self._substrate_df,
@@ -358,8 +358,8 @@ class SNPE_P(_BaseBayes, SNPE_C):
             if isinstance(self._prior, RatioPrior):
                 # TODO construct a box-uniform proposal distribution!
                 raise NotImplementedError
-            elif isinstance(self._prior, _NetFluxPrior):
-                proposal = UniNetFluxPrior(self._fcm)
+            elif isinstance(self._prior, BaseRoundedPrior):
+                proposal = UniRoundedFlexXchPrior(self._fcm)
             self._posterior = RejectionPosterior(
                 potential_fn=potential_fn,
                 proposal=proposal,
@@ -538,7 +538,7 @@ if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
 
     from sbmfi.core.simulator import DataSetSim
-    from sbmfi.inference.priors import UniNetFluxPrior
+    from sbmfi.inference.priors import UniRoundedFlexXchPrior
     import os
     import numpy as np
 
@@ -552,7 +552,7 @@ if __name__ == "__main__":
     sdf = kwargs['substrate_df']
     dss = DataSetSim(model, sdf, bbs._obmods, bbs._bom, num_processes=0)
     n = 20000
-    prior = UniNetFluxPrior(model, cache_size=n)
+    prior = UniRoundedFlexXchPrior(model, cache_size=n)
     h5_file = 'spiro.h5'
     dataset_id = 'test'
     create_data = False

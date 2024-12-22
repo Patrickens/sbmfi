@@ -25,7 +25,7 @@ def make_flux_pol_from_vertices(vertices: np.array, verbose=False, kernel_type='
     b_all.loc[A_lb.index] = -vertices.min(0)
 
     pol = LabellingPolytope(A=A_all, b=b_all)
-    vsm = PolytopeSamplingModel(pol, pr_verbose=verbose, kernel_basis=kernel_type,
+    vsm = PolytopeSamplingModel(pol, pr_verbose=verbose, kernel_id=kernel_type,
                                 basis_coordinates=basis_coordinates)
     return pol, vsm
 

@@ -6,10 +6,13 @@ import torch
 import inspect
 from torch.distributions.constraints import Constraint, _Dependent, _Interval
 from PolyRound.api import PolyRoundApi
+from torch.types import _size
+
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.polytopia import LabellingPolytope, FluxCoordinateMapper, \
-    PolytopeSamplingModel, fast_FVA, rref_and_project, sample_polytope, project_polytope, compute_volume
+    PolytopeSamplingModel, fast_FVA, rref_and_project, sample_polytope, project_polytope, compute_volume, \
+    make_theta_polytope
 from typing import Iterable, Union, List, Dict
 from torch.distributions import constraints
 from torch.distributions import Distribution
@@ -19,8 +22,7 @@ import tqdm
 
 def sampling_tasks(
         polytope: LabellingPolytope, # this is a basis polytope that will be modified using b_constraint_df and A_constraint_dct
-        kernel_basis = 'svd',
-        basis_coordinates = 'rounded',
+        kernel_id ='svd',
         counts: Union[int, pd.Series] = 20,  # number of fluxes to sample from yielded polytope
         A_constraint_df: pd.DataFrame = None, # this should have a multiindex with level 1 being names, and 2 being constraint_names
         S_constraint_df: pd.DataFrame = None, # this should have a multiindex with level 1 being names, and 2 being constraint_names
@@ -83,8 +85,7 @@ def sampling_tasks(
             'return_psm': return_psm,
             'phi': None,
             'linalg': linalg,
-            'kernel_basis': kernel_basis,
-            'basis_coordinates': basis_coordinates,
+            'kernel_id': kernel_id,
             'density': None,
             'n_cdf': 1,
             'return_arviz': False,
@@ -124,10 +125,9 @@ class _CannonicalPolytopeSupport(_Dependent):  #
     _VTOL = 1e-6
     def __init__(
             self,
-            fcm: FluxCoordinateMapper,
+            polytope: LabellingPolytope,
             validation_tol = _VTOL,
     ):
-        polytope = fcm.make_theta_polytope()
         if polytope.S is not None:
             raise ValueError('only for cannonical polytopes, Av <= b')
 
@@ -155,90 +155,21 @@ class _CannonicalPolytopeSupport(_Dependent):  #
         return valid.view(*vape[:-1], self._A.shape[0])
 
 
-class _BallSupport(_Dependent):
-    def __init__(
-            self,
-            fcm: FluxCoordinateMapper,
-            validation_tol=_CannonicalPolytopeSupport._VTOL,
-    ):
-        self._vtol = validation_tol
-        self._nx = fcm._nx
-        self._logxch = fcm._logxch
-        self._hemi = fcm._sampler._hemi
-        self._constraint_id = fcm.theta_id
-        if not self._logxch and (self._nx > 0):
-            self._rho_bounds = torch.Tensor(fcm._rho_bounds)
-            self._rho_bounds[:, 0] -= self._vtol
-            self._rho_bounds[:, 1] += self._vtol
-
-        polytope = fcm.make_theta_polytope()
-        super().__init__(is_discrete=False, event_dim=polytope.A.shape[1])
-
-    def to(self, *args, **kwargs):
-        if not self._logxch and (self._nx > 0):
-            self._rho_bounds = self._rho_bounds.to(*args, **kwargs)
-
-    def check(self, value: torch.Tensor) -> torch.Tensor:
-        ball = value
-        if self._nx > 0:
-            ball = value[..., :-self._nx]
-        sphere = ball[..., :-1]
-        distance = ball[..., [-1]]
-        dist_check = (distance > 0.0) & (distance < 1.0)
-        norm = torch.norm(sphere, p=2, dim=-1, keepdim=True)
-        norm_check = (norm > 1.0 - self._vtol) & (norm < 1.0 + self._vtol)
-        if self._hemi:
-            dist_check = self._la.cat([dist_check, sphere[..., [0]] > 0.0 - self._vtol], dim=-1)
-        if (self._nx > 0) and not self._logxch:
-            xch_vars = value[..., -self._nx:]
-            xch_check = (xch_vars > self._rho_bounds[:, 0]) & (xch_vars < self._rho_bounds[:, 1])
-            return torch.cat([norm_check, dist_check, xch_check], dim=-1)
-        return torch.cat([norm_check, dist_check], dim=-1)
-
-
-class _CylinderSupport(_BallSupport):
-    def __init__(
-            self,
-            fcm: FluxCoordinateMapper,
-            validation_tol=_CannonicalPolytopeSupport._VTOL,
-    ):
-        super().__init__(fcm=fcm, validation_tol=validation_tol)
-
-    def check(self, value: torch.Tensor) -> torch.Tensor:
-        cylinder = value
-        if self._nx > 0:
-            cylinder = value[..., :-self._nx]
-        phi = cylinder[..., 1]
-        # if self._hemi:  # TODO check if the scaling works and then we can remove this
-        #     check_phi = (phi > 0.0 - self._vtol) & (phi < math.pi + self._vtol)
-        # else:
-        #     check_phi = (phi > -math.pi - self._vtol) & (phi < math.pi + self._vtol)
-        check_phi = (phi > -math.pi - self._vtol) & (phi < math.pi + self._vtol)
-        distance = cylinder[..., [-1]]
-        dist_check = (distance > 0.0) & (distance < 1.0)
-        unif = cylinder[..., 1:-1]
-        unif_check = (unif > -1.0 - self._vtol) & (unif < -1.0 + self._vtol)
-        if (self._nx > 0) and not self._logxch:
-            xch_vars = torch.atleast_2d(value[..., -self._nx:])
-            xch_check = (xch_vars > self._rho_bounds[:, 0]) & (xch_vars < self._rho_bounds[:, 1])
-            return torch.cat([check_phi, unif_check, dist_check, xch_check], dim=-1)
-        return torch.cat([check_phi, unif_check, dist_check], dim=-1)
-
-
 class _BasePrior(Distribution):
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
-            cache_size: int = 20000,
             num_processes: int = 0,
     ):
         # prior sampling variables
-        self._ic = cache_size  # current index in the cache
         if isinstance(model, LabellingModel):
             model = model.flux_coordinate_mapper
         if model._la.backend != 'torch':
             linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
             model = model.to_linalg(linalg)
+            
+        if model.coordinate_id != 'rounded':
+            raise ('cannot have coordinate_id other than rounded!')
 
         self._fcm = model
         self._la = model._la
@@ -249,10 +180,6 @@ class _BasePrior(Distribution):
         self._mp_pool = None
         if num_processes > 0:
             self._mp_pool = self._get_mp_pool()
-
-        self._cache_fill_kwargs = {'n': cache_size}
-
-        self._theta_cache = torch.zeros((cache_size, self.n_theta), dtype=torch.double) # cache to store dependent variables
 
         # passing validate_args={} will trigger support checking
         super().__init__(event_shape=torch.Size((self.n_theta,)), validate_args={})
@@ -287,38 +214,15 @@ class _BasePrior(Distribution):
         # this is useful for when we would like to sample on GPU
         raise NotImplementedError
 
-    def _fill_caches(self, n=20000, **kwargs):
-        # this function fills the cache with dependent variables in self._cache and fluxes in self._flux_cache
-        raise NotImplementedError
-
-    def rsample(self, sample_shape=torch.Size([])):
-        # NB this always returns free fluxes in the thermodynamic coordinate system
-        if not isinstance(sample_shape, torch.Size):
-            sample_shape = torch.Size(sample_shape)
-
-        n = sample_shape.numel()
-        if n > self._theta_cache.shape[0]:
-            self._cache_fill_kwargs['n'] = n
-
-        jc = self._ic + n
-        if jc > self._theta_cache.shape[0]:
-            self._fill_caches(**self._cache_fill_kwargs)
-            self._ic = 0
-            jc = n
-
-        sample = self._theta_cache[self._ic: jc].view(self._extended_shape(sample_shape))
-        self._ic = jc
-        return sample
-
-    def sample_pandalize(self, n):
+    def sample_pandalize(self, n: int):
         result = self.sample((n, ))
         return pd.DataFrame(self._la.tonp(result), columns=self.theta_id)
 
     def _run_tasks(
             self, tasks, fn=sample_polytope, break_i=-1, close_pool=True, scramble=True,
-            what='basis', return_results=False, n_tasks=0, desc=None
+            what='rounded', return_results=False, n_tasks=0, desc=None
     ):
-        if n_tasks > 0:
+        if n_tasks:
             pbar = tqdm.tqdm(tasks, total=n_tasks, ncols=100, desc=desc)
         else:
             pbar = tasks
@@ -340,11 +244,11 @@ class _BasePrior(Distribution):
 
         if fn == sample_polytope:
             whatensor = self._la.cat([torch.as_tensor(r[what]) for r in results])
-            if 'new_initial_points' in results[0]:
-                self._initial_points = results[0]['new_initial_points']
             if scramble:
                 scramble_indices = self._la.randperm(whatensor.shape[0])
                 whatensor = whatensor[scramble_indices]
+            if 'new_initial_points' in results[0]:
+                self._initial_points = results[0]['new_initial_points']
 
             if return_results:
                 log_det_E = [r['log_det_E'] for r in results]
@@ -355,32 +259,28 @@ class _BasePrior(Distribution):
 
         elif fn == compute_volume:
             return pd.DataFrame(results)
-
         else:
             return results
 
 
-class _NetFluxPrior(_BasePrior):
+class BaseRoundedPrior(_BasePrior):
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
-            cache_size: int = 20000,
             num_processes: int = 0,
     ):
-        self._basis_points = None
-        super(_NetFluxPrior, self).__init__(model, cache_size, num_processes)
+        self._initial_points = None
+        super(BaseRoundedPrior, self).__init__(model, num_processes)
 
     # NB event_dim=1 means that the right-most dimension defines an event!
     @constraints.dependent_property(is_discrete=False, event_dim=1)
     def support(self):
-        if self._fcm._sampler.basis_coordinates in ['ball', 'hemi_ball']:
-            supp = _BallSupport(self._fcm)
-        elif self._fcm._sampler.basis_coordinates == 'cylinder':
-            supp = _CylinderSupport(self._fcm)
-        else:
-            supp = _CannonicalPolytopeSupport(fcm=self._fcm)
-        supp.to(dtype=torch.float32)  # TODO maybe pass dtype as a kwarg or maybe always enforce float32
+        supp = _CannonicalPolytopeSupport(polytope=self._fcm._sampler._F_round)
+        # supp.to(dtype=torch.float32)  # TODO maybe pass dtype as a kwarg or maybe always enforce float32
         return supp
+
+    def rsample(self, sample_shape: _size = torch.Size()) -> torch.Tensor:
+        raise NotImplementedError
 
     @property
     def theta_id(self) -> pd.Index:
@@ -391,7 +291,7 @@ class _NetFluxPrior(_BasePrior):
         return len(self._fcm.theta_id)
 
 
-class _XchFluxPrior(Distribution):
+class BaseXchFluxPrior(Distribution):
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
@@ -404,19 +304,21 @@ class _XchFluxPrior(Distribution):
             linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
             model = model.to_linalg(linalg)
 
+        if model.logit_xch_fluxes or (model._rescale_val is not None):
+            raise ValueError('can only do non-log transformed and non rescaled fluxes, '
+                             f'fcm now has {model.logit_xch_fluxes} and {model.symmetric_rescale_val}')
+
         if model._nx == 0:
             raise ValueError('no boundary fluxes')
 
         self._fcm = model
         self._la = model._la
-        self._logxch = model._logxch
-        self._bound = model._bound
         self._rho_bounds = model._rho_bounds
         super().__init__(event_shape=torch.Size((model._nx, )), validate_args={})
 
     @property
     def theta_id(self) -> pd.Index:
-        return self._fcm.xch_basis_id
+        return self._fcm.xch_theta_id
     
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
         raise NotImplementedError
@@ -426,11 +328,10 @@ class _XchFluxPrior(Distribution):
 
     @constraints.dependent_property(is_discrete=False, event_dim=1)
     def support(self):
-        if not self._logxch:
-            return constraints.interval(self._rho_bounds[:, 0], self._rho_bounds[:, 1])
+        return constraints.interval(self._rho_bounds[:, 0], self._rho_bounds[:, 1])
 
 
-class UniXchFluxPrior(_XchFluxPrior):  # TODO rename
+class XchFluxPrior(BaseXchFluxPrior):  # TODO rename
     def __init__(
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
@@ -445,58 +346,62 @@ class UniXchFluxPrior(_XchFluxPrior):  # TODO rename
             raise NotImplementedError('this should signal that we sample from a truncated normal!')
 
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
-        bounded_samples = self._la.sample_bounded_distribution(
+        if not isinstance(sample_shape, torch.Size):
+            sample_shape = torch.Size(sample_shape)
+
+        result = self._la.sample_bounded_distribution(
             shape=sample_shape,
             lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1],
-            mu=self._mu, std=self._std
+            mu=self._mu, std=self._std, which=self._which
         )
-        if self._logxch :
-            return self._fcm._logit_xch(xch_fluxes=bounded_samples)
-        elif self._bound is not None:
-            return self._fcm._bound_scale_xch(bounded_samples, to_bound=True)
-        return bounded_samples
+        return result.view(self._extended_shape(sample_shape))
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        if self._logxch:
-            value = self._fcm._expit_xch(value)
-        elif self._bound is not None:
-            value = self._fcm._bound_scale_xch(value, to_bound=False)
         # we do not check any support here, since that has been done in UniFluxPrior
+        if self._validate_args:
+            self._validate_sample(value)
         if self._which == 'gauss':
-            raise ValueError
+            return self._la.trunc_norm_log_pdf(
+                value, lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1], mu=self._mu, std=self._std
+            )
         return torch.zeros((*value.shape[:-1], 1))
 
 
-class UniNetFluxPrior(_NetFluxPrior):
+class UniRoundedFlexXchPrior(BaseRoundedPrior):
     def __init__(
             self,
             model,
-            xch_prior: _XchFluxPrior = None,
-            cache_size: int = 20000,
+            xch_prior: BaseXchFluxPrior = None,
             **kwargs,
     ):
-        super(UniNetFluxPrior, self).__init__(model, cache_size, **kwargs)
+        super(UniRoundedFlexXchPrior, self).__init__(model, **kwargs)
         if (self._fcm._nx > 0) and (xch_prior is None):
-            xch_prior = UniXchFluxPrior(self._fcm)
+            xch_prior = XchFluxPrior(self._fcm)
         self._xch_prior = xch_prior
 
-    @property
-    def arg_constraints(self) -> Dict[str, constraints.Constraint]:
-        return {}
+    @constraints.dependent_property(is_discrete=False, event_dim=1)
+    def support(self):
+        polytope = make_theta_polytope(self._fcm)
+        supp = _CannonicalPolytopeSupport(polytope=polytope)
+        # supp.to(dtype=torch.float32)  # TODO maybe pass dtype as a kwarg or maybe always enforce float32
+        return supp
 
-    def _fill_caches(self, n=20000, **kwargs):
-        # this one is without pool always
+    def rsample(self, sample_shape: _size = torch.Size()) -> torch.Tensor:
+        if not isinstance(sample_shape, torch.Size):
+            sample_shape = torch.Size(sample_shape)
+        n = sample_shape.numel()
+        n_burn = 500 if self._initial_points is None else 0 # dont need burnin if we already sampled
         task = dict(
-            model=self._fcm._sampler, initial_points=self._basis_points, n=n, n_burn=200, new_initial_points=True,
-            thinning_factor=3, n_chains=6, return_what='basis'
+            model=self._fcm._sampler, initial_points=self._initial_points, n=n, n_burn=n_burn, new_initial_points=True,
+            thinning_factor=3, n_chains=6, return_what='rounded'
         )
         func_kwargs = inspect.getfullargspec(sample_polytope).args
         kwargs = {key: task.get(key) for key in func_kwargs}
         theta = self._run_tasks(tasks=[tuple(kwargs.values())], scramble=True)
         if self._fcm._nx > 0:
-            xch_basis_samples = self._xch_prior.sample((n, ))
+            xch_basis_samples = self._xch_prior.sample((n,))
             theta = self._la.cat([theta, xch_basis_samples], dim=-1)
-        self._theta_cache = theta
+        return theta
 
     def log_prob(self, value):
         # log prob for uniform distribution is log(1 / vol(polytope))
@@ -504,14 +409,15 @@ class UniNetFluxPrior(_NetFluxPrior):
         if self._validate_args:
             self._validate_sample(value)
         # place-holder until we can compute polytope volumes
+        log_prob = torch.zeros((*value.shape[:-1], 1))
+        if self._fcm._nx > 0:
+            if isinstance(self._xch_prior, XchFluxPrior) and (self._xch_prior._which != 'unif'):
+                xch_fluxes = value[..., -self._fcm._nx:]
+                log_prob += self._xch_prior.log_prob(xch_fluxes)
+        return log_prob
 
-        if (self._fcm._nx > 0) and not isinstance(self._xch_prior, UniXchFluxPrior):
-            xch_fluxes = value[..., -self._fcm._nx:]
-            return self._xch_prior.log_prob(xch_fluxes)
-        return torch.zeros((*value.shape[:-1], 1))
 
-
-class ProjectionPrior(UniNetFluxPrior):
+class ProjectionPrior(UniRoundedFlexXchPrior):
     # TODO I noticed that for the biomass flux, it is rarely sampled over 0.3, thus here we
     #  sample boundary fluxes in a projected polytope and then constrain and sample just like with ratios
 
@@ -521,14 +427,13 @@ class ProjectionPrior(UniNetFluxPrior):
             self,
             model: Union[FluxCoordinateMapper, LabellingModel],
             projected_fluxes: Iterable,
-            xch_prior: _XchFluxPrior = None,
+            xch_prior: BaseXchFluxPrior = None,
             projection_pol: LabellingPolytope = None,
-            cache_size: int = 20000,
             num_processes: int = 0,
             number_type='float',
     ):
-        super(ProjectionPrior, self).__init__(model, xch_prior, cache_size, num_processes=num_processes)
-
+        super(ProjectionPrior, self).__init__(model, xch_prior, num_processes=num_processes)
+        raise NotImplementedError('does now work with new API')
         if projection_pol is None:
             pol = self._fcm._Fn
             settings = self._fcm._sampler._pr_settings
@@ -566,7 +471,7 @@ class ProjectionPrior(UniNetFluxPrior):
             return_what='basis',
         )
         self._projection_initial_points = boundary_result['new_initial_points']
-        boundary_samples = self._boundary_psm.to_net_fluxes(boundary_result['basis'], pandalize=True)
+        boundary_samples = self._boundary_psm.map_rounded_2_fluxes(boundary_result['basis'], pandalize=True)
         lb = boundary_samples.copy()
         ub = boundary_samples.copy()
         lb.columns += '|lb'
@@ -581,11 +486,11 @@ class ProjectionPrior(UniNetFluxPrior):
 
         b_constraint_df = pd.concat([-lb, ub], axis=1)  # NB this dataframe contains all the bounds for the b vector
 
-        kernel_basis = 'rref' if enumerate_vertices else 'svd'
-        basis_coordinates = 'transformed' if enumerate_vertices else 'rounded'
+        kernel_id = 'rref' if enumerate_vertices else 'svd'
+        coordinate_id = 'transformed' if enumerate_vertices else 'rounded'
         sampling_task_generator = sampling_tasks(
             self._fcm._Fn, b_constraint_df=b_constraint_df, counts=n_flux, return_what='net_fluxes',
-            return_psm=True, kernel_basis=kernel_basis, basis_coordinates=basis_coordinates,
+            return_psm=True, kernel_id=kernel_id, coordinate_id=coordinate_id,
         )
 
         net_fluxes = self._run_tasks(
@@ -613,7 +518,7 @@ class ProjectionPrior(UniNetFluxPrior):
             else:
                 self._volumes = pd.concat([self._volumes, volume_df], axis=0, ignore_index=True)
 
-        theta = self._fcm._sampler.to_net_basis(net_fluxes)
+        theta = self._fcm._sampler.map_fluxes_2_rounded(net_fluxes)
         if self._fcm._nx > 0:
             xch_basis_samples = self._xch_prior.sample((n * n_flux, ))
             theta = self._la.cat([theta, xch_basis_samples], dim=-1)
@@ -626,7 +531,7 @@ if __name__ == "__main__":
     from sbmfi.settings import MODEL_DIR, BASE_DIR
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
     from sbmfi.models.small_models import spiro
-    from equilibrator_api import *
+    # from equilibrator_api import *
 
     # model, kwargs = spiro()
     # fcm = FluxCoordinateMapper(model)
@@ -634,19 +539,20 @@ if __name__ == "__main__":
     #
     model, kwargs = spiro(
         backend='numpy', add_biomass=True, ratios=False, build_simulator=False, v2_reversible=True, v5_reversible=True,
-        basis_coordinates='transformed', kernel_basis='rref',
+        coordinate_id='transformed', kernel_id='rref',
     )
     fcm = FluxCoordinateMapper(
         model,
-        kernel_basis='svd',
-        basis_coordinates='rounded',
+        kernel_id='svd',
+        coordinate_id='rounded',
         logit_xch_fluxes=False,
-        scale_bound=2.0,
+        symmetric_rescale_val=2.0,
     )
-    xchp = UniXchFluxPrior(fcm)
+    xchp = UniRoundedFlexXchPrior(fcm)
     s = xchp.sample((10,))
-    print(xchp._la.scale(torch.tensor(0.0), lo=-2.0, hi=2.0))
-    print(pd.DataFrame(s.numpy(), columns=xchp.theta_id))
+    # print(s)
+    # print(xchp._la.scale(torch.tensor(0.0), lo=-2.0, hi=2.0))
+    # print(pd.DataFrame(s.numpy(), columns=xchp.theta_id))
     # print(fcm.theta_id)
     # up = UniformNetPrior(fcm, cache_size=50)
     # up.sample((20, ))
@@ -663,7 +569,7 @@ if __name__ == "__main__":
     # for rid in projected_fluxes:
     #     r = model.reactions.get_by_id(rid)
     #     print(r.bounds, r)
-    # fcm = FluxCoordinateMapper(model, kernel_basis='svd', basis_coordinates='rounded', free_reaction_id=projected_fluxes)
+    # fcm = FluxCoordinateMapper(model, kernel_id='svd', coordinate_id='rounded', free_reaction_id=projected_fluxes)
     # up = ProjectionPrior(model, projected_fluxes=projected_fluxes, cache_size=2000, number_type='fraction', num_processes=0)
     # up._fill_caches(n=5000, )
     # pickle.dump(up, open('anton_glc_projection_prior_w_volumes.p', 'wb'))

@@ -1,4 +1,4 @@
-from sbmfi.inference.priors import _NetFluxPrior
+from sbmfi.inference.priors import BaseRoundedPrior
 import contextlib, io
 import numpy as np
 import pandas as pd
@@ -79,16 +79,16 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
         net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self._Fn.A.columns].values)
     if isinstance(net_basis_samples, pd.DataFrame):
         index = net_basis_samples.index
-        net_basis_samples = self._la.get_tensor(values=net_basis_samples.loc[:, self.net_basis_id].values)
+        net_basis_samples = self._la.get_tensor(values=net_basis_samples.loc[:, self.net_theta_id].values)
 
     if net_fluxes is None:
         n = net_basis_samples.shape[0]
         if return_type in ['fluxes', 'both']:
-            net_fluxes = self._sampler.to_net_fluxes(net_basis_samples, is_rounded=self._sampler._bascoor == 'rounded')
+            net_fluxes = self._sampler.map_rounded_2_fluxes(net_basis_samples, is_rounded=self._sampler._coor_id == 'rounded')
     elif net_basis_samples is None:
         n = net_fluxes.shape[0]
         if return_type in ['theta', 'both']:
-            net_basis_samples = self._sampler.to_net_basis(net_fluxes)
+            net_basis_samples = self._sampler.map_fluxes_2_rounded(net_fluxes)
     else:
         n = net_fluxes.shape[0]
 
@@ -126,7 +126,7 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
     elif return_type == 'both':
         return theta, fluxes
 
-class ThermoPrior(_NetFluxPrior):
+class ThermoPrior(BaseRoundedPrior):
     def __init__(
             self,
             model: FluxCoordinateMapper,
@@ -441,7 +441,7 @@ class ThermoPrior(_NetFluxPrior):
                     [drg_xch_fluxes.loc[which_drg, :], ] * n_flux, axis=0
                 ).values
 
-            net_basis_samples = pd.concat([r['basis_samples'] for r in results], ignore_index=True).loc[:, self._fcm.net_basis_id]
+            net_basis_samples = pd.concat([r['basis_samples'] for r in results], ignore_index=True).loc[:, self._fcm.net_theta_id]
             theta, fluxes = self._fcm.append_xch_flux_samples(net_fluxes, net_basis_samples, xch_fluxes)
             # self.ding = self._fcm.map_theta_2_fluxes(self.theta)
 

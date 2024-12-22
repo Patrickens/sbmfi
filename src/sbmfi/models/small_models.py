@@ -1,8 +1,10 @@
+import pickle
+
 import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniNetFluxPrior
+from sbmfi.inference.priors import UniRoundedFlexXchPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel, MDV_ObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
@@ -30,8 +32,8 @@ def spiro(
         v5_reversible=False,
         measured_boundary_fluxes = ('h_out', ),
         n_obs=0,
-        kernel_basis='svd',
-        basis_coordinates='rounded',
+        kernel_id='svd',
+        coordinate_id='rounded',
         logit_xch_fluxes=False,
         L_12_omega = 1.0,
         clip_min=None,
@@ -212,8 +214,8 @@ def spiro(
         build_simulator=build_simulator,
         seed=seed,
         free_reaction_id=measured_boundary_fluxes,
-        kernel_basis=kernel_basis,
-        basis_coordinates=basis_coordinates,
+        kernel_id=kernel_id,
+        coordinate_id=coordinate_id,
         logit_xch_fluxes=logit_xch_fluxes,
     )
 
@@ -332,7 +334,7 @@ def spiro(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
-        up = UniNetFluxPrior(model._fcm, cache_size=1000)
+        up = UniRoundedFlexXchPrior(model._fcm)
 
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
@@ -437,9 +439,9 @@ def multi_modal(
         include_bom=True,
         a_in_lb = 5.0,
         a_in = 7.5,
-        kernel_basis = 'rref',
+        kernel_id = 'rref',
         top_frac = 0.3,
-        basis_coordinates = 'rounded',
+        coordinate_id = 'rounded',
         include_D = False,
         n_obs=1,
 ):
@@ -524,8 +526,8 @@ def multi_modal(
         measurements=annotation_df['met_id'].unique(),
         batch_size=batch_size,
         ratios=ratios,
-        kernel_basis=kernel_basis,
-        basis_coordinates=basis_coordinates,
+        kernel_id=kernel_id,
+        coordinate_id=coordinate_id,
         build_simulator=True
     )
     substrate_df = model.input_labelling.to_frame().T
@@ -590,7 +592,7 @@ def multi_modal(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, ['a_in'], None)
 
-        up = UniNetFluxPrior(model._fcm, cache_size=1000)
+        up = UniRoundedFlexXchPrior(model._fcm, cache_size=1000)
 
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
         true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
@@ -763,9 +765,8 @@ if __name__ == "__main__":
     # model, kwargs = spiro(
     #     backend='torch', add_biomass=True, v2_reversible=True, v5_reversible=True,
     #     batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
-    #     kernel_basis='rref',
+    #     kernel_id='rref',
     # )
-
     model, kwargs = spiro(
         backend='torch',
         auto_diff=False,
@@ -777,17 +778,42 @@ if __name__ == "__main__":
         add_cofactors=True,
         which_measurements='lcms',
         seed=2,
+        measured_boundary_fluxes=('h_out',),
         which_labellings=['A', 'B'],
         include_bom=True,
         v5_reversible=False,
         n_obs=0,
-        kernel_basis='svd',
-        basis_coordinates='rounded',
+        kernel_id='svd',
+        coordinate_id='rounded',
         logit_xch_fluxes=False,
         L_12_omega=1.0,
         clip_min=None,
         transformation='ilr',
     )
+
+
+    # model, kwargs = spiro(
+    #     backend='torch',
+    #     auto_diff=False,
+    #     batch_size=1,
+    #     add_biomass=True,
+    #     v2_reversible=True,
+    #     ratios=True,
+    #     build_simulator=True,
+    #     add_cofactors=True,
+    #     which_measurements='lcms',
+    #     seed=2,
+    #     which_labellings=['A', 'B'],
+    #     include_bom=True,
+    #     v5_reversible=False,
+    #     n_obs=0,
+    #     kernel_id='svd',
+    #     coordinate_id='rounded',
+    #     logit_xch_fluxes=False,
+    #     L_12_omega=1.0,
+    #     clip_min=None,
+    #     transformation='ilr',
+    # )
     # model, kwargs = spiro(
     #     seed=9, batch_size=1,
     #     backend='torch', v2_reversible=True, ratios=False, build_simulator=True,

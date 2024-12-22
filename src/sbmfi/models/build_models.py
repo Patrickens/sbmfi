@@ -7,7 +7,7 @@ from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex, excel_polytope
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniNetFluxPrior
+from sbmfi.inference.priors import UniRoundedFlexXchPrior
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os
@@ -1622,7 +1622,7 @@ def _parse_anton_fluxes():
     model, kwargs = build_e_coli_anton_glc(build_simulator=False)
     free_id = ['ME1', 'PGK', 'ICL', 'PGI', 'EDA', 'PPC', 'biomass_rxn', 'EX_glc__D_e', 'EX_ac_e']
     model.reactions.get_by_id('EX_glc__D_e').bounds = (-10.0, -10.0)
-    model.build_simulator(free_reaction_id=free_id, kernel_basis='rref', basis_coordinates='rounded')
+    model.build_model(free_reaction_id=free_id, kernel_id='rref', coordinate_id='rounded')
     thermo_pol = model._fcm._Ft
     net_pol = model._fcm._Fn
     # pickle.dump(thermo_pol, open('tp.p', 'wb'))
@@ -2028,7 +2028,7 @@ def build_e_coli_anton_glc(
     thermo_fluxes, theta, comparison = None, None, None
     if annotation_df is not None:
         bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, _bmid_ANTON)
-        up = UniNetFluxPrior(model)
+        up = UniRoundedFlexXchPrior(model)
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
         thermo_fluxes = read_anton_fluxes()
@@ -2204,7 +2204,7 @@ def build_e_coli_tomek(
     model.reactions.get_by_id('FBP').bounds = (0.0, 0.0)
     model.reactions.get_by_id('SUCCt3').bounds = (0.0, 0.0)
     if build_simulator:
-        model.build_simulator()
+        model.build_model()
     return model, kwargs
 
 
@@ -2227,8 +2227,8 @@ def simulator_factory(
         ratios=True,
         seed=None,
         free_reaction_id=None,
-        kernel_basis='svd',
-        basis_coordinates='rounded',
+        kernel_id='svd',
+        coordinate_id='rounded',
         logit_xch_fluxes=False,
 ) -> LabellingModel:
     if id_or_file_or_model is not None:
@@ -2268,10 +2268,10 @@ def simulator_factory(
     if measurements is not None:
         model.set_measurements(measurement_list=measurements)
     if build_simulator:
-        model.build_simulator(
+        model.build_model(
             free_reaction_id=free_reaction_id,
-            kernel_basis=kernel_basis,
-            basis_coordinates=basis_coordinates,
+            kernel_id=kernel_id,
+            coordinate_id=coordinate_id,
             logit_xch_fluxes=logit_xch_fluxes
         )
     return model

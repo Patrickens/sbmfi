@@ -35,7 +35,7 @@ class _RatioSupport(Constraint):
         self._mds = min_denom_sum
 
         polytope = fcm._Fn
-        normalize = fcm._sampler.kernel_basis != 'rref'
+        normalize = fcm._sampler.kernel_id != 'rref'
         simpol = PolyRoundApi.simplify_polytope(polytope, settings=fcm._sampler._pr_settings, normalize=normalize)
         polytope = LabellingPolytope.from_Polytope(simpol, polytope)
         if project:
@@ -446,7 +446,7 @@ class RatioPrior(_BasePrior):
             else:
                 kwargs = {'A_constraint_df': constraint_df}
             sampling_task_generator = sampling_tasks(
-                polytope=self._support._ratio_pol, transform_type=self._fcm._sampler.kernel_basis,
+                polytope=self._support._ratio_pol, transform_type=self._fcm._sampler.kernel_id,
                 basis_coordinates=self._fcm._sampler.basis_coordinates, linalg=self._fcm._la,
                 counts=n_flux, return_kwargs=self._num_processes == 0, return_basis_samples=True,
                 **kwargs

@@ -62,7 +62,7 @@ def flow_constructor(
     # prior_flow just makes a normalizing flow that matches samples from a prior
     #   thus not needing to fuck around with context = conditioning on data
 
-    if fcm._bound is None:
+    if fcm._rescale_val is None:
         raise ValueError('needs to have a tail_bound!')
 
     if circular and not (fcm._sampler.basis_coordinates == 'cylinder'):
@@ -76,15 +76,15 @@ def flow_constructor(
         if (fcm._nx > 0) and fcm.logit_xch_fluxes:
             ind = list(range(n_theta - fcm._nx))
             scale = torch.ones(n_theta)
-            scale[:-fcm._nx] *= fcm._bound * 2  # need to pass the width!
+            scale[:-fcm._nx] *= fcm._rescale_val * 2  # need to pass the width!
             base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
         else:
-            base = Uniform(shape=len(fcm.theta_id), low=-fcm._bound, high=fcm._bound)
+            base = Uniform(shape=len(fcm.theta_id), low=-fcm._rescale_val, high=fcm._rescale_val)
     else:
         if (fcm._nx > 0) and not fcm.logit_xch_fluxes:
             ind = list(range(n_theta - fcm._nx, n_theta))
             scale = torch.ones(n_theta)
-            scale[-fcm._nx:] *= fcm._bound * 2  # need to pass the width!
+            scale[-fcm._nx:] *= fcm._rescale_val * 2  # need to pass the width!
             base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
         else:
             base = DiagGaussianScale(n_theta, trainable=True, scale=scale)
@@ -97,7 +97,7 @@ def flow_constructor(
             num_hidden_channels=num_hidden_channels,
             num_context_channels=num_context_channels,
             num_bins=num_bins,
-            tail_bound=fcm._bound,
+            tail_bound=fcm._rescale_val,
             activation=nn.ReLU,
             dropout_probability=dropout_probability,
             init_identity=init_identity,
@@ -398,7 +398,7 @@ def flow_trainer(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.core.polytopia import sample_polytope
-    from sbmfi.inference.priors import UniNetFluxPrior
+    from sbmfi.inference.priors import UniRoundedFlexXchPrior
     from normflows import NormalizingFlowVAE
     from normflows.distributions import NNDiagGaussian
 

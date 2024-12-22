@@ -1,6 +1,6 @@
 import math
 
-from sbmfi.core.polytopia import PolytopeSamplingModel, V_representation, fast_FVA, LabellingPolytope
+from sbmfi.core.polytopia import PolytopeSamplingModel, V_representation, fast_FVA, LabellingPolytope, FluxCoordinateMapper
 from sbmfi.inference.arviz_monkey import *
 import pandas as pd
 import holoviews as hv
@@ -40,7 +40,7 @@ class PlotMonster(object):
     }
     def __init__(
             self,
-            polytope: LabellingPolytope,  # this should be in the sampled basis!
+            fcm: FluxCoordinateMapper,  # this should be in the sampled basis!
             inference_data: az.InferenceData,
             v_rep: pd.DataFrame = None,
             hv_backend='matplotlib',
@@ -48,7 +48,6 @@ class PlotMonster(object):
         # TODO make sure we can plot exchange fluxes!
         hv.extension(hv_backend)
         self._hvb = hv_backend == 'matplotlib'
-        self._pol = polytope
         if isinstance(inference_data, str):
             inference_data = az.from_netcdf(inference_data)
         self._data = inference_data
@@ -81,25 +80,31 @@ class PlotMonster(object):
         if ('posterior' not in inference_data) and ('prior' in inference_data):
             self._ingroup = 'prior'
 
-        if not all(polytope.A.columns.isin(inference_data[self._ingroup].theta_id.values)):
+        if not all(fcm.theta_id.isin(inference_data[self._ingroup].theta_id.values)):
             print(self._ingroup, )
-            print(polytope.A.columns)
+            print(fcm.theta_id)
             print(inference_data[self._ingroup].theta_id.values)
             raise ValueError
 
-        net_pol = thermo_2_net_polytope(polytope)
         if v_rep is None:
-            v_rep = V_representation(net_pol, number_type='fraction')
-        else:
-            if not v_rep.columns.equals(net_pol.A.columns):
-                raise ValueError
+            # NOTE: this only works with transformed polytope, because of the floating point arithmetic of cddlib!
+            #   therefore we pass the net-flux polytope which is then simplified and transformed
+            v_rep = V_representation(fcm._Fn, net_pol=True)
+
+            if fcm.coordinate_id == 'rounded':
+                v_rep = v_rep.values
+                E_1 = fcm._la.tonp(fcm._sampler._E_1)
+                epsilon = fcm._la.tonp(fcm._sampler._epsilon)
+                v_rep = (E_1 @ (v_rep - epsilon.T).T).T  # = rounded
+                v_rep = pd.DataFrame(v_rep, columns=fcm._sampler._rounded_id)
 
         self._v_rep = v_rep
+        polytope = fcm._sampler._F_trans if fcm.coordinate_id == 'transformed' else fcm._sampler._F_round
         self._fva = fast_FVA(polytope)
         if 'observed_data' in self._data:
             self._odf = self._load_observed_data()
         self._ttdf = self._load_true_theta()
-        self._max_prob_point = self._load_max_prob_point()
+        # self._max_prob_point = self._load_max_prob_point()
 
     @property
     def obsdat_df(self):
@@ -445,13 +450,13 @@ class PlotMonster(object):
 class MCMC_PLOT(PlotMonster):
     def __init__(
             self,
-            polytope: LabellingPolytope,  # this should be in the sampled basis!
+            fcm: FluxCoordinateMapper,  # this should be in the sampled basis!
             inference_data: az.InferenceData,
             v_rep: pd.DataFrame = None,
             hv_backend='bokeh',
     ):
         self._max_prob_measure = 'lp'
-        super().__init__(polytope, inference_data, v_rep, hv_backend)
+        super().__init__(fcm, inference_data, v_rep, hv_backend)
 
 
 
@@ -459,13 +464,13 @@ class SMC_PLOT(PlotMonster):
 
     def __init__(
             self,
-            polytope: LabellingPolytope,  # this should be in the sampled basis!
+            fcm: FluxCoordinateMapper,  # this should be in the sampled basis!
             inference_data: az.InferenceData,
             v_rep: pd.DataFrame = None,
             hv_backend='bokeh',
     ):
         self._max_prob_measure = 'dist'
-        super().__init__(polytope, inference_data, v_rep, hv_backend)
+        super().__init__(fcm, inference_data, v_rep, hv_backend)
 
     def plot_evolution(self, var1_id, var2_id=None, include_prior=True, include_fva=True):
         plots = []
@@ -637,24 +642,24 @@ if __name__ == "__main__":
 
     file = "C:\python_projects\sbmfi\src\sbmfi\inference\spiro_20000samples_10steps_alldata.nc"
     data = az.InferenceData.from_netcdf(file)
-    polytope = pickle.load(open("C:\python_projects\sbmfi\pol.p",'rb'))
+    fcm = pickle.load(open(r"C:\python_projects\sbmfi\fcm.p",'rb'))
     smc_plot = SMC_PLOT(
-        polytope=polytope,  # this should be in the sampled basis!
+        fcm=fcm,  # this should be in the sampled basis!
         inference_data=data,
         v_rep=None,
         hv_backend='bokeh',
     )
 
-    data_id = ['A: ilr_C_0', 'A: ilr_C_1', 'A: ilr_D_0', 'A: ilr_D_1', 'A: ilr_H_0',
-       'A: ilr_L_0', 'A: ilr_L_1', 'A: ilr_L_2', 'A: ilr_L|[1,2]_0',
-       'B: ilr_C_0', 'B: ilr_D_0', 'B: ilr_H_{M+Cl}_0', 'B: ilr_H_0',
-       'B: ilr_L|[1,2]_0', 'BOM: h_out', 'BOM: bm']
-
-    ding = smc_plot.grand_data_plot(data_id, plot_map=True)
-
-    # ding = smc_plot.plot_evolution('R_svd0', 'R_svd1')
-    output_file(filename="custom_filename.html", title="plot1")
-    show(hv.render(ding))
+    # data_id = ['A: ilr_C_0', 'A: ilr_C_1', 'A: ilr_D_0', 'A: ilr_D_1', 'A: ilr_H_0',
+    #    'A: ilr_L_0', 'A: ilr_L_1', 'A: ilr_L_2', 'A: ilr_L|[1,2]_0',
+    #    'B: ilr_C_0', 'B: ilr_D_0', 'B: ilr_H_{M+Cl}_0', 'B: ilr_H_0',
+    #    'B: ilr_L|[1,2]_0', 'BOM: h_out', 'BOM: bm']
+    #
+    # ding = smc_plot.grand_data_plot(data_id, plot_map=True)
+    #
+    # # ding = smc_plot.plot_evolution('R_svd0', 'R_svd1')
+    # output_file(filename="custom_filename.html", title="plot1")
+    # show(hv.render(ding))
 
     # pol = pickle.load(open(r"C:\python_projects\sbmfi\pol.p", 'rb'))
     # v_rep = pd.read_excel(

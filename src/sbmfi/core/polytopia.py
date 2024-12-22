@@ -151,7 +151,7 @@ def fast_FVA(polytope: LabellingPolytope, full=False):
     return pd.DataFrame(result, index=['min', 'max']).T
 
 
-def _set_cdd_lib(number_type='fraction'):
+def _set_cdd_lib(number_type='float'):
     global _CDD
     if number_type == 'float':
         _CDD = cdd
@@ -159,7 +159,7 @@ def _set_cdd_lib(number_type='fraction'):
         _CDD = cdd.gmp
 
 
-def _cdd_mat_pol(mat_vec, eq=None, return_polyhedron=True, number_type='fraction', reptype=cdd.RepType.INEQUALITY, canonicalize=True):
+def _cdd_mat_pol(mat_vec, eq=None, return_polyhedron=True, number_type='float', reptype=cdd.RepType.INEQUALITY, canonicalize=True):
     cdd_version = [int(_) for _ in version('pycddlib').split('.')]
 
     (A, b) = mat_vec
@@ -179,7 +179,7 @@ def _cdd_mat_pol(mat_vec, eq=None, return_polyhedron=True, number_type='fraction
 
     if cdd_version[0] > 2:  # changes from version 3:  https://pycddlib.readthedocs.io/en/stable/changes.html#version-3-0-0-4-october-2024
         _set_cdd_lib(number_type)
-        if number_type == 'fraction':
+        if number_type == 'float':
             fractionater = np.vectorize(lambda x: Fraction(x))
             np_arr = fractionater(np_arr)
 
@@ -212,7 +212,7 @@ def _cdd_mat_ar(mat: cdd.Matrix | cdd.gmp.Matrix):
 
 
 # function copied from https://github.com/stephane-caron/pypoman
-def project_polyhedron(proj, ineq, eq=None, canonicalize=True, number_type='fraction'):
+def project_polyhedron(proj, ineq, eq=None, canonicalize=True, number_type='float'):
     raise ValueError('does not yet work after update of the pycddlib API for version >= 3.x.x')
     P = _cdd_mat_pol(ineq, eq, True, number_type=number_type, reptype=cdd.RepType.INEQUALITY)
 
@@ -242,7 +242,7 @@ def project_polyhedron(proj, ineq, eq=None, canonicalize=True, number_type='frac
     return vertices, rays
 
 
-def compute_polytope_vertices(ineq, number_type='fraction'):
+def compute_polytope_vertices(ineq, number_type='float'):
     P = _cdd_mat_pol(ineq, None, True, number_type, cdd.RepType.INEQUALITY)
     g = _cdd_dual(P)
     V = _cdd_mat_ar(g)
@@ -267,7 +267,11 @@ def simplify_vertices(vertices: pd.DataFrame, tolerance=1e-10):
     return vertices.loc[selecta]
 
 
-def V_representation(polytope: Polytope, number_type='fraction', vertices_tol=1e-10):
+def V_representation(polytope: Polytope, net_pol=False, number_type='float', vertices_tol=1e-10):
+    if net_pol:
+        polytope = PolyRoundApi.simplify_polytope(polytope, normalize=False)
+        polytope, _, _, _ = transform_polytope_keep_transform(polytope, kernel_basis='rref')
+
     if polytope.S is not None:
         raise ValueError('must be in cannonical form!')
     vertices = compute_polytope_vertices(ineq=(polytope.A.values, polytope.b.values), number_type=number_type)
@@ -275,14 +279,15 @@ def V_representation(polytope: Polytope, number_type='fraction', vertices_tol=1e
     # vertices = compute_polytope_vertices(A=polytope.A.values, b=polytope.b.values, number_type='float')
     # pypoman.duality.compute_polytope_vertices(A=self.A.values, b=self.b.values)
     vertices = pd.DataFrame(vertices, columns=polytope.A.columns)
-    if number_type == 'fraction':
+    if number_type == 'float':
         vertices = vertices.astype(float)
+    vertices[abs(vertices) < vertices_tol] = 0.0
     if vertices_tol > 0.0:
         vertices = simplify_vertices(vertices, vertices_tol)
     return vertices
 
 
-def H_representation(vertices: List[np.array], number_type='fraction'):
+def H_representation(vertices: List[np.array], number_type='float', halfspace_tol=1e-10):
     """
     Compute the halfspace representation (H-rep) of a polytope defined as
     convex hull of a set of vertices:
@@ -306,7 +311,6 @@ def H_representation(vertices: List[np.array], number_type='fraction'):
         Vector of halfspace representation.
     """
 
-    raise ValueError('this does not work after the new API of pycddlib...')
     if isinstance(vertices, pd.DataFrame):
         V = vertices.values
     elif isinstance(vertices, list):
@@ -319,6 +323,8 @@ def H_representation(vertices: List[np.array], number_type='fraction'):
         return bA
     # the polyhedron is given by b + A x >= 0 where bA = [b|A]
     b, A = np.array(bA[:, 0]), -np.array(bA[:, 1:])
+    b[abs(b) < halfspace_tol] = 0.0
+    A[abs(A) < halfspace_tol] = 0.0
     return A, b
 
 
@@ -328,7 +334,7 @@ def project_polytope(
         p: pd.Series = None,
         return_vertices=False,
         vertices_tol=1e-10,
-        number_type='fraction'
+        number_type='float'
 ):
     raise ValueError('not yet tested after pycddlib API change with version >= 3.x.x')
     # computes the projection/ infinite shadow of the labelling-polytope onto the exchange flux dimensions
@@ -351,7 +357,8 @@ def project_polytope(
         vertices = simplify_vertices(vertices, vertices_tol)
     if return_vertices:
         return vertices
-    A, b = pypoman.duality.compute_polytope_halfspaces(vertices.values)  # NOTE could also be done with scipy ConvHull
+    # A, b = pypoman.duality.compute_polytope_halfspaces(vertices.values)  # NOTE could also be done with scipy ConvHull
+    A, b = H_representation(vertices)  # NOTE could also be done with scipy ConvHull
     A[abs(A) < vertices_tol] = 0.0
     # TODO make A have the right columns and come up with some index names
     return LabellingPolytope(A=pd.DataFrame(A, columns=P.index), b=pd.Series(b), mapper=None)
@@ -361,7 +368,7 @@ def rref_and_project(
         polytope: LabellingPolytope,
         P: pd.DataFrame,
         settings: PolyRoundSettings = PolyRoundSettings(),
-        number_type='fraction',
+        number_type='float',
         round=4,
 ):
     if not P.index.isin(polytope.A.columns).all():
@@ -379,7 +386,7 @@ def rref_and_project(
     return project_polytope(polytope, P, vertices_tol=settings.numerics_threshold, number_type=number_type)
 
 
-def thermo_2_net_polytope(polytope: LabellingPolytope, verbose=True):
+def thermo_2_net_polytope(polytope: LabellingPolytope, verbose=False):
     if len(polytope.mapper) == 0: # NB this is already a net_pol
         if verbose:
             print('already net')
@@ -718,18 +725,13 @@ class PolytopeSamplingModel(object):
             self,
             polytope: LabellingPolytope,
             pr_verbose = False,
-            kernel_basis ='svd',
-            basis_coordinates = 'rounded',
+            kernel_id ='svd',
             linalg: LinAlg = None,
-            hemi_sphere=False,
-            scale_bound=1.0,
-            radius_root=0,
             **kwargs
     ):
-        if kernel_basis not in ['rref', 'svd']:
-            raise ValueError(f'{kernel_basis} not a valid basis kernel basis')
-        if basis_coordinates not in ['transformed', 'rounded', 'ball', 'cylinder']:
-            raise ValueError(f'{basis_coordinates} not a valid basis coordinate system')
+        if kernel_id not in ['rref', 'svd']:
+            raise ValueError(f'{kernel_id} not a valid basis kernel basis')
+
         if polytope.A.columns.str.contains(_xch_reactions_rex).any() or \
                 polytope.A.columns.str.contains(_rev_reactions_rex).any():
             print(
@@ -739,56 +741,34 @@ class PolytopeSamplingModel(object):
             )
 
         self._pr_settings = PolyRoundSettings(**{'verbose': pr_verbose, **kwargs})
-        self._kerbas = kernel_basis # if transform_type in ['svd', 'rref']
-        self._bascoor = basis_coordinates  # if coordinates in ['rounded', 'transform']
+        self._ker_id = kernel_id # if transform_type in ['svd', 'rref']
 
-        normalize = kernel_basis != 'rref'
+        normalize = kernel_id != 'rref'
         F_simp = polytope
         if F_simp.S is not None:
             F_simp = PolyRoundApi.simplify_polytope(polytope, settings=self._pr_settings, normalize=normalize)
         F_trans = LabellingPolytope.from_Polytope(F_simp, polytope)
         if F_simp.S is not None:
             F_trans, self._T, self._T_1, self._tau = transform_polytope_keep_transform(
-                F_simp, self._pr_settings, kernel_basis
+                F_simp, self._pr_settings, kernel_id
             )
         else:
             self._T = pd.DataFrame(np.eye(F_simp.A.shape[1]), index=F_simp.A.columns, columns=F_simp.A.columns)
             self._T_1 = self._T.copy()
             self._tau = np.zeros(F_simp.A.shape[1])
 
-        self._free_reaction_id = F_trans.A.columns
-
         F_round, self._E, self._E_1, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
         self._F_round = LabellingPolytope.from_Polytope(F_round)
-        self._basis_pol = self._F_round if basis_coordinates == 'rounded' else F_trans
         self._log_det_E = np.log(np.linalg.eig(self._E)[0]).sum()
 
         self._rounded_id = self._E_1.index
-        if basis_coordinates == 'transformed':
-            self._basis_id = self._T_1.index
-        elif basis_coordinates == 'rounded':
-            self._basis_id = self._E_1.index
-        elif basis_coordinates == 'ball':
-            basis_str = 'B' if not hemi_sphere else 'HB'
-            self._basis_id = pd.Index(
-                [f'{basis_str}_{self._kerbas}_{i}' for i in range(self._F_round.A.shape[-1])] + ['R']
-            )
-        elif basis_coordinates == 'cylinder':
-            basis_str = 'C' if not hemi_sphere else 'HC'
-            self._basis_id = pd.Index(
-                ['phi'] + [f'{basis_str}_{self._kerbas}_{i}' for i in range(self._F_round.A.shape[-1]-2)] + ['R']
-            )
+        self._transformed_id = self._T_1.index
 
         self._reaction_ids = polytope.A.columns.tolist()
 
         if linalg == None:
             linalg = LinAlg(backend='numpy')
 
-        self._hemi = hemi_sphere
-        self._bound = scale_bound if scale_bound is None else abs(scale_bound)
-        self._root = radius_root
-        if self._root == 0:
-            self._root = self._F_round.A.shape[-1]  # I think the best scaling of radius is the number of dimensions
         self._la = linalg
         new = self.to_linalg(linalg)
         self.__dict__.update(new.__dict__)
@@ -798,205 +778,37 @@ class PolytopeSamplingModel(object):
         return self._log_det_E
 
     @property
-    def basis_coordinates(self):
-        return self._bascoor
-
-    @property
-    def kernel_basis(self):
-        return self._kerbas
-
-    @property
-    def basis_id(self):
-        return self._basis_id.copy()
-
-    @property
-    def basis_polytope(self):
-        return self._basis_pol
+    def kernel_id(self):
+        return self._ker_id
 
     @property
     def dimensionality(self) -> int:
         return self._G.shape[1]
 
-    def _map_ball_2_polar(self, ball, pandalize=False):
-        raise NotImplementedError
-
-    def _map_rounded_2_ball(self, rounded, pandalize=False):
-        if rounded.shape[-1] < 2:
-            raise ValueError('only works for systems with at least 2 free dimensions!')
-        index = None
-        if isinstance(rounded, pd.DataFrame):
-            index = rounded.index
-            rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
-
-        norm = self._la.norm(rounded, 2, -1, keepdims=True)
-        directions = rounded / norm
-
-        if self._hemi:
-            # this makes sure we sample on the half-sphere!
-            signs = self._la.sign(directions[..., [0]])
-            directions = directions * signs
-
-        allpha = self._h.T / self._la.tensormul_T(self._G, directions)
-        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if self._hemi else 1, keepdims=True)
-
-        if self._hemi:
-            alpha_min, alpha_max = alpha_max
-            first_el = directions[..., [0]]
-            alpha = (rounded[..., [0]] - (alpha_min * first_el)) / first_el
-            alpha_frac = alpha / (alpha_max - alpha_min)
-        else:
-            alpha_frac = norm / alpha_max  # fraction of max distance from polytope boundary
-
-        if self._root is not None:
-            alpha_frac = self._la.float_power(alpha_frac, self._root)
-
-        result = self._la.cat([directions, alpha_frac], dim=-1)
-
-        if pandalize:
-            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
-        return result
-
-    def _map_ball_2_rounded(self, ball, pandalize=False):
-        index = None
-        if isinstance(ball, pd.DataFrame):
-            index = ball.index
-            columns = self.basis_id
-            ball = self._la.get_tensor(values=ball.loc[:, columns].values)
-
-        directions = ball[..., :-1]
-        alpha_frac = ball[..., [-1]]
-
-        if self._root is not None:
-            alpha_frac = self._la.float_power(alpha_frac, 1.0 / self._root)
-
-        allpha = self._h.T / self._la.tensormul_T(self._G, directions)
-        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if self._hemi else 1, keepdims=True)
-
-        if self._hemi:
-            alpha_min, alpha_max = alpha_max
-            alpha = alpha_frac * (alpha_max - alpha_min) + alpha_min  # fraction of chord
-        else:
-            alpha = alpha_frac * alpha_max  # fraction of max distance from polytope boundary
-
-        rounded = directions * alpha
-        if pandalize:
-            rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
-        return rounded
-
-    def _map_ball_2_cylinder(self, ball, pandalize=False):
-        index = None
-        if isinstance(ball, pd.DataFrame):
-            index = ball.index
-        if ball.shape[-1] < 3:
-            raise ValueError('not possible for polytopes K<3')
-        output = self._la.vecopy(ball)
-        for i in reversed(range(2, ball.shape[-1] - 1)):
-            output[..., :i] /= self._la.sqrt(1.0 - output[..., [i]] ** 2)
-        atan = self._la.arctan2(output[..., [0]], output[..., [1]])
-
-        if self._bound is not None:
-            # this scales atan to [-1, 1]
-            # atan is [0, pi] if _hemi else [-pi, pi]
-            minb = 0.0 if self._hemi else -math.pi
-            atan = -1 + 2 * (atan - minb) / (math.pi - minb)
-            # R in [0, 1], so we scale to [-1, 1]
-            output[..., -1] = -1 + 2 * output[..., -1]
-
-        cylinder = self._la.cat([atan, output[..., 2:]], dim=-1)
-
-        if (self._bound is not None) and (self._bound != 1):
-            # scales to [-_bound, _bound]
-            cylinder = -self._bound + 2 * self._bound * (cylinder + 1.0) / 2
-
-        if pandalize:
-            cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=None)  # TODO
-        return cylinder
-
-    def _map_cylinder_2_ball(self, cylinder, pandalize=False):
-        index = None
-        if isinstance(cylinder, pd.DataFrame):
-            index = cylinder.index
-
-        if (self._bound is not None) and (self._bound != 1):
-            # scales cylinder to [-1, 1]
-            cylinder = (cylinder + self._bound) / (2 * self._bound) * 2 - 1
-
-        atan = cylinder[..., [0]]
-        if self._bound is not None:
-            # scales atan is [0, pi] if _hemi else [-pi, pi]
-            minb = 0.0 if self._hemi else -math.pi
-            atan = (atan + 1) / 2 * (math.pi - minb) + minb
-            # scales R back to [0, 1]
-            cylinder[..., -1] = (cylinder[..., -1] + 1) / 2
-
-        dim0 = self._la.sin(atan)
-        dim1 = self._la.cos(atan)
-
-        ball = self._la.cat([dim0, dim1, cylinder[..., 1:]], dim=-1)
-        for i in range(2, ball.shape[-1] - 1):
-            ball[..., :i] *= self._la.sqrt(1.0 - ball[..., [i]] ** 2)
-        if pandalize:
-            ball = pd.DataFrame(self._la.tonp(ball), index=index, columns=None)  # TODO
-        return ball
-
-    def _map_rounded_2_basis(self, rounded, pandalize=False):  # this is useful for rounded HR sampling of the polytope
-        index = None
-        if isinstance(rounded, pd.DataFrame):
-            index = rounded.index
-            rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
-
-        if self._bascoor == 'rounded':
-            if pandalize:
-                rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
-            return rounded
-        if self._bascoor == 'ball':
-            return self._map_rounded_2_ball(rounded, pandalize)
-        if self._bascoor == 'cylinder':
-            ball = self._map_rounded_2_ball(rounded)
-            cylinder = self._map_ball_2_cylinder(ball)
-            if pandalize:
-                cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=self.basis_id)
-            return cylinder
-        if self._bascoor == 'transformed':
-            transformed = self._la.tensormul_T(self._E_1, rounded - self._epsilon.T)
-            if pandalize:
-                transformed = pd.DataFrame(self._la.tonp(transformed), index=index, columns=self.basis_id)
-            return transformed
-
-    def to_net_basis(self, net_fluxes: pd.DataFrame, pandalize=False):
+    def map_fluxes_2_rounded(self, net_fluxes: pd.DataFrame, pandalize=False):
         index = None
         if isinstance(net_fluxes, pd.DataFrame):
             index = net_fluxes.index
             net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self.reaction_ids].values)
 
-        result = self._la.tensormul_T(self._T_1, net_fluxes - self._tau.T)
-
-        if self._bascoor != 'transformed':
-            result = self._la.tensormul_T(self._E_1, result - self._epsilon.T)
-            if self._bascoor != 'rounded':
-                result = self._map_rounded_2_ball(result)
-                if self._bascoor != 'ball':
-                    result = self._map_ball_2_cylinder(result)
-
+        transformed = self._la.tensormul_T(self._T_1, net_fluxes - self._tau.T)
+        rounded = self._la.tensormul_T(self._E_1, transformed - self._epsilon.T)
         if pandalize:
-            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.basis_id)
-        return result
+            rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
+        return rounded
 
-    def to_net_fluxes(self, theta: pd.DataFrame, pandalize=False):
+    def map_rounded_2_fluxes(self, rounded: pd.DataFrame, pandalize=False):
         index = None
-        if isinstance(theta, pd.DataFrame):
-            index = theta.index
-            theta = self._la.get_tensor(values=theta.loc[:, self.basis_id].values)
+        if isinstance(rounded, pd.DataFrame):
+            index = rounded.index
+            rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
 
-        if self._bascoor == 'transformed':
-            fluxes = self._la.tensormul_T(self._T, theta) + self._tau.T
-        else:
-            if self._bascoor == 'cylinder':
-                theta = self._map_cylinder_2_ball(theta)
-            if self._bascoor != 'rounded':
-                theta = self._map_ball_2_rounded(theta)
-            A, b = self._to_fluxes_transform
-            fluxes = self._la.tensormul_T(A, theta) + b.T
+        # same as _to_fluxes_transform
+        # transformed = self._la.tensormul_T(self._E, rounded) + self._epsilon
+        # fluxes = self._la.tensormul_T(self._T, transformed) + self._tau.T
+
+        A, b = self._to_fluxes_transform
+        fluxes = self._la.tensormul_T(A, rounded) + b.T
 
         if pandalize:
             fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_ids)
@@ -1040,16 +852,20 @@ class FluxCoordinateMapper(object):
             self,
             model: 'LabellingModel',
             pr_verbose = False,
-            kernel_basis ='svd',  # basis for null-space of simplified polytope
-            basis_coordinates = 'rounded',  # which variables will be considered free (basis or simplified)
+            kernel_id ='svd',  # basis for null-space of simplified polytope
+            coordinate_id ='rounded',  # which variables will be considered free (basis or simplified)
             logit_xch_fluxes = False,  # whether to logit exchange fluxes
             free_reaction_id = None,
             linalg: LinAlg = None,
             hemi_sphere=False,
-            scale_bound=None,
+            symmetric_rescale_val=None,
+            radius_root=0,
             # clip_coordinate=False,
             **kwargs
     ):
+        if coordinate_id not in ['transformed', 'rounded', 'ball', 'cylinder']:
+            raise ValueError(f'{coordinate_id} not a valid basis coordinate system')
+
         # this is if we rebuild model and set new free reactions
         free_reaction_id = [] if free_reaction_id is None else free_reaction_id
         if not model._is_built or not model.labelling_fluxes_id[-len(free_reaction_id):].isin(free_reaction_id).all():
@@ -1062,10 +878,31 @@ class FluxCoordinateMapper(object):
         self._Fn = thermo_2_net_polytope(self._Ft, pr_verbose)
         self._n_lr = len(self.labelling_fluxes_id)
 
-        self._sampler = PolytopeSamplingModel(
-            self._Fn, pr_verbose, kernel_basis, basis_coordinates, self._la, hemi_sphere, scale_bound, **kwargs
-        )
-        self._bound = scale_bound
+        self._sampler = PolytopeSamplingModel(self._Fn, pr_verbose, kernel_id, self._la, **kwargs)
+
+        self._coor_id = coordinate_id
+
+        if coordinate_id == 'transformed':
+            self._net_theta_id = self._sampler._transformed_id
+        elif coordinate_id == 'rounded':
+            self._net_theta_id = self._sampler._rounded_id
+        elif coordinate_id == 'ball':
+            basis_str = 'B' if not hemi_sphere else 'HB'
+            self._net_theta_id = pd.Index(
+                [f'{basis_str}_{self._sampler._ker_id}_{i}' for i in range(self._sampler.dimensionality)] + ['R']
+            )
+        elif coordinate_id == 'cylinder':
+            basis_str = 'C' if not hemi_sphere else 'HC'
+            self._net_theta_id = pd.Index(
+                ['phi'] + [f'{basis_str}_{self._sampler._ker_id}_{i}' for i in range(self._sampler.dimensionality - 2)] + ['R']
+            )
+
+        self._hemi = hemi_sphere
+        self._rescale_val = symmetric_rescale_val if symmetric_rescale_val is None else abs(symmetric_rescale_val)
+        self._root = radius_root
+        if self._root == 0:
+            self._root = self._sampler.dimensionality  # I think the best scaling of radius is the number of dimensions
+
 
         self._fwd_id = pd.Index(self._Ft.mapper.keys())
         self._only_rev = model._only_rev
@@ -1104,34 +941,41 @@ class FluxCoordinateMapper(object):
         return self._fwd_id
 
     @property
+    def symmetric_rescale_val(self):
+        return self._rescale_val
+
+    @property
     def logit_xch_fluxes(self):
         return self._logxch
 
     @property
+    def coordinate_id(self): return self._coor_id
+
+    @property
     def fcm_kwargs(self):
         return {
-            'free_reaction_id': self._sampler._free_reaction_id,
-            'kernel_basis': self._sampler.kernel_basis,
-            'basis_coordinates': self._sampler.basis_coordinates,
+            'free_reaction_id': self.fluxes_id[-self._sampler.dimensionality:],
+            'kernel_id': self._sampler.kernel_id, # kernel_basis
+            'coordinate_id': self.coordinate_id,  # basis_coordinates
             'logit_xch_fluxes': self._logxch,
             'verbose': self._sampler._pr_settings.verbose,
-            'hemi_sphere': self._sampler._hemi,
-            'scale_bound': self._bound,
+            'hemi_sphere': self._hemi,
+            'symmetric_rescale_val': self._rescale_val,
         }
 
     @property
-    def net_basis_id(self):
-        return self._sampler.basis_id.copy()
+    def net_theta_id(self):
+        return self._net_theta_id.copy()
 
     @property
-    def xch_basis_id(self):
+    def xch_theta_id(self):
         if not self._logxch:
             return self._fwd_id + '_xch'
         return 'L_' + self._fwd_id + '_xch'
 
     @property
     def theta_id(self):
-        return self.net_basis_id.append(self.xch_basis_id).rename('theta_id')
+        return self.net_theta_id.append(self.xch_theta_id).rename('theta_id')
 
     @property
     def fluxes_id(self):
@@ -1145,14 +989,202 @@ class FluxCoordinateMapper(object):
     def thermo_fluxes_id(self):
         return self._Ft.A.columns.copy()
 
-    def _bound_scale_xch(self, xch_fluxes, to_bound=True):
-        if self._bound is None:
-            raise ValueError
-        if to_bound:
-            old_lo, old_hi = self._rho_bounds[:, 0], self._rho_bounds[:, 1]
-            new_lo, new_hi = -self._bound, self._bound
+    def _map_theta_2_tokens(self):
+        raise NotImplementedError('this is to prepare the data for transformers like in Simformer (https://arxiv.org/abs/2404.09636)')
+
+    def _map_ball_2_polar(self, ball, pandalize=False):
+        # polar coordinates is another option...
+        raise NotImplementedError
+
+    def _map_rounded_2_ball(self, rounded, pandalize=False):
+        if rounded.shape[-1] < 2:
+            raise ValueError('only works for systems with at least 2 free dimensions!')
+        index = None
+        if isinstance(rounded, pd.DataFrame):
+            index = rounded.index
+            rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
+
+        norm = self._la.norm(rounded, 2, -1, keepdims=True)
+        directions = rounded / norm
+
+        if self._hemi:
+            # this makes sure we sample on the half-sphere!
+            signs = self._la.sign(directions[..., [0]])
+            directions = directions * signs
+
+        allpha = self._sampler._h.T / self._la.tensormul_T(self._sampler._G, directions)
+        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if self._hemi else 1, keepdims=True)
+
+        if self._hemi:
+            alpha_min, alpha_max = alpha_max
+            first_el = directions[..., [0]]
+            alpha = (rounded[..., [0]] - (alpha_min * first_el)) / first_el
+            alpha_frac = alpha / (alpha_max - alpha_min)
         else:
-            old_lo, old_hi = -self._bound, self._bound
+            alpha_frac = norm / alpha_max  # fraction of max distance from polytope boundary
+
+        if self._root is not None:
+            alpha_frac = self._la.float_power(alpha_frac, self._root)
+
+        result = self._la.cat([directions, alpha_frac], dim=-1)
+
+        if pandalize:
+            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.net_theta_id)
+        return result
+
+    def _map_ball_2_rounded(self, ball, pandalize=False):
+        index = None
+        if isinstance(ball, pd.DataFrame):
+            index = ball.index
+            columns = self.net_theta_id
+            ball = self._la.get_tensor(values=ball.loc[:, columns].values)
+
+        directions = ball[..., :-1]
+        alpha_frac = ball[..., [-1]]
+
+        if self._root is not None:
+            alpha_frac = self._la.float_power(alpha_frac, 1.0 / self._root)
+
+        allpha = self._sampler._h.T / self._la.tensormul_T(self._sampler._G, directions)
+        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if self._hemi else 1, keepdims=True)
+
+        if self._hemi:
+            alpha_min, alpha_max = alpha_max
+            alpha = alpha_frac * (alpha_max - alpha_min) + alpha_min  # fraction of chord
+        else:
+            alpha = alpha_frac * alpha_max  # fraction of max distance from polytope boundary
+
+        rounded = directions * alpha
+        if pandalize:
+            rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._sampler._rounded_id)
+        return rounded
+
+    def _map_ball_2_cylinder(self, ball, pandalize=False):
+        index = None
+        if isinstance(ball, pd.DataFrame):
+            index = ball.index
+        if ball.shape[-1] < 3:
+            raise ValueError('not possible for polytopes K<3')
+        output = self._la.vecopy(ball)
+        for i in reversed(range(2, ball.shape[-1] - 1)):
+            output[..., :i] /= self._la.sqrt(1.0 - output[..., [i]] ** 2)
+        atan = self._la.arctan2(output[..., [0]], output[..., [1]])
+
+        if self._rescale_val is not None:
+            # this scales atan to [-1, 1]
+            # atan is [0, pi] if _hemi else [-pi, pi]
+            minb = 0.0 if self._hemi else -math.pi
+            atan = -1 + 2 * (atan - minb) / (math.pi - minb)
+            # R in [0, 1], so we scale to [-1, 1]
+            output[..., -1] = -1 + 2 * output[..., -1]
+
+        cylinder = self._la.cat([atan, output[..., 2:]], dim=-1)
+
+        if (self._rescale_val is not None) and (self._rescale_val != 1):
+            # scales to [-_bound, _bound]
+            cylinder = -self._rescale_val + 2 * self._rescale_val * (cylinder + 1.0) / 2
+
+        if pandalize:
+            cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=None)  # TODO
+        return cylinder
+
+    def _map_cylinder_2_ball(self, cylinder, pandalize=False):
+        index = None
+        if isinstance(cylinder, pd.DataFrame):
+            index = cylinder.index
+
+        if (self._rescale_val is not None) and (self._rescale_val != 1):
+            # scales cylinder to [-1, 1]
+            cylinder = (cylinder + self._rescale_val) / (2 * self._rescale_val) * 2 - 1
+
+        atan = cylinder[..., [0]]
+        if self._rescale_val is not None:
+            # scales atan is [0, pi] if _hemi else [-pi, pi]
+            minb = 0.0 if self._hemi else -math.pi
+            atan = (atan + 1) / 2 * (math.pi - minb) + minb
+            # scales R back to [0, 1]
+            cylinder[..., -1] = (cylinder[..., -1] + 1) / 2
+
+        dim0 = self._la.sin(atan)
+        dim1 = self._la.cos(atan)
+
+        ball = self._la.cat([dim0, dim1, cylinder[..., 1:]], dim=-1)
+        for i in range(2, ball.shape[-1] - 1):
+            ball[..., :i] *= self._la.sqrt(1.0 - ball[..., [i]] ** 2)
+        if pandalize:
+            ball = pd.DataFrame(self._la.tonp(ball), index=index, columns=None)  # TODO
+        return ball
+
+    def _map_rounded_2_theta(self, rounded, pandalize=False):  # this is useful for rounded HR sampling of the polytope
+        index = None
+        if isinstance(rounded, pd.DataFrame):
+            index = rounded.index
+            rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
+
+        if self._coor_id == 'rounded':
+            if pandalize:
+                rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
+            return rounded
+        if self._coor_id == 'ball':
+            return self._map_rounded_2_ball(rounded, pandalize)
+        if self._coor_id == 'cylinder':
+            ball = self._map_rounded_2_ball(rounded)
+            cylinder = self._map_ball_2_cylinder(ball)
+            if pandalize:
+                cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=self.net_theta_id)
+            return cylinder
+        if self._coor_id == 'transformed':
+            transformed = self._la.tensormul_T(self._sampler._E_1, rounded - self._sampler._epsilon.T)
+            if pandalize:
+                transformed = pd.DataFrame(self._la.tonp(transformed), index=index, columns=self.net_theta_id)
+            return transformed
+
+    def _map_net_theta_2_fluxes(self, net_theta: pd.DataFrame, pandalize=False):
+        index = None
+        if isinstance(net_theta, pd.DataFrame):
+            index = net_theta.index
+            net_theta = self._la.get_tensor(values=net_theta.loc[:, self.net_theta_id].values)
+
+        if self._coor_id == 'transformed':
+            net_fluxes = self._la.tensormul_T(self._T, net_theta) + self._tau.T
+        else:
+            if self._coor_id == 'cylinder':
+                net_theta = self._map_cylinder_2_ball(cylinder=net_theta)
+            if self._coor_id != 'rounded':
+                net_theta = self._map_ball_2_rounded(ball=net_theta)
+            net_fluxes = self._sampler.map_rounded_2_fluxes(rounded=net_theta)
+
+        if pandalize:
+            net_fluxes = pd.DataFrame(self._la.tonp(net_fluxes), index=index, columns=self._sampler.reaction_ids)
+        return net_fluxes
+
+    def _map_fluxes_2_net_theta(self, net_fluxes: pd.DataFrame, pandalize=False):
+        index = None
+        if isinstance(net_fluxes, pd.DataFrame):
+            index = net_fluxes.index
+            net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self._sampler.reaction_ids].values)
+
+        result = self._la.tensormul_T(self._sampler._T_1, net_fluxes - self._sampler._tau.T)  # = transformed
+
+        if self._coor_id != 'transformed':
+            result = self._la.tensormul_T(self._sampler._E_1, result - self._sampler._epsilon.T) # = rounded
+            if self._coor_id != 'rounded':
+                result = self._map_rounded_2_ball(result)  # = ball
+                if self._coor_id != 'ball':
+                    result = self._map_ball_2_cylinder(result)  # = cylinder
+
+        if pandalize:
+            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.net_theta_id)
+        return result
+
+    def _rescale_xch(self, xch_fluxes, to_rescale_val=True):
+        if self._rescale_val is None:
+            raise ValueError
+        if to_rescale_val:
+            old_lo, old_hi = self._rho_bounds[:, 0], self._rho_bounds[:, 1]
+            new_lo, new_hi = -self._rescale_val, self._rescale_val
+        else:
+            old_lo, old_hi = -self._rescale_val, self._rescale_val
             new_lo, new_hi = self._rho_bounds[:, 0], self._rho_bounds[:, 1]
         zero_one_scale = self._la.scale(xch_fluxes, lo=old_lo, hi=old_hi, rev=False)
         return self._la.scale(zero_one_scale, lo=new_lo, hi=new_hi, rev=True)
@@ -1166,22 +1198,6 @@ class FluxCoordinateMapper(object):
         return self._la.logit(self._la.scale(
             xch_fluxes, lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1], rev=False
         ))
-
-    def make_theta_polytope(self):
-        net_polytope = self._sampler.basis_polytope
-        xch_A = pd.DataFrame(0.0, columns=self.xch_basis_id, index=net_polytope.A.index)
-        A = pd.concat([net_polytope.A, xch_A], axis=1)
-        if self._logxch:
-            return LabellingPolytope(A=A, b=net_polytope.b)
-        ub_idx = self._fwd_id + '_xch|ub'
-        lb_idx = self._fwd_id + '_xch|lb'
-        A_xch = pd.DataFrame(0.0, columns=A.columns, index=ub_idx.append(lb_idx))
-        A_xch.loc[ub_idx, self.xch_basis_id] =  np.eye(self._nx)
-        A_xch.loc[lb_idx, self.xch_basis_id] = -np.eye(self._nx)
-        A_xch[A_xch == -0.0] = 0.0
-        bounds = self._la.tonp(self._rho_bounds)
-        b_xch = pd.Series(np.concatenate([bounds[:, 1], bounds[:, 0]]), index=A_xch.index)
-        return LabellingPolytope(A=pd.concat([A, A_xch], axis=0), b=pd.concat([net_polytope.b, b_xch]))
 
     def frame_fluxes(self, fluxes: Union[pd.DataFrame, pd.Series, np.array], samples_id=None, trim=True):
         if isinstance(fluxes, pd.Series):
@@ -1294,7 +1310,7 @@ class FluxCoordinateMapper(object):
             if self._logxch:
                 n = thermo_fluxes.shape[0]
             self._J_tt = self._la.get_tensor(shape=(n, len(self.theta_id), len(self.labelling_fluxes_id)))
-            self._J_tt[:, :len(self.net_basis_id), :-self._nx] = self._mapper.to_fluxes_transform[0].T[None, :, :]
+            self._J_tt[:, :len(self.net_theta_id), :-self._nx] = self._mapper.to_fluxes_transform[0].T[None, :, :]
             if not self._logxch and (self._nx > 0):
                 self._J_tt[:, -self._nx, -self._nx] = self._la.ones(self._nx)
 
@@ -1347,22 +1363,27 @@ class FluxCoordinateMapper(object):
             theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
 
         if self._nx > 0:
-            net_basis_variables = theta[..., :-self._nx]  # this selects the net-variables
+            net_theta = theta[..., :-self._nx]  # this selects the net-variables
             xch_fluxes = theta[..., -self._nx:]
             if self._logxch:
                 xch_fluxes = self._expit_xch(xch_fluxes)
-            elif self._bound is not None:
-                xch_fluxes = self._bound_scale_xch(xch_fluxes, to_bound=False)
+            elif self._rescale_val is not None:
+                xch_fluxes = self._rescale_xch(xch_fluxes, to_rescale_val=False)
         else:
-            net_basis_variables = theta
-        thermo_fluxes = self._sampler.to_net_fluxes(net_basis_variables)  # should be in linalg form already
+            net_theta = theta
+
+        thermo_fluxes = self._map_net_theta_2_fluxes(net_theta)  # should be in linalg form already
         if self._nx > 0:
             thermo_fluxes = self._la.cat([thermo_fluxes, xch_fluxes], dim=-1)
-        if pandalize:
-            thermo_fluxes = pd.DataFrame(self._la.tonp(thermo_fluxes), index=index, columns=self.thermo_fluxes_id)
         if return_thermo:
+            if pandalize:
+                thermo_fluxes = pd.DataFrame(self._la.tonp(thermo_fluxes), index=index, columns=self.thermo_fluxes_id)
             return thermo_fluxes
-        return self.map_thermo_2_fluxes(thermo_fluxes, pandalize=pandalize)
+
+        labelling_fluxes = self.map_thermo_2_fluxes(thermo_fluxes, pandalize=pandalize)
+        if pandalize and index is not None:
+            labelling_fluxes.index = index
+        return labelling_fluxes
 
     def map_fluxes_2_thermo(self, fluxes: pd.DataFrame, pandalize=False):
         index = None
@@ -1411,18 +1432,18 @@ class FluxCoordinateMapper(object):
             xch_fluxes = thermo_fluxes[..., self._rev_idx]
             if self._logxch:
                 xch_fluxes = self._logit_xch(xch_fluxes)
-            elif self._bound:
-                xch_fluxes = self._bound_scale_xch(xch_fluxes, to_bound=True)
+            elif self._rescale_val:
+                xch_fluxes = self._rescale_xch(xch_fluxes, to_rescale_val=True)
 
             net_fluxes = thermo_fluxes[..., :-self._nx]
-            net_basis_samples = self._sampler.to_net_basis(net_fluxes)
-            basis_samples = self._la.cat([net_basis_samples, xch_fluxes], dim=1)
+            net_theta = self._map_fluxes_2_net_theta(net_fluxes)
+            theta = self._la.cat([net_theta, xch_fluxes], dim=1)
         else:
-            basis_samples = self._sampler.to_net_basis(thermo_fluxes)
+            theta = self._sampler.map_fluxes_2_rounded(thermo_fluxes)
 
         if pandalize:
-            basis_samples = pd.DataFrame(self._la.tonp(basis_samples), index=index, columns=self.theta_id)
-        return basis_samples
+            theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.theta_id)
+        return theta
 
     def to_linalg(self, linalg: LinAlg):
         new = copy.copy(self)
@@ -1432,6 +1453,23 @@ class FluxCoordinateMapper(object):
             value = new.__dict__[kwarg]
             new.__dict__[kwarg] = linalg.get_tensor(values=value)
         return new
+
+
+def make_theta_polytope(fcm: FluxCoordinateMapper):
+    net_polytope = fcm._sampler._F_round
+    xch_A = pd.DataFrame(0.0, columns=fcm.xch_theta_id, index=net_polytope.A.index)
+    A = pd.concat([net_polytope.A, xch_A], axis=1)
+    if fcm._logxch:
+        return LabellingPolytope(A=A, b=net_polytope.b)
+    ub_idx = fcm._fwd_id + '_xch|ub'
+    lb_idx = fcm._fwd_id + '_xch|lb'
+    A_xch = pd.DataFrame(0.0, columns=A.columns, index=ub_idx.append(lb_idx))
+    A_xch.loc[ub_idx, fcm.xch_theta_id] =  np.eye(fcm._nx)
+    A_xch.loc[lb_idx, fcm.xch_theta_id] = -np.eye(fcm._nx)
+    A_xch[A_xch == -0.0] = 0.0
+    bounds = fcm._la.tonp(fcm._rho_bounds)
+    b_xch = pd.Series(np.concatenate([bounds[:, 1], bounds[:, 0]]), index=A_xch.index)
+    return LabellingPolytope(A=pd.concat([A, A_xch], axis=0), b=pd.concat([net_polytope.b, b_xch]))
 
 
 def sample_polytope(
@@ -1446,7 +1484,6 @@ def sample_polytope(
         phi: float = None,
         linalg: LinAlg = None,
         kernel_basis: str = 'svd',
-        basis_coordinates: str = 'rounded',
         density=None,
         n_cdf=5,
         return_arviz=False,
@@ -1473,11 +1510,12 @@ def sample_polytope(
         (n, d) dim Tensor containing the resulting samples.
     """
 
+    if return_what not in ('all', 'fluxes', 'rounded'):
+        raise ValueError(f'return_what: {return_what} not in [all, fluxes, rounded]')
+
     result = {}
     if isinstance(model, LabellingPolytope):
-        model = PolytopeSamplingModel(
-            model, kernel_basis=kernel_basis, basis_coordinates=basis_coordinates, linalg=linalg
-        )
+        model = PolytopeSamplingModel(model, kernel_id=kernel_basis, linalg=linalg)
         if return_psm:
             result['psm'] = model
         result['log_det_E'] = model.log_det_E
@@ -1583,14 +1621,10 @@ def sample_polytope(
 
     if return_arviz:
         raise NotImplementedError
-    if return_what == 'rounded':
+    if return_what in ('rounded', 'all'):
         result['rounded'] = rounded_samples
-    else:
-        basis_samples = model._map_rounded_2_basis(rounded_samples)
-        if return_what == 'net_fluxes':
-            result['net_fluxes'] = model.to_net_fluxes(basis_samples)
-        elif return_what == 'basis':
-            result['basis'] = basis_samples
+    if return_what in ('fluxes', 'all'):
+        result['fluxes'] = model.map_rounded_2_fluxes(rounded_samples)
     return result
 
 def compute_volume(
@@ -1604,10 +1638,11 @@ def compute_volume(
         quadratic_program: bool = True,
         verbose: bool = False,
 ):
+    # raise NotImplementedError('refactored stuff, look at this')
     psm = model
     if isinstance(model, LabellingPolytope):
-        kernel_basis = 'rref' if enumerate_vertices else 'svd'
-        psm = PolytopeSamplingModel(model, kernel_basis=kernel_basis, basis_coordinates='transformed')
+        kernel_id = 'rref' if enumerate_vertices else 'svd'
+        psm = PolytopeSamplingModel(model, kernel_id=kernel_id)
 
     if any([_xch_reactions_rex.search(rid) is not None for rid in psm.reaction_ids]):
         raise ValueError('This is a thermodynamic model that includes xch fluxes which lie in a hyper-rectangle, '
@@ -1619,7 +1654,7 @@ def compute_volume(
         n = min(int(400 * epsilon ** -2 * K * np.log(K)), 100000)
 
     if enumerate_vertices:
-        if not ((psm.kernel_basis == 'rref') and (psm.basis_coordinates == 'transformed')):
+        if not ((psm.kernel_id == 'rref') and (psm.coordinate_id == 'transformed')):
             raise ValueError('only works with rref, pass polytope or rref volumemodel')
         F_trans = PolyRoundApi.simplify_polytope(psm.basis_polytope, normalize=False)
         if F_trans.S is not None:
@@ -1688,50 +1723,74 @@ def compute_volume(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
-    from sbmfi.inference.priors import UniNetFluxPrior
+    from sbmfi.inference.priors import UniRoundedFlexXchPrior
     import pandas as pd
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
 
-    model, kwargs = spiro(backend='numpy', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None)
-    fcm = FluxCoordinateMapper(
-        model,
-        kernel_basis='rref',
+    model, kwargs = spiro(
+        backend='torch',
+        auto_diff=False,
+        batch_size=1,
+        add_biomass=True,
+        v2_reversible=True,
+        ratios=True,
+        build_simulator=True,
+        add_cofactors=True,
+        which_measurements='lcms',
+        seed=2,
+        measured_boundary_fluxes=('h_out',),
+        which_labellings=['A', 'B'],
+        include_bom=True,
+        v5_reversible=False,
+        n_obs=0,
+        kernel_id='svd',
+        coordinate_id='rounded',
         logit_xch_fluxes=False,
-        basis_coordinates='transformed',
-        pr_verbose=False,
-        hemi_sphere=False,
-        scale_bound=2.0,
+        L_12_omega=1.0,
+        clip_min=None,
+        transformation='ilr',
     )
-    polytope = fcm._sampler._F_round
-    polytope = thermo_2_net_polytope(polytope)
 
+    # model, kwargs = spiro(backend='numpy', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None)
+    # fcm = FluxCoordinateMapper(
+    #     model,
+    #     kernel_id='rref',
+    #     logit_xch_fluxes=False,
+    #     coordinate_id='transformed',
+    #     pr_verbose=False,
+    #     hemi_sphere=False,
+    #     symmetric_rescale_val=2.0,
+    # )
+    # # polytope = fcm._sampler._F_round
+    # # polytope = thermo_2_net_polytope(polytope)
+    # #
+    # # #
+    # # # A,b = H_representation(v_rep)
+    # #
+    # # np_arr = np.hstack([polytope.b.values[:, None], -polytope.A.values])
+    # # # P = _cdd_mat_pol(ineq, None, True, number_type, cdd.RepType.INEQUALITY)
+    # # # g = _cdd_dual(P)
+    # # # V = _cdd_mat_ar(g)
+    # # print(np_arr)
+    # # print(np_arr.dtype)
+    # # matrix = cdd.matrix_from_array(np_arr, rep_type=cdd.RepType.INEQUALITY)
+    # # print(matrix)
+    # # polyhedron = cdd.polyhedron_from_matrix(matrix)
+    # # matrix = cdd.copy_output(polyhedron)
+    # # V = np.array(matrix.array).astype(float)
+    # # vertices = []
+    # # for i in range(V.shape[0]):
+    # #     if V[i, 0] != 1:  # 1 = vertex, 0 = ray
+    # #         raise Exception("Polyhedron is not a polytope")
+    # #     elif i not in matrix.lin_set:
+    # #         vertices.append(V[i, 1:])
     #
-    # A,b = H_representation(v_rep)
-
-    np_arr = np.hstack([polytope.b.values[:, None], -polytope.A.values])
-    # P = _cdd_mat_pol(ineq, None, True, number_type, cdd.RepType.INEQUALITY)
-    # g = _cdd_dual(P)
-    # V = _cdd_mat_ar(g)
-    print(np_arr)
-    print(np_arr.dtype)
-    matrix = cdd.matrix_from_array(np_arr, rep_type=cdd.RepType.INEQUALITY)
-    print(matrix)
-    polyhedron = cdd.polyhedron_from_matrix(matrix)
-    matrix = cdd.copy_output(polyhedron)
-    V = np.array(matrix.array).astype(float)
-    vertices = []
-    for i in range(V.shape[0]):
-        if V[i, 0] != 1:  # 1 = vertex, 0 = ray
-            raise Exception("Polyhedron is not a polytope")
-        elif i not in matrix.lin_set:
-            vertices.append(V[i, 1:])
-
-    vertices = pd.DataFrame(vertices, columns=polytope.A.columns)
-
-    v_rep = V_representation(polytope, number_type='float')
-
+    # # vertices = pd.DataFrame(vertices, columns=polytope.A.columns)
+    #
+    # v_rep = V_representation(fcm._sampler._F_trans, number_type='float')
+    # A, b = H_representation(v_rep)
 
 
 

@@ -94,7 +94,7 @@ class _BaseSimulator(object):
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self._model.build_simulator(**self._model._fcm_kwargs)
+        self._model.build_model(**self._model._fcm_kwargs)
 
     @property
     def data_id(self):
@@ -521,7 +521,7 @@ class DataSetSim(_BaseSimulator):
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniNetFluxPrior
+    from sbmfi.inference.priors import UniRoundedFlexXchPrior
     from sbmfi.inference.complotting import SMC_PLOT
     from sbmfi.inference.bayesian import SMC
     from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
@@ -536,7 +536,7 @@ if __name__ == "__main__":
         which_labellings=['A', 'B']
 
     )
-    up = UniNetFluxPrior(model.flux_coordinate_mapper, cache_size=20)
+    up = UniRoundedFlexXchPrior(model.flux_coordinate_mapper, cache_size=20)
     dss = DataSetSim(
         model=model,
         substrate_df=kwargs['substrate_df'],

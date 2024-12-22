@@ -241,7 +241,7 @@ class LabellingModel(Model):
     @property
     def flux_coordinate_mapper(self) -> FluxCoordinateMapper:
         if not self._is_built:
-            raise ValueError('build the simulator first!')
+            raise ValueError('build the model first!')
         return self._fcm
 
     def set_fluxes(self, fluxes: Union[pd.DataFrame, np.array], samples_id=None, trim=True):
@@ -525,7 +525,7 @@ class LabellingModel(Model):
 
         if self._is_built:
             # TODO respect previously set free fluxes I guess?
-            self.build_simulator(**self._fcm.fcm_kwargs)
+            self.build_model(**self._fcm.fcm_kwargs)
 
     def make_sbml_writable(self):
         # we need to do this since there are a bunch of things that writing to sbml does not like if I remember correctly
@@ -666,7 +666,6 @@ class LabellingModel(Model):
                         raise ValueError(f'Cannot simulate {pseudo_reaction.id} since {metabolite.id} not in state')
         return self._pseudo_metabolites
 
-    @abstractmethod
     def prepare_polytopes(self, free_reaction_id=None, verbose=False):
         if len(self._input_labelling) == 0:
             raise ValueError('set labelling input first!')  # need to have set labelling before generating system!
@@ -695,27 +694,27 @@ class LabellingModel(Model):
         self._set_free_reactions(free_reaction_id=free_reaction_id)
 
     @abstractmethod
-    def build_simulator(
+    def build_model(
             self,
             free_reaction_id=None,
-            kernel_basis='svd',
-            basis_coordinates='rounded',
+            kernel_id='svd',
+            coordinate_id='rounded',
             logit_xch_fluxes=True,
             hemi_sphere=False,
-            scale_bound=None,
+            symmetric_rescale_val=None,
             verbose=False,
     ):
         self._initialize_state()
         self._fcm = FluxCoordinateMapper(
             model=self,
-            kernel_basis=kernel_basis,
-            basis_coordinates=basis_coordinates,
+            kernel_id=kernel_id,
+            coordinate_id=coordinate_id,
             free_reaction_id=free_reaction_id,
             logit_xch_fluxes=logit_xch_fluxes,
             pr_verbose=verbose,
             linalg=self._la,
             hemi_sphere=hemi_sphere,
-            scale_bound=scale_bound,
+            symmetric_rescale_val=symmetric_rescale_val,
         )
         self._fcm_kwargs = self._fcm.fcm_kwargs
         self._set_state()
@@ -1090,18 +1089,18 @@ class EMU_Model(LabellingModel):
                     row = self._xemus[emu.weight].index(emu)
                 self._emu_indices[emu] = matrix, dmdv, row
 
-    def build_simulator(
+    def build_model(
             self,
             free_reaction_id=None,
-            kernel_basis='svd',
-            basis_coordinates='rounded',
+            kernel_id='svd',
+            coordinate_id='rounded',
             logit_xch_fluxes=True,
             hemi_sphere=False,
-            scale_bound=None,
+            symmetric_rescale_val=None,
             verbose=False,
     ):
-        super().build_simulator(
-            free_reaction_id, kernel_basis, basis_coordinates, logit_xch_fluxes, hemi_sphere, scale_bound, verbose
+        super().build_model(
+            free_reaction_id, kernel_id, coordinate_id, logit_xch_fluxes, hemi_sphere, symmetric_rescale_val, verbose
         )
         self._initialize_emu_split()
 
@@ -1294,7 +1293,7 @@ if __name__ == "__main__":
     sdf = kwargs['substrate_df'].loc[['[1]Glc']]
     adf = kwargs['anton']['annotation_df']
     free_id = ['EX_glc__D_e', 'EX_ac_e', 'biomass_rxn']
-    model.build_simulator(free_reaction_id=free_id)
+    model.build_model(free_reaction_id=free_id)
     f = pd.read_excel(r"C:\python_projects\pysumo\src\sumoflux\estimate\f2.xlsx", index_col=0).iloc[:2]
     model.set_fluxes(f)
     model.cascade()

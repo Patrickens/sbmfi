@@ -1,5 +1,5 @@
 from sbmfi.core.simulator import _BaseSimulator, DataSetSim
-from sbmfi.inference.priors import _BasePrior, _NetFluxPrior
+from sbmfi.inference.priors import _BasePrior, BaseRoundedPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
 from sbmfi.core.model import LabellingModel
 import math
@@ -27,7 +27,7 @@ class _BaseBayes(_BaseSimulator):
             model: LabellingModel,
             substrate_df: pd.DataFrame,
             mdv_observation_models: Dict[str, MDV_ObservationModel],
-            prior: _NetFluxPrior,
+            prior: BaseRoundedPrior,
             boundary_observation_model: BoundaryObservationModel = None,
     ):
         super(_BaseBayes, self).__init__(model, substrate_df, mdv_observation_models, boundary_observation_model)
@@ -552,10 +552,11 @@ class _BaseBayes(_BaseSimulator):
         return log_probs
 
     def map_chains_2_theta(self, chains):
+        raise NotImplementedError('changing polytopia API')
         # if chains are not rounded and not log-ratio, we need to map accordingly
-        if (self._sampler.basis_coordinates == 'rounded') and not self._fcm.logit_xch_fluxes:
+        if (self._sampler.coordinate_id == 'rounded') and not self._fcm.logit_xch_fluxes:
             return chains
-        theta = self._fcm._sampler._map_rounded_2_basis(rounded=chains[..., :self._K])
+        theta = self._fcm._sampler._map_rounded_2_theta(rounded=chains[..., :self._K])
         if self._nx > 0:
             xch_fluxes = chains[..., -self._nx:]
             if self._fcm.logit_xch_fluxes:
@@ -715,14 +716,14 @@ class MCMC(_BaseBayes):
         chord_std = self._la.get_tensor(values=np.array([chord_std]))
         xch_std = self._la.get_tensor(values=np.array([xch_std]))
 
-        if self._fcm._sampler.basis_coordinates == 'transformed':
+        if self._fcm._sampler.coordinate_id == 'transformed':
             raise NotImplementedError('transform the chains to transformed')
 
         batch_size = n_chains * n_cdf
         if (self._la._batch_size != batch_size) or not self._model._is_built:
             # this way the batch processing is corrected
             self._la._batch_size = batch_size
-            self._model.build_simulator(**self._fcm.fcm_kwargs)
+            self._model.build_model(**self._fcm.fcm_kwargs)
 
         n_rounded = self._fcm._sampler._F_round.A.shape[1] + self._nx
         chains = self._la.get_tensor(shape=(n, n_chains, n_rounded))  # TODO this should be the number of dimensions in rounded coord system!
@@ -1319,9 +1320,9 @@ if __name__ == "__main__":
 
     from sbmfi.models.small_models import spiro, multi_modal
     from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
-    from sbmfi.inference.priors import UniNetFluxPrior, ProjectionPrior
+    from sbmfi.inference.priors import UniRoundedFlexXchPrior, ProjectionPrior
     from sbmfi.inference.complotting import PlotMonster
-    from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, sample_polytope, fast_FVA
+    from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, fast_FVA
     import pickle
     from sbmfi.core.observation import MVN_BoundaryObservationModel
 
@@ -1341,14 +1342,14 @@ if __name__ == "__main__":
         include_bom=True,
         v5_reversible=False,
         n_obs=0,
-        kernel_basis='svd',
-        basis_coordinates='rounded',
+        kernel_id='svd',
+        coordinate_id='rounded',
         logit_xch_fluxes=False,
         L_12_omega=1.0,
         clip_min=None,
         transformation='ilr',
     )
-    prior = UniNetFluxPrior(model, cache_size=100)
+    prior = UniRoundedFlexXchPrior(model, cache_size=100)
     smc = SMC(
         model=model,
         substrate_df=kwargs['substrate_df'],
