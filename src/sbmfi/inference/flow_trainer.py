@@ -398,7 +398,7 @@ def flow_trainer(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.core.polytopia import sample_polytope
-    from sbmfi.inference.priors import UniRoundedFlexXchPrior
+    from sbmfi.inference.priors import UniRoundedFleXchPrior
     from normflows import NormalizingFlowVAE
     from normflows.distributions import NNDiagGaussian
 

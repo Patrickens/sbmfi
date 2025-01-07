@@ -694,27 +694,14 @@ class LabellingModel(Model):
         self._set_free_reactions(free_reaction_id=free_reaction_id)
 
     @abstractmethod
-    def build_model(
-            self,
-            free_reaction_id=None,
-            kernel_id='svd',
-            coordinate_id='rounded',
-            logit_xch_fluxes=True,
-            hemi_sphere=False,
-            symmetric_rescale_val=None,
-            verbose=False,
-    ):
+    def build_model(self, free_reaction_id=None, kernel_id='svd', verbose=False):
         self._initialize_state()
         self._fcm = FluxCoordinateMapper(
             model=self,
             kernel_id=kernel_id,
-            coordinate_id=coordinate_id,
             free_reaction_id=free_reaction_id,
-            logit_xch_fluxes=logit_xch_fluxes,
             pr_verbose=verbose,
             linalg=self._la,
-            hemi_sphere=hemi_sphere,
-            symmetric_rescale_val=symmetric_rescale_val,
         )
         self._fcm_kwargs = self._fcm.fcm_kwargs
         self._set_state()
@@ -1089,19 +1076,8 @@ class EMU_Model(LabellingModel):
                     row = self._xemus[emu.weight].index(emu)
                 self._emu_indices[emu] = matrix, dmdv, row
 
-    def build_model(
-            self,
-            free_reaction_id=None,
-            kernel_id='svd',
-            coordinate_id='rounded',
-            logit_xch_fluxes=True,
-            hemi_sphere=False,
-            symmetric_rescale_val=None,
-            verbose=False,
-    ):
-        super().build_model(
-            free_reaction_id, kernel_id, coordinate_id, logit_xch_fluxes, hemi_sphere, symmetric_rescale_val, verbose
-        )
+    def build_model(self, free_reaction_id=None, kernel_id='svd', verbose=False):
+        super().build_model(free_reaction_id, kernel_id, verbose)
         self._initialize_emu_split()
 
         for reaction in self.labelling_reactions + self.pseudo_reactions:

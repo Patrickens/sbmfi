@@ -4,7 +4,7 @@ import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniRoundedFlexXchPrior
+from sbmfi.inference.priors import UniRoundedFleXchPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel, MDV_ObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
@@ -33,8 +33,6 @@ def spiro(
         measured_boundary_fluxes = ('h_out', ),
         n_obs=0,
         kernel_id='svd',
-        coordinate_id='rounded',
-        logit_xch_fluxes=False,
         L_12_omega = 1.0,
         clip_min=None,
         transformation='ilr',
@@ -215,8 +213,6 @@ def spiro(
         seed=seed,
         free_reaction_id=measured_boundary_fluxes,
         kernel_id=kernel_id,
-        coordinate_id=coordinate_id,
-        logit_xch_fluxes=logit_xch_fluxes,
     )
 
     if add_biomass:
@@ -334,7 +330,7 @@ def spiro(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
-        up = UniRoundedFlexXchPrior(model._fcm)
+        up = UniRoundedFleXchPrior(model._fcm)
 
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
@@ -441,7 +437,6 @@ def multi_modal(
         a_in = 7.5,
         kernel_id = 'rref',
         top_frac = 0.3,
-        coordinate_id = 'rounded',
         include_D = False,
         n_obs=1,
 ):
@@ -527,7 +522,6 @@ def multi_modal(
         batch_size=batch_size,
         ratios=ratios,
         kernel_id=kernel_id,
-        coordinate_id=coordinate_id,
         build_simulator=True
     )
     substrate_df = model.input_labelling.to_frame().T
@@ -592,7 +586,7 @@ def multi_modal(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, ['a_in'], None)
 
-        up = UniRoundedFlexXchPrior(model._fcm, cache_size=1000)
+        up = UniRoundedFleXchPrior(model._fcm, cache_size=1000)
 
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
         true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
@@ -784,8 +778,6 @@ if __name__ == "__main__":
         v5_reversible=False,
         n_obs=0,
         kernel_id='svd',
-        coordinate_id='rounded',
-        logit_xch_fluxes=False,
         L_12_omega=1.0,
         clip_min=None,
         transformation='ilr',
@@ -808,8 +800,6 @@ if __name__ == "__main__":
     #     v5_reversible=False,
     #     n_obs=0,
     #     kernel_id='svd',
-    #     coordinate_id='rounded',
-    #     logit_xch_fluxes=False,
     #     L_12_omega=1.0,
     #     clip_min=None,
     #     transformation='ilr',

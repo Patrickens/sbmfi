@@ -267,11 +267,7 @@ def simplify_vertices(vertices: pd.DataFrame, tolerance=1e-10):
     return vertices.loc[selecta]
 
 
-def V_representation(polytope: Polytope, net_pol=False, number_type='float', vertices_tol=1e-10):
-    if net_pol:
-        polytope = PolyRoundApi.simplify_polytope(polytope, normalize=False)
-        polytope, _, _, _ = transform_polytope_keep_transform(polytope, kernel_basis='rref')
-
+def V_representation(polytope: Polytope, number_type='float', vertices_tol=1e-10):
     if polytope.S is not None:
         raise ValueError('must be in cannonical form!')
     vertices = compute_polytope_vertices(ineq=(polytope.A.values, polytope.b.values), number_type=number_type)
@@ -651,7 +647,7 @@ def round_polytope_keep_ellipsoid(polytope: Polytope, settings: PolyRoundSetting
 def transform_polytope_keep_transform(
     polytope: Polytope,
     settings: PolyRoundSettings = PolyRoundSettings(),
-    kernel_basis ='svd',
+    kernel_id ='svd',
 ) -> Polytope:
     # PolyRoundApi.transform_polytope()
     if polytope.inequality_only:
@@ -676,13 +672,13 @@ def transform_polytope_keep_transform(
     cols = polytope.A.columns
     stoichiometry = polytope.S
 
-    if kernel_basis == 'svd':
+    if kernel_id == 'svd':
         T = svd_null_space(stoichiometry, tolerance=settings.numerics_threshold)
         T_1 = T.T
 
         # put x at zero! # TODO is this correct
         polytope.apply_shift(x)
-    elif kernel_basis == 'rref':
+    elif kernel_id == 'rref':
         T, free_vars = rref_null_space(stoichiometry, tolerance=settings.numerics_threshold)
         T_1 = pd.DataFrame(0.0, index=T.columns, columns=T.index)
         T_1.loc[T.columns, T.columns] = np.eye(len(free_vars))
@@ -853,19 +849,10 @@ class FluxCoordinateMapper(object):
             model: 'LabellingModel',
             pr_verbose = False,
             kernel_id ='svd',  # basis for null-space of simplified polytope
-            coordinate_id ='rounded',  # which variables will be considered free (basis or simplified)
-            logit_xch_fluxes = False,  # whether to logit exchange fluxes
             free_reaction_id = None,
             linalg: LinAlg = None,
-            hemi_sphere=False,
-            symmetric_rescale_val=None,
-            radius_root=0,
-            # clip_coordinate=False,
             **kwargs
     ):
-        if coordinate_id not in ['transformed', 'rounded', 'ball', 'cylinder']:
-            raise ValueError(f'{coordinate_id} not a valid basis coordinate system')
-
         # this is if we rebuild model and set new free reactions
         free_reaction_id = [] if free_reaction_id is None else free_reaction_id
         if not model._is_built or not model.labelling_fluxes_id[-len(free_reaction_id):].isin(free_reaction_id).all():
@@ -879,30 +866,6 @@ class FluxCoordinateMapper(object):
         self._n_lr = len(self.labelling_fluxes_id)
 
         self._sampler = PolytopeSamplingModel(self._Fn, pr_verbose, kernel_id, self._la, **kwargs)
-
-        self._coor_id = coordinate_id
-
-        if coordinate_id == 'transformed':
-            self._net_theta_id = self._sampler._transformed_id
-        elif coordinate_id == 'rounded':
-            self._net_theta_id = self._sampler._rounded_id
-        elif coordinate_id == 'ball':
-            basis_str = 'B' if not hemi_sphere else 'HB'
-            self._net_theta_id = pd.Index(
-                [f'{basis_str}_{self._sampler._ker_id}_{i}' for i in range(self._sampler.dimensionality)] + ['R']
-            )
-        elif coordinate_id == 'cylinder':
-            basis_str = 'C' if not hemi_sphere else 'HC'
-            self._net_theta_id = pd.Index(
-                ['phi'] + [f'{basis_str}_{self._sampler._ker_id}_{i}' for i in range(self._sampler.dimensionality - 2)] + ['R']
-            )
-
-        self._hemi = hemi_sphere
-        self._rescale_val = symmetric_rescale_val if symmetric_rescale_val is None else abs(symmetric_rescale_val)
-        self._root = radius_root
-        if self._root == 0:
-            self._root = self._sampler.dimensionality  # I think the best scaling of radius is the number of dimensions
-
 
         self._fwd_id = pd.Index(self._Ft.mapper.keys())
         self._only_rev = model._only_rev
@@ -924,7 +887,6 @@ class FluxCoordinateMapper(object):
             reaction = model.labelling_reactions.get_by_id(rid)
             self._rho_bounds[i, 0] = reaction.rho_min
             self._rho_bounds[i, 1] = reaction.rho_max
-        self._logxch = logit_xch_fluxes
 
         self._samples_id = self._la._batch_size
         self._J_lt = self._la.get_tensor(shape=(0,))
@@ -941,41 +903,43 @@ class FluxCoordinateMapper(object):
         return self._fwd_id
 
     @property
-    def symmetric_rescale_val(self):
-        return self._rescale_val
-
-    @property
-    def logit_xch_fluxes(self):
-        return self._logxch
-
-    @property
-    def coordinate_id(self): return self._coor_id
-
-    @property
     def fcm_kwargs(self):
         return {
             'free_reaction_id': self.fluxes_id[-self._sampler.dimensionality:],
             'kernel_id': self._sampler.kernel_id, # kernel_basis
-            'coordinate_id': self.coordinate_id,  # basis_coordinates
-            'logit_xch_fluxes': self._logxch,
             'verbose': self._sampler._pr_settings.verbose,
-            'hemi_sphere': self._hemi,
-            'symmetric_rescale_val': self._rescale_val,
         }
 
-    @property
-    def net_theta_id(self):
-        return self._net_theta_id.copy()
+    def net_theta_id(self, coordinate_id='rounded', hemi=False):
+        if coordinate_id == 'transformed':
+            return self._sampler._transformed_id.rename('net_theta_id')
+        elif coordinate_id == 'rounded':
+            return self._sampler._rounded_id.rename('net_theta_id')
+        elif coordinate_id == 'ball':
+            basis_str = 'B' if not hemi else 'HB'
+            return pd.Index(
+                [f'{basis_str}_{self._sampler._ker_id}_{i}' for i in range(self._sampler.dimensionality)] +
+                ['R'], name='net_theta_id'
+            )
+        elif coordinate_id == 'cylinder':
+            basis_str = 'C' if not hemi else 'HC'
+            return pd.Index(
+                ['phi'] +
+                [f'{basis_str}_{self._sampler._ker_id}_{i}' for i in range(self._sampler.dimensionality - 2)] +
+                ['R'], name='net_theta_id'
+            )
+        else:
+            raise ValueError(f'{coordinate_id}')
 
-    @property
-    def xch_theta_id(self):
-        if not self._logxch:
-            return self._fwd_id + '_xch'
-        return 'L_' + self._fwd_id + '_xch'
+    def xch_theta_id(self, log_xch=False):
+        if not log_xch:
+            return (self._fwd_id + '_xch').rename(name='xch_theta_id')
+        return ('L_' + self._fwd_id + '_xch').rename(name='xch_theta_id')
 
-    @property
-    def theta_id(self):
-        return self.net_theta_id.append(self.xch_theta_id).rename('theta_id')
+    def theta_id(self, coordinate_id='rounded', hemi=False, log_xch=False):
+        net_theta_id = self.net_theta_id(coordinate_id, hemi)
+        xch_theta_id = self.xch_theta_id(log_xch)
+        return net_theta_id.append(xch_theta_id).rename('theta_id')
 
     @property
     def fluxes_id(self):
@@ -996,7 +960,7 @@ class FluxCoordinateMapper(object):
         # polar coordinates is another option...
         raise NotImplementedError
 
-    def _map_rounded_2_ball(self, rounded, pandalize=False):
+    def _map_rounded_2_ball(self, rounded, hemi: bool=False, alpha_root: float=None, pandalize=False):
         if rounded.shape[-1] < 2:
             raise ValueError('only works for systems with at least 2 free dimensions!')
         index = None
@@ -1007,15 +971,15 @@ class FluxCoordinateMapper(object):
         norm = self._la.norm(rounded, 2, -1, keepdims=True)
         directions = rounded / norm
 
-        if self._hemi:
+        if hemi:
             # this makes sure we sample on the half-sphere!
             signs = self._la.sign(directions[..., [0]])
             directions = directions * signs
 
         allpha = self._sampler._h.T / self._la.tensormul_T(self._sampler._G, directions)
-        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if self._hemi else 1, keepdims=True)
+        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if hemi else 1, keepdims=True)
 
-        if self._hemi:
+        if hemi:
             alpha_min, alpha_max = alpha_max
             first_el = directions[..., [0]]
             alpha = (rounded[..., [0]] - (alpha_min * first_el)) / first_el
@@ -1023,16 +987,18 @@ class FluxCoordinateMapper(object):
         else:
             alpha_frac = norm / alpha_max  # fraction of max distance from polytope boundary
 
-        if self._root is not None:
-            alpha_frac = self._la.float_power(alpha_frac, self._root)
+        if alpha_root is None:
+            alpha_root = self._sampler.dimensionality
+
+        alpha_frac = self._la.float_power(alpha_frac, alpha_root)
 
         result = self._la.cat([directions, alpha_frac], dim=-1)
 
         if pandalize:
-            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.net_theta_id)
+            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.net_theta_id('ball', hemi))
         return result
 
-    def _map_ball_2_rounded(self, ball, pandalize=False):
+    def _map_ball_2_rounded(self, ball, hemi: bool=False, alpha_root: float=None, pandalize=False):
         index = None
         if isinstance(ball, pd.DataFrame):
             index = ball.index
@@ -1042,13 +1008,15 @@ class FluxCoordinateMapper(object):
         directions = ball[..., :-1]
         alpha_frac = ball[..., [-1]]
 
-        if self._root is not None:
-            alpha_frac = self._la.float_power(alpha_frac, 1.0 / self._root)
+        if alpha_root is None:
+            alpha_root = self._sampler.dimensionality
+
+        alpha_frac = self._la.float_power(alpha_frac, 1.0 / alpha_root)
 
         allpha = self._sampler._h.T / self._la.tensormul_T(self._sampler._G, directions)
-        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if self._hemi else 1, keepdims=True)
+        alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if hemi else 1, keepdims=True)
 
-        if self._hemi:
+        if hemi:
             alpha_min, alpha_max = alpha_max
             alpha = alpha_frac * (alpha_max - alpha_min) + alpha_min  # fraction of chord
         else:
@@ -1056,10 +1024,10 @@ class FluxCoordinateMapper(object):
 
         rounded = directions * alpha
         if pandalize:
-            rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._sampler._rounded_id)
+            rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self.net_theta_id(coordinate_id='rounded'))
         return rounded
 
-    def _map_ball_2_cylinder(self, ball, pandalize=False):
+    def _map_ball_2_cylinder(self, ball, hemi=False, rescale_val=1.0, pandalize=False):
         index = None
         if isinstance(ball, pd.DataFrame):
             index = ball.index
@@ -1070,37 +1038,37 @@ class FluxCoordinateMapper(object):
             output[..., :i] /= self._la.sqrt(1.0 - output[..., [i]] ** 2)
         atan = self._la.arctan2(output[..., [0]], output[..., [1]])
 
-        if self._rescale_val is not None:
+        if rescale_val is not None:
             # this scales atan to [-1, 1]
             # atan is [0, pi] if _hemi else [-pi, pi]
-            minb = 0.0 if self._hemi else -math.pi
+            minb = 0.0 if hemi else -math.pi
             atan = -1 + 2 * (atan - minb) / (math.pi - minb)
             # R in [0, 1], so we scale to [-1, 1]
             output[..., -1] = -1 + 2 * output[..., -1]
 
         cylinder = self._la.cat([atan, output[..., 2:]], dim=-1)
 
-        if (self._rescale_val is not None) and (self._rescale_val != 1):
+        if (rescale_val is not None) and (rescale_val != 1):
             # scales to [-_bound, _bound]
-            cylinder = -self._rescale_val + 2 * self._rescale_val * (cylinder + 1.0) / 2
+            cylinder = -rescale_val + 2 * rescale_val * (cylinder + 1.0) / 2
 
         if pandalize:
-            cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=None)  # TODO
+            cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=self.net_theta_id(coordinate_id='cylinder'))
         return cylinder
 
-    def _map_cylinder_2_ball(self, cylinder, pandalize=False):
+    def _map_cylinder_2_ball(self, cylinder, hemi=False, rescale_val=1.0, pandalize=False):
         index = None
         if isinstance(cylinder, pd.DataFrame):
             index = cylinder.index
 
-        if (self._rescale_val is not None) and (self._rescale_val != 1):
+        if (rescale_val is not None) and (rescale_val != 1):
             # scales cylinder to [-1, 1]
-            cylinder = (cylinder + self._rescale_val) / (2 * self._rescale_val) * 2 - 1
+            cylinder = (cylinder + rescale_val) / (2 * rescale_val) * 2 - 1
 
         atan = cylinder[..., [0]]
-        if self._rescale_val is not None:
+        if rescale_val is not None:
             # scales atan is [0, pi] if _hemi else [-pi, pi]
-            minb = 0.0 if self._hemi else -math.pi
+            minb = 0.0 if hemi else -math.pi
             atan = (atan + 1) / 2 * (math.pi - minb) + minb
             # scales R back to [0, 1]
             cylinder[..., -1] = (cylinder[..., -1] + 1) / 2
@@ -1112,79 +1080,83 @@ class FluxCoordinateMapper(object):
         for i in range(2, ball.shape[-1] - 1):
             ball[..., :i] *= self._la.sqrt(1.0 - ball[..., [i]] ** 2)
         if pandalize:
-            ball = pd.DataFrame(self._la.tonp(ball), index=index, columns=None)  # TODO
+            ball = pd.DataFrame(self._la.tonp(ball), index=index, columns=self.net_theta_id(coordinate_id='ball'))
         return ball
 
-    def _map_rounded_2_theta(self, rounded, pandalize=False):  # this is useful for rounded HR sampling of the polytope
+    def _map_rounded_2_theta(
+            self, rounded, coordinate_id='rounded', hemi=False, alpha_root=None, rescale_val=1.0, pandalize=False
+    ):
         index = None
         if isinstance(rounded, pd.DataFrame):
             index = rounded.index
-            rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
+            rounded = self._la.get_tensor(values=rounded.loc[:, self._sampler._rounded_id].values)
 
-        if self._coor_id == 'rounded':
-            if pandalize:
-                rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
-            return rounded
-        if self._coor_id == 'ball':
-            return self._map_rounded_2_ball(rounded, pandalize)
-        if self._coor_id == 'cylinder':
-            ball = self._map_rounded_2_ball(rounded)
-            cylinder = self._map_ball_2_cylinder(ball)
-            if pandalize:
-                cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=self.net_theta_id)
-            return cylinder
-        if self._coor_id == 'transformed':
-            transformed = self._la.tensormul_T(self._sampler._E_1, rounded - self._sampler._epsilon.T)
-            if pandalize:
-                transformed = pd.DataFrame(self._la.tonp(transformed), index=index, columns=self.net_theta_id)
-            return transformed
+        if coordinate_id == 'rounded':
+            theta = rounded
+        elif coordinate_id == 'ball':
+            theta = self._map_rounded_2_ball(rounded, hemi, alpha_root)
+        elif coordinate_id == 'cylinder':
+            ball = self._map_rounded_2_ball(rounded, hemi, alpha_root)
+            theta = self._map_ball_2_cylinder(ball, hemi, rescale_val)
+        elif coordinate_id == 'transformed':
+            theta = self._la.tensormul_T(self._sampler._E_1, rounded - self._sampler._epsilon.T)
 
-    def _map_net_theta_2_fluxes(self, net_theta: pd.DataFrame, pandalize=False):
+        if pandalize:
+            theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.net_theta_id(coordinate_id))
+        return theta
+
+    def _map_net_theta_2_fluxes(
+            self, net_theta: pd.DataFrame, coordinate_id='rounded', hemi=False,
+            alpha_root=None, rescale_val=1.0, pandalize=False
+    ):
         index = None
         if isinstance(net_theta, pd.DataFrame):
             index = net_theta.index
             net_theta = self._la.get_tensor(values=net_theta.loc[:, self.net_theta_id].values)
 
-        if self._coor_id == 'transformed':
-            net_fluxes = self._la.tensormul_T(self._T, net_theta) + self._tau.T
+        if coordinate_id == 'transformed':
+            net_fluxes = self._la.tensormul_T(self._sampler._T, net_theta) + self._sampler._tau.T  # = transformed
         else:
-            if self._coor_id == 'cylinder':
-                net_theta = self._map_cylinder_2_ball(cylinder=net_theta)
-            if self._coor_id != 'rounded':
-                net_theta = self._map_ball_2_rounded(ball=net_theta)
-            net_fluxes = self._sampler.map_rounded_2_fluxes(rounded=net_theta)
+            if coordinate_id == 'cylinder':
+                net_theta = self._map_cylinder_2_ball(cylinder=net_theta, hemi=hemi, rescale_val=rescale_val) # = ball
+            if coordinate_id != 'rounded':
+                net_theta = self._map_ball_2_rounded(ball=net_theta, hemi=hemi, alpha_root=alpha_root)  # = rounded
+            net_fluxes = self._sampler.map_rounded_2_fluxes(rounded=net_theta)  # = fluxes
 
         if pandalize:
             net_fluxes = pd.DataFrame(self._la.tonp(net_fluxes), index=index, columns=self._sampler.reaction_ids)
         return net_fluxes
 
-    def _map_fluxes_2_net_theta(self, net_fluxes: pd.DataFrame, pandalize=False):
+    def _map_fluxes_2_net_theta(
+            self, net_fluxes: pd.DataFrame, coordinate_id='rounded', hemi=False,
+            alpha_root=None, rescale_val=1.0, pandalize=False
+    ):
         index = None
         if isinstance(net_fluxes, pd.DataFrame):
             index = net_fluxes.index
             net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self._sampler.reaction_ids].values)
 
-        result = self._la.tensormul_T(self._sampler._T_1, net_fluxes - self._sampler._tau.T)  # = transformed
+        net_theta = self._la.tensormul_T(self._sampler._T_1, net_fluxes - self._sampler._tau.T)  # = transformed
 
-        if self._coor_id != 'transformed':
-            result = self._la.tensormul_T(self._sampler._E_1, result - self._sampler._epsilon.T) # = rounded
-            if self._coor_id != 'rounded':
-                result = self._map_rounded_2_ball(result)  # = ball
-                if self._coor_id != 'ball':
-                    result = self._map_ball_2_cylinder(result)  # = cylinder
+        if coordinate_id != 'transformed':
+            net_theta = self._la.tensormul_T(self._sampler._E_1, net_theta - self._sampler._epsilon.T) # = rounded
+            if coordinate_id != 'rounded':
+                net_theta = self._map_rounded_2_ball(net_theta, hemi, alpha_root)  # = ball
+                if coordinate_id != 'ball':
+                    net_theta = self._map_ball_2_cylinder(net_theta, hemi, rescale_val)  # = cylinder
 
         if pandalize:
-            result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.net_theta_id)
-        return result
+            net_theta = pd.DataFrame(self._la.tonp(net_theta), index=index, columns=self.net_theta_id(coordinate_id))
+        return net_theta
 
-    def _rescale_xch(self, xch_fluxes, to_rescale_val=True):
-        if self._rescale_val is None:
+    def _rescale_xch(self, xch_fluxes, rescale_val=1.0, to_rescale_val=True):
+        if rescale_val is None:
             raise ValueError
         if to_rescale_val:
             old_lo, old_hi = self._rho_bounds[:, 0], self._rho_bounds[:, 1]
-            new_lo, new_hi = -self._rescale_val, self._rescale_val
+            new_lo, new_hi = -rescale_val, rescale_val
         else:
-            old_lo, old_hi = -self._rescale_val, self._rescale_val
+            old_lo, old_hi = -rescale_val, rescale_val
             new_lo, new_hi = self._rho_bounds[:, 0], self._rho_bounds[:, 1]
         zero_one_scale = self._la.scale(xch_fluxes, lo=old_lo, hi=old_hi, rev=False)
         return self._la.scale(zero_one_scale, lo=new_lo, hi=new_hi, rev=True)
@@ -1356,7 +1328,10 @@ class FluxCoordinateMapper(object):
             fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.fluxes_id)
         return fluxes
 
-    def map_theta_2_fluxes(self, theta: pd.DataFrame, return_thermo=False, pandalize=False):
+    def map_theta_2_fluxes(
+            self, theta: pd.DataFrame, coordinate_id='rounded', log_xch=False, hemi=False,
+            alpha_root=None, rescale_val=1.0, return_thermo=False, pandalize=False
+    ):
         index = None
         if isinstance(theta, pd.DataFrame):
             index = theta.index
@@ -1365,14 +1340,14 @@ class FluxCoordinateMapper(object):
         if self._nx > 0:
             net_theta = theta[..., :-self._nx]  # this selects the net-variables
             xch_fluxes = theta[..., -self._nx:]
-            if self._logxch:
+            if log_xch:
                 xch_fluxes = self._expit_xch(xch_fluxes)
-            elif self._rescale_val is not None:
+            elif rescale_val is not None:
                 xch_fluxes = self._rescale_xch(xch_fluxes, to_rescale_val=False)
         else:
             net_theta = theta
 
-        thermo_fluxes = self._map_net_theta_2_fluxes(net_theta)  # should be in linalg form already
+        thermo_fluxes = self._map_net_theta_2_fluxes(net_theta, coordinate_id, hemi, alpha_root, rescale_val)  # should be in linalg form already
         if self._nx > 0:
             thermo_fluxes = self._la.cat([thermo_fluxes, xch_fluxes], dim=-1)
         if return_thermo:
@@ -1414,7 +1389,15 @@ class FluxCoordinateMapper(object):
             thermo_fluxes = pd.DataFrame(self._la.tonp(thermo_fluxes), index=index, columns=self.thermo_fluxes_id)
         return thermo_fluxes
 
-    def map_fluxes_2_theta(self, fluxes: pd.DataFrame, is_thermo=False, pandalize=False):
+    def map_fluxes_2_theta(
+            self, fluxes: pd.DataFrame, coordinate_id='rounded', log_xch=False, hemi=False,
+            alpha_root=None, rescale_val=1.0, is_thermo=True, pandalize=False
+    ):
+
+            # self, fluxes: pd.DataFrame, coordinate_id='rounded', is_thermo=False, pandalize=False):
+        if coordinate_id not in ['transformed', 'rounded', 'ball', 'cylinder']:
+            raise ValueError(f'{coordinate_id} not a valid basis coordinate system')
+
         index = None
         if isinstance(fluxes, pd.DataFrame):
             index = fluxes.index
@@ -1430,19 +1413,19 @@ class FluxCoordinateMapper(object):
 
         if self._nx > 0:
             xch_fluxes = thermo_fluxes[..., self._rev_idx]
-            if self._logxch:
+            if log_xch:
                 xch_fluxes = self._logit_xch(xch_fluxes)
-            elif self._rescale_val:
-                xch_fluxes = self._rescale_xch(xch_fluxes, to_rescale_val=True)
+            elif rescale_val is not None:
+                xch_fluxes = self._rescale_xch(xch_fluxes, rescale_val, True)
 
             net_fluxes = thermo_fluxes[..., :-self._nx]
-            net_theta = self._map_fluxes_2_net_theta(net_fluxes)
+            net_theta = self._map_fluxes_2_net_theta(net_fluxes, coordinate_id, hemi, alpha_root, rescale_val)
             theta = self._la.cat([net_theta, xch_fluxes], dim=1)
         else:
-            theta = self._sampler.map_fluxes_2_rounded(thermo_fluxes)
+            theta = self._map_fluxes_2_net_theta(thermo_fluxes, coordinate_id, hemi, alpha_root, rescale_val)
 
         if pandalize:
-            theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.theta_id)
+            theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.theta_id(coordinate_id, log_xch))
         return theta
 
     def to_linalg(self, linalg: LinAlg):
@@ -1487,7 +1470,7 @@ def sample_polytope(
         density=None,
         n_cdf=5,
         return_arviz=False,
-        return_what='basis',
+        return_what='rounded',
 ):
     # TODO just use the function MCMC from sbmfi.estimate.simulator!
     r"""
@@ -1658,7 +1641,7 @@ def compute_volume(
             raise ValueError('only works with rref, pass polytope or rref volumemodel')
         F_trans = PolyRoundApi.simplify_polytope(psm.basis_polytope, normalize=False)
         if F_trans.S is not None:
-            F_trans, _, _ = transform_polytope_keep_transform(F_trans, kernel_basis='rref')
+            F_trans, _, _ = transform_polytope_keep_transform(F_trans, kernel_id='rref')
         vertices = V_representation(F_trans)
         n_vertices = vertices.shape[0]
         if verbose:
@@ -1723,7 +1706,7 @@ def compute_volume(
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
-    from sbmfi.inference.priors import UniRoundedFlexXchPrior
+    from sbmfi.inference.priors import UniRoundedFleXchPrior
     import pandas as pd
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
@@ -1746,8 +1729,6 @@ if __name__ == "__main__":
         v5_reversible=False,
         n_obs=0,
         kernel_id='svd',
-        coordinate_id='rounded',
-        logit_xch_fluxes=False,
         L_12_omega=1.0,
         clip_min=None,
         transformation='ilr',

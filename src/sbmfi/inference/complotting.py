@@ -13,6 +13,16 @@ import matplotlib.pyplot as plt
 import colorcet
 from sbmfi.core.polytopia import thermo_2_net_polytope
 
+
+
+# def make_v_rep(fcm: FluxCoordinateMapper):
+#     try:
+#         V_representation(fcm.)
+#
+#     except:
+#         polytope = PolyRoundApi.simplify_polytope(polytope, normalize=False)
+#         polytope, _, _, _ = transform_polytope_keep_transform(polytope, kernel_id='svd')
+
 class PlotMonster(object):
     _ALLFONTSIZES = {
         'xlabel': 12,
@@ -89,7 +99,7 @@ class PlotMonster(object):
         if v_rep is None:
             # NOTE: this only works with transformed polytope, because of the floating point arithmetic of cddlib!
             #   therefore we pass the net-flux polytope which is then simplified and transformed
-            v_rep = V_representation(fcm._Fn, net_pol=True)
+            v_rep = V_representation(fcm._Fn)
 
             if fcm.coordinate_id == 'rounded':
                 v_rep = v_rep.values
@@ -649,6 +659,9 @@ if __name__ == "__main__":
         v_rep=None,
         hv_backend='bokeh',
     )
+    plott = smc_plot.grand_theta_plot('R_svd0', 'R_svd2')
+    output_file(filename="custom_filename.html", title="plot1")
+    aaa = show(hv.render(plott), new='tab')
 
     # data_id = ['A: ilr_C_0', 'A: ilr_C_1', 'A: ilr_D_0', 'A: ilr_D_1', 'A: ilr_H_0',
     #    'A: ilr_L_0', 'A: ilr_L_1', 'A: ilr_L_2', 'A: ilr_L|[1,2]_0',

@@ -36,8 +36,6 @@ class _BaseBayes(_BaseSimulator):
         if prior is not None:
             if not prior._fcm.labelling_fluxes_id.equals(model.labelling_fluxes_id):
                 raise ValueError('prior has different labelling fluxes than model')
-            if not model._fcm.theta_id.equals(prior.theta_id):
-                raise ValueError('theta of model and prior are different')
 
         self._sampler = self._fcm._sampler
         self._K = self._sampler.dimensionality
@@ -551,19 +549,6 @@ class _BaseBayes(_BaseSimulator):
             log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
         return log_probs
 
-    def map_chains_2_theta(self, chains):
-        raise NotImplementedError('changing polytopia API')
-        # if chains are not rounded and not log-ratio, we need to map accordingly
-        if (self._sampler.coordinate_id == 'rounded') and not self._fcm.logit_xch_fluxes:
-            return chains
-        theta = self._fcm._sampler._map_rounded_2_theta(rounded=chains[..., :self._K])
-        if self._nx > 0:
-            xch_fluxes = chains[..., -self._nx:]
-            if self._fcm.logit_xch_fluxes:
-                xch_fluxes = self._fcm._logit_xch(xch_fluxes)
-            theta = self._la.cat([theta, xch_fluxes], dim=-1)
-        return theta
-
 
 class MCMC(_BaseBayes):
     SYMMETRIC_PROPOSALS = ['gauss', 'unif']
@@ -716,9 +701,6 @@ class MCMC(_BaseBayes):
         chord_std = self._la.get_tensor(values=np.array([chord_std]))
         xch_std = self._la.get_tensor(values=np.array([xch_std]))
 
-        if self._fcm._sampler.coordinate_id == 'transformed':
-            raise NotImplementedError('transform the chains to transformed')
-
         batch_size = n_chains * n_cdf
         if (self._la._batch_size != batch_size) or not self._model._is_built:
             # this way the batch processing is corrected
@@ -847,7 +829,6 @@ class MCMC(_BaseBayes):
                 raise
         finally:
             pbar.close()
-            chains = self.map_chains_2_theta(chains)
 
             if not return_az:
                 return chains
@@ -1320,7 +1301,7 @@ if __name__ == "__main__":
 
     from sbmfi.models.small_models import spiro, multi_modal
     from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
-    from sbmfi.inference.priors import UniRoundedFlexXchPrior, ProjectionPrior
+    from sbmfi.inference.priors import UniRoundedFleXchPrior, ProjectionPrior
     from sbmfi.inference.complotting import PlotMonster
     from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, fast_FVA
     import pickle
@@ -1343,13 +1324,12 @@ if __name__ == "__main__":
         v5_reversible=False,
         n_obs=0,
         kernel_id='svd',
-        coordinate_id='rounded',
         logit_xch_fluxes=False,
         L_12_omega=1.0,
         clip_min=None,
         transformation='ilr',
     )
-    prior = UniRoundedFlexXchPrior(model, cache_size=100)
+    prior = UniRoundedFleXchPrior(model, cache_size=100)
     smc = SMC(
         model=model,
         substrate_df=kwargs['substrate_df'],

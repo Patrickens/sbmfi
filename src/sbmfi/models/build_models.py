@@ -7,7 +7,7 @@ from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex, excel_polytope
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniRoundedFlexXchPrior
+from sbmfi.inference.priors import UniRoundedFleXchPrior
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os
@@ -1622,7 +1622,7 @@ def _parse_anton_fluxes():
     model, kwargs = build_e_coli_anton_glc(build_simulator=False)
     free_id = ['ME1', 'PGK', 'ICL', 'PGI', 'EDA', 'PPC', 'biomass_rxn', 'EX_glc__D_e', 'EX_ac_e']
     model.reactions.get_by_id('EX_glc__D_e').bounds = (-10.0, -10.0)
-    model.build_model(free_reaction_id=free_id, kernel_id='rref', coordinate_id='rounded')
+    model.build_model(free_reaction_id=free_id, kernel_id='rref')
     thermo_pol = model._fcm._Ft
     net_pol = model._fcm._Fn
     # pickle.dump(thermo_pol, open('tp.p', 'wb'))
@@ -1632,7 +1632,7 @@ def _parse_anton_fluxes():
     simplified_net_pol = PolyRoundApi.simplify_polytope(
         net_pol, settings=PolyRoundSettings(verbose=False), normalize=False
     )
-    trans_pol, T, T_1, tau = transform_polytope_keep_transform(simplified_net_pol, kernel_basis='rref')
+    trans_pol, T, T_1, tau = transform_polytope_keep_transform(simplified_net_pol, kernel_id='rref')
     full_net_fluxes = T @ net_fluxes.loc[T.columns] + tau.values
 
     innnn = net_pol.A @ full_net_fluxes.loc[net_pol.A.columns]
@@ -2028,7 +2028,7 @@ def build_e_coli_anton_glc(
     thermo_fluxes, theta, comparison = None, None, None
     if annotation_df is not None:
         bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, _bmid_ANTON)
-        up = UniRoundedFlexXchPrior(model)
+        up = UniRoundedFleXchPrior(model)
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
         thermo_fluxes = read_anton_fluxes()
@@ -2228,8 +2228,6 @@ def simulator_factory(
         seed=None,
         free_reaction_id=None,
         kernel_id='svd',
-        coordinate_id='rounded',
-        logit_xch_fluxes=False,
 ) -> LabellingModel:
     if id_or_file_or_model is not None:
         try:
@@ -2271,8 +2269,6 @@ def simulator_factory(
         model.build_model(
             free_reaction_id=free_reaction_id,
             kernel_id=kernel_id,
-            coordinate_id=coordinate_id,
-            logit_xch_fluxes=logit_xch_fluxes
         )
     return model
 

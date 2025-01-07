@@ -167,9 +167,6 @@ class _BasePrior(Distribution):
         if model._la.backend != 'torch':
             linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
             model = model.to_linalg(linalg)
-            
-        if model.coordinate_id != 'rounded':
-            raise ('cannot have coordinate_id other than rounded!')
 
         self._fcm = model
         self._la = model._la
@@ -284,11 +281,11 @@ class BaseRoundedPrior(_BasePrior):
 
     @property
     def theta_id(self) -> pd.Index:
-        return self._fcm.theta_id
+        return self._fcm.theta_id()
 
     @property
     def n_theta(self):
-        return len(self._fcm.theta_id)
+        return len(self._fcm.theta_id())
 
 
 class BaseXchFluxPrior(Distribution):
@@ -304,10 +301,6 @@ class BaseXchFluxPrior(Distribution):
             linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
             model = model.to_linalg(linalg)
 
-        if model.logit_xch_fluxes or (model._rescale_val is not None):
-            raise ValueError('can only do non-log transformed and non rescaled fluxes, '
-                             f'fcm now has {model.logit_xch_fluxes} and {model.symmetric_rescale_val}')
-
         if model._nx == 0:
             raise ValueError('no boundary fluxes')
 
@@ -318,7 +311,7 @@ class BaseXchFluxPrior(Distribution):
 
     @property
     def theta_id(self) -> pd.Index:
-        return self._fcm.xch_theta_id
+        return self._fcm.xch_theta_id()
     
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
         raise NotImplementedError
@@ -367,14 +360,14 @@ class XchFluxPrior(BaseXchFluxPrior):  # TODO rename
         return torch.zeros((*value.shape[:-1], 1))
 
 
-class UniRoundedFlexXchPrior(BaseRoundedPrior):
+class UniRoundedFleXchPrior(BaseRoundedPrior):
     def __init__(
             self,
             model,
             xch_prior: BaseXchFluxPrior = None,
             **kwargs,
     ):
-        super(UniRoundedFlexXchPrior, self).__init__(model, **kwargs)
+        super(UniRoundedFleXchPrior, self).__init__(model, **kwargs)
         if (self._fcm._nx > 0) and (xch_prior is None):
             xch_prior = XchFluxPrior(self._fcm)
         self._xch_prior = xch_prior
@@ -417,7 +410,7 @@ class UniRoundedFlexXchPrior(BaseRoundedPrior):
         return log_prob
 
 
-class ProjectionPrior(UniRoundedFlexXchPrior):
+class ProjectionPrior(UniRoundedFleXchPrior):
     # TODO I noticed that for the biomass flux, it is rarely sampled over 0.3, thus here we
     #  sample boundary fluxes in a projected polytope and then constrain and sample just like with ratios
 
@@ -548,7 +541,7 @@ if __name__ == "__main__":
         logit_xch_fluxes=False,
         symmetric_rescale_val=2.0,
     )
-    xchp = UniRoundedFlexXchPrior(fcm)
+    xchp = UniRoundedFleXchPrior(fcm)
     s = xchp.sample((10,))
     # print(s)
     # print(xchp._la.scale(torch.tensor(0.0), lo=-2.0, hi=2.0))

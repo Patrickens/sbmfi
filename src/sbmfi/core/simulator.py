@@ -521,7 +521,7 @@ class DataSetSim(_BaseSimulator):
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniRoundedFlexXchPrior
+    from sbmfi.inference.priors import UniRoundedFleXchPrior
     from sbmfi.inference.complotting import SMC_PLOT
     from sbmfi.inference.bayesian import SMC
     from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
@@ -536,7 +536,7 @@ if __name__ == "__main__":
         which_labellings=['A', 'B']
 
     )
-    up = UniRoundedFlexXchPrior(model.flux_coordinate_mapper, cache_size=20)
+    up = UniRoundedFleXchPrior(model.flux_coordinate_mapper, cache_size=20)
     dss = DataSetSim(
         model=model,
         substrate_df=kwargs['substrate_df'],
