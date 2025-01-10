@@ -1,24 +1,22 @@
 import pandas as pd
 import numpy as np
-from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservationModel, ClassicalObservationModel, MDV_ObservationModel
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
-from sbmfi.core.util import make_multidex, excel_polytope
+from sbmfi.core.util import make_multidex
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniRoundedFleXchPrior
-from sbmfi.settings import MODEL_DIR, SIM_DIR
-from sbmfi.lcmsanalysis.util import _strip_bigg_rex
-import sys, os
+from sbmfi.priors.uniform import UniformRoundedFleXchPrior
+from sbmfi.settings import MODEL_DIR
+import os
 import cobra
 from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
 # from pta import ConcentrationsPrior
 import pickle
+from sbmfi.core.polytopia import FluxCoordinateMapper, extract_labelling_polytope, rref_null_space, thermo_2_net_polytope
 from sbmfi.lcmsanalysis.formula import Formula, isotopologues
 from sbmfi.lcmsanalysis.util import build_correction_matrix
-from sbmfi.core.polytopia import FluxCoordinateMapper, extract_labelling_polytope, rref_null_space, thermo_2_net_polytope
 import cvxpy as cp
 from typing import Iterable
 import copy
@@ -1571,7 +1569,7 @@ def read_anton_substrates(which_labellings=None):
     return pd.read_csv(file, index_col=0).loc[which_labellings]
 
 
-from sbmfi.core.polytopia import transform_polytope_keep_transform, thermo_2_net_polytope
+from sbmfi.core.polytopia import transform_polytope_keep_transform
 from PolyRound.api import PolyRoundApi, PolyRoundSettings
 def _parse_anton_fluxes():
     v_map = {}
@@ -2028,7 +2026,7 @@ def build_e_coli_anton_glc(
     thermo_fluxes, theta, comparison = None, None, None
     if annotation_df is not None:
         bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, _bmid_ANTON)
-        up = UniRoundedFleXchPrior(model)
+        up = UniformRoundedFleXchPrior(model)
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
         thermo_fluxes = read_anton_fluxes()
@@ -2274,8 +2272,6 @@ def simulator_factory(
 
 
 if __name__ == "__main__":
-    import json
-
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
@@ -2283,7 +2279,6 @@ if __name__ == "__main__":
 
     map_back = {}
     # from optlang.gurobi_interface import
-    from cobra.flux_analysis import flux_variability_analysis
 
     # model, kwargs = build_e_coli_anton_glc(backend='torch', build_simulator=True, which_measurements='tomek')
     model, kwargs = build_e_coli_anton_glc(backend='torch', build_simulator=False, which_measurements=None)

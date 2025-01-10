@@ -7,7 +7,7 @@ from sbmfi.inference.bayesian import _BaseBayes, MCMC, SMC
 import torch
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.observation import BoundaryObservationModel, MDV_ObservationModel
-from sbmfi.inference.priors import BaseRoundedPrior
+from sbmfi.priors.uniform import BaseRoundedPrior
 from sbmfi.core.simulator import _BaseSimulator
 import pandas as pd
 from typing import Dict, Optional, Callable, Any, Union
@@ -359,7 +359,7 @@ class SNPE_P(_BaseBayes, SNPE_C):
                 # TODO construct a box-uniform proposal distribution!
                 raise NotImplementedError
             elif isinstance(self._prior, BaseRoundedPrior):
-                proposal = UniRoundedFleXchPrior(self._fcm)
+                proposal = UniformRoundedFleXchPrior(self._fcm)
             self._posterior = RejectionPosterior(
                 potential_fn=potential_fn,
                 proposal=proposal,
@@ -538,7 +538,7 @@ if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
 
     from sbmfi.core.simulator import DataSetSim
-    from sbmfi.inference.priors import UniRoundedFleXchPrior
+    from sbmfi.priors.uniform import UniformRoundedFleXchPrior
     import os
     import numpy as np
 
@@ -552,7 +552,7 @@ if __name__ == "__main__":
     sdf = kwargs['substrate_df']
     dss = DataSetSim(model, sdf, bbs._obmods, bbs._bom, num_processes=0)
     n = 20000
-    prior = UniRoundedFleXchPrior(model, cache_size=n)
+    prior = UniformRoundedFleXchPrior(model, cache_size=n)
     h5_file = 'spiro.h5'
     dataset_id = 'test'
     create_data = False

@@ -10,13 +10,13 @@ from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.metabolite import EMU
 from sbmfi.core.polytopia import FluxCoordinateMapper, rref_and_project, LabellingPolytope
 from sbmfi.core.util import (
-    _bigg_compartment_ids,
     make_multidex,
+    _bigg_compartment_ids
 )
 from sbmfi.lcmsanalysis.util import (
     build_correction_matrix,
     gen_annot_df,
-    _strip_bigg_rex,
+    _strip_bigg_rex
 )
 # from sbmfi.lcmsanalysis.zemzed import add_formulas
 from sbmfi.lcmsanalysis.formula import Formula
@@ -1092,10 +1092,7 @@ def exclude_low_massiso(
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    from sbmfi.models.build_models import build_e_coli_anton_glc
     # from sbmfi.core.polytopia import coordinate_hit_and_run_cpp
-    import pickle
-    from sbmfi.inference.priors import UniRoundedFleXchPrior
 
     import pandas as pd
 

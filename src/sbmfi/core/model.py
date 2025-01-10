@@ -1,8 +1,8 @@
 # os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'  # this is to avoid some weird stuff
 from cobra.util.context import get_context
 from cobra import Model, Reaction, Metabolite, DictList
-import math
 import numpy as np
+import math
 import pandas as pd
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util   import (
@@ -22,9 +22,8 @@ from sbmfi.core.metabolite  import LabelledMetabolite, ConvolutedEMU, EMU, IsoCu
 from itertools import repeat
 from typing import Iterable, Union
 from abc import abstractmethod
-from copy import copy, deepcopy
+from copy import deepcopy
 import pickle
-
 
 class LabellingModel(Model):
     """Model that allows for sampling of the flux-space defined by the null-space
@@ -244,17 +243,17 @@ class LabellingModel(Model):
             raise ValueError('build the model first!')
         return self._fcm
 
-    def set_fluxes(self, fluxes: Union[pd.DataFrame, np.array], samples_id=None, trim=True):
+    def set_fluxes(self, labelling_fluxes: Union[pd.DataFrame, np.array], samples_id=None, trim=True):
         if not self._is_built:
             raise ValueError('MUST BUILD')
-        fluxes = self._fcm.frame_fluxes(fluxes, samples_id, trim)
-        if len(fluxes.shape) > 2:
+        labelling_fluxes = self._fcm.frame_fluxes(labelling_fluxes, samples_id, trim)
+        if len(labelling_fluxes.shape) > 2:
             raise ValueError('can only deal with 2D stratified fluxes!')
         if self._la._auto_diff:
-            fluxes.requires_grad_(True)
-        if fluxes.shape[0] != self._la._batch_size:
-            raise ValueError(f'batch_size = {self._la._batch_size}; fluxes.shape[0] = {fluxes.shape[0]}')
-        self._fluxes = fluxes
+            labelling_fluxes.requires_grad_(True)
+        if labelling_fluxes.shape[0] != self._la._batch_size:
+            raise ValueError(f'batch_size = {self._la._batch_size}; fluxes.shape[0] = {labelling_fluxes.shape[0]}')
+        self._fluxes = labelling_fluxes
 
     def set_input_labelling(self, input_labelling: pd.Series):
         self._input_labelling = {}
@@ -1259,7 +1258,7 @@ class RatioEMU_Model(EMU_Model, RatioMixin): pass
 if __name__ == "__main__":
     # from pta.sampling.tfs import sample_drg
     from sbmfi.settings import BASE_DIR
-    from sbmfi.inference.priors import *
+    from sbmfi.priors.uniform import *
     from sbmfi.models.build_models import build_e_coli_tomek, build_e_coli_anton_glc
     from sbmfi.models.small_models import spiro
 

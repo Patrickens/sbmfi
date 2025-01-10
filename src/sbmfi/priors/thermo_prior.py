@@ -1,4 +1,4 @@
-from sbmfi.inference.priors import BaseRoundedPrior
+from sbmfi.priors.uniform import BaseRoundedPrior
 import contextlib, io
 import numpy as np
 import pandas as pd
@@ -7,13 +7,13 @@ import random
 import scipy
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.polytopia import FluxCoordinateMapper
-from sbmfi.inference.priors import sampling_tasks
+from sbmfi.priors.uniform import sampling_tasks
 from collections import OrderedDict
 from torch.distributions import Distribution
 from pta.sampling.tfs import (
     FreeEnergiesSamplingResult, sample_drg,
     TFSModel, _find_point,
-    sample_fluxes_from_drg, PmoProblemPool
+    PmoProblemPool
 )
 from pta.constants import R
 
@@ -456,3 +456,5 @@ class ThermoPrior(BaseRoundedPrior):
         self._flux_cache  = torch.as_tensor(fluxes.values, dtype=torch.double)
         self._theta_cache = torch.as_tensor(theta.values, dtype=torch.double)
 
+if __name__ == "__main__":
+    pass

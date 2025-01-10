@@ -1,21 +1,20 @@
 import numpy as np
-from typing import Iterable, Union, List
-import pickle
+from typing import Union, List
 import math
 import scipy
-import contextlib, io
 import pandas as pd
-from cobra import Reaction, Model
+import contextlib
+import io
+from cobra import Reaction
 import functools
 from sympy import nsimplify, Matrix
 from sympy.core.numbers import One
-import pypoman
 import cvxpy as cp
 import cdd
 import cdd.gmp
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
     _rev_reactions_rex, _xch_reactions_rex
-from sbmfi.core.linalg import NumpyBackend, LinAlg
+from sbmfi.core.linalg import LinAlg
 from sbmfi.core.reaction import LabellingReaction
 import copy
 from PolyRound.api import PolyRoundApi, Polytope, PolyRoundSettings
@@ -23,6 +22,7 @@ from PolyRound.static_classes.lp_utils import ChebyshevFinder
 from PolyRound.static_classes.rounding.maximum_volume_ellipsoid import MaximumVolumeEllipsoidFinder
 from fractions import Fraction
 from importlib.metadata import version
+# import pypoman
 
 class LabellingPolytope(Polytope):
     tolerance = 1e-12
@@ -1238,23 +1238,18 @@ class FluxCoordinateMapper(object):
         xch_fluxes = np.exp(dgibbsr / (R * T)) ** exponent
         return pd.DataFrame(xch_fluxes, index=dgibbsr.index, columns=dgibbsr.columns)
 
-    def free_jacobian(
+    def rounded_jacobian(
             self,
-            jacobian,  # this is a jacobian of state w.r.t. fluxes, we might want to differentiate further to free variables
-            fluxes=None,
-            thermo_fluxes=None,
-            theta=None,
+            labelling_jacobian,  # this is a jacobian of state w.r.t. fluxes, we might want to differentiate further to free variables
+            thermo_fluxes,
     ):
-        raise NotImplementedError
+        # raise NotImplementedError
         # TODO this is a complex function that propagates the jacobian all the
         #  way from labelling jacobian to free variables jacobian
         # TODO: need to fix fwd and reverse mapping for bi-directional fluxes
         # TODO deal with the fact that cofactor fluxes are included in the coordinate mapper!!!!
 
-        if thermo_fluxes is None:
-            thermo_fluxes = self.map_fluxes_2_thermo(fluxes)
-        if theta is None:
-            theta = self.map_fluxes_2_theta(thermo_fluxes, is_thermo=True)
+        theta = self.map_fluxes_2_theta(thermo_fluxes, is_thermo=True)
 
         if self._J_lt is None:
             # labelling fluxes w.r.t. thermo fluxes
@@ -1293,7 +1288,7 @@ class FluxCoordinateMapper(object):
             dxch_dsigmaxch = (C * s) / (s + 1)**2
             self._J_tt[:, -self._nx:, -self._nx:] = dxch_dsigmaxch[..., None]
 
-        return self._J_tt @ self._J_lt @ jacobian
+        return self._J_tt @ self._J_lt @ labelling_jacobian
 
     def map_thermo_2_fluxes(self, thermo_fluxes: pd.DataFrame, pandalize=False):
         index = None
@@ -1335,7 +1330,7 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(theta, pd.DataFrame):
             index = theta.index
-            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
+            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id(coordinate_id, hemi, log_xch)].values)
 
         if self._nx > 0:
             net_theta = theta[..., :-self._nx]  # this selects the net-variables
@@ -1425,7 +1420,7 @@ class FluxCoordinateMapper(object):
             theta = self._map_fluxes_2_net_theta(thermo_fluxes, coordinate_id, hemi, alpha_root, rescale_val)
 
         if pandalize:
-            theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.theta_id(coordinate_id, log_xch))
+            theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.theta_id(coordinate_id, hemi, log_xch))
         return theta
 
     def to_linalg(self, linalg: LinAlg):
@@ -1440,15 +1435,16 @@ class FluxCoordinateMapper(object):
 
 def make_theta_polytope(fcm: FluxCoordinateMapper):
     net_polytope = fcm._sampler._F_round
-    xch_A = pd.DataFrame(0.0, columns=fcm.xch_theta_id, index=net_polytope.A.index)
+    if fcm._nx == 0:
+        return net_polytope
+    xch_id = fcm.xch_theta_id()
+    xch_A = pd.DataFrame(0.0, columns=xch_id, index=net_polytope.A.index)
     A = pd.concat([net_polytope.A, xch_A], axis=1)
-    if fcm._logxch:
-        return LabellingPolytope(A=A, b=net_polytope.b)
     ub_idx = fcm._fwd_id + '_xch|ub'
     lb_idx = fcm._fwd_id + '_xch|lb'
     A_xch = pd.DataFrame(0.0, columns=A.columns, index=ub_idx.append(lb_idx))
-    A_xch.loc[ub_idx, fcm.xch_theta_id] =  np.eye(fcm._nx)
-    A_xch.loc[lb_idx, fcm.xch_theta_id] = -np.eye(fcm._nx)
+    A_xch.loc[ub_idx, xch_id] =  np.eye(fcm._nx)
+    A_xch.loc[lb_idx, xch_id] = -np.eye(fcm._nx)
     A_xch[A_xch == -0.0] = 0.0
     bounds = fcm._la.tonp(fcm._rho_bounds)
     b_xch = pd.Series(np.concatenate([bounds[:, 1], bounds[:, 0]]), index=A_xch.index)
@@ -1705,8 +1701,6 @@ def compute_volume(
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
-    from sbmfi.inference.priors import UniRoundedFleXchPrior
     import pandas as pd
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)

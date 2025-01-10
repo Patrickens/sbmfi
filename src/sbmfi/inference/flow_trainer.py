@@ -1,47 +1,35 @@
-import normflows
 import torch
-from normflows.utils.splines import rational_quadratic_spline
 # from sbi.neural_nets.flow import build_maf, build_nsf
-from functools import partial
 from pyknos.nflows.transforms import PointwiseAffineTransform
-from torch import Tensor, nn, relu, tanh, tensor, uint8
+from torch import nn
 from typing import Optional
-from sbi.utils.torchutils import create_alternating_binary_mask
-from normflows.distributions.base import BaseDistribution, Uniform, UniformGaussian, DiagGaussian
+from normflows.distributions.base import Uniform, UniformGaussian
 from normflows.flows import Permute, LULinearPermute
-from normflows import ConditionalNormalizingFlow
 from sbmfi.inference.normflows_patch import (
     CircularAutoregressiveRationalQuadraticSpline,
     CircularCoupledRationalQuadraticSpline,
     EmbeddingConditionalNormalizingFlow,
-    DiagGaussianScale,
-    Flow_Dataset
+    DiagGaussianScale
 )
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import DataLoader
 from normflows.flows.neural_spline.wrapper import (
     CoupledRationalQuadraticSpline,
     AutoregressiveRationalQuadraticSpline
 )
 from sbmfi.core.polytopia import FluxCoordinateMapper
-from sbmfi.core.model import LabellingModel
 from sbmfi.core.simulator import _BaseSimulator
-from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import _BasePrior
-import math
+from sbmfi.priors.uniform import _BasePrior
 import numpy as np
 import tqdm
-from typing import Dict, Union, Any
-from ray import tune
+from typing import Dict
 import os
 from sbmfi.settings import SIM_DIR
 import shutil
 from pathlib import Path
 import ray
 from ray import tune
-from ray.train import Checkpoint
-from ray.tune.schedulers import ASHAScheduler
 from ray.tune.stopper import TrialPlateauStopper
-from ray.tune import Callback
+
 
 def flow_constructor(
         fcm: FluxCoordinateMapper = None,
@@ -396,11 +384,6 @@ def flow_trainer(
 
 
 if __name__ == "__main__":
-    from sbmfi.models.small_models import spiro
-    from sbmfi.core.polytopia import sample_polytope
-    from sbmfi.inference.priors import UniRoundedFleXchPrior
-    from normflows import NormalizingFlowVAE
-    from normflows.distributions import NNDiagGaussian
 
     import pickle
 

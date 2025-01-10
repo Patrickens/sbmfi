@@ -1,10 +1,9 @@
 import pickle
-
 import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
-from sbmfi.inference.priors import UniRoundedFleXchPrior
+from sbmfi.priors.uniform import UniformRoundedFleXchPrior
 from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel, MDV_ObservationModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
@@ -278,7 +277,7 @@ def spiro(
 
     fluxes = pd.Series(fluxes, name='v')
     if (batch_size == 1) and build_simulator:
-        model.set_fluxes(fluxes=fluxes)
+        model.set_fluxes(labelling_fluxes=fluxes)
 
     observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
     annotation_df['mz'] = 0.0
@@ -330,11 +329,11 @@ def spiro(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
-        up = UniRoundedFleXchPrior(model._fcm)
+        up = UniformRoundedFleXchPrior(model._fcm)
 
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
-        true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)
+        true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, rescale_val=None, is_thermo=False, pandalize=True)
         basebayes.set_true_theta(true_theta.iloc[0])
         if which_measurements == 'lcms':
             _correct_base_bayes_lcms(basebayes, total_intensities=total_intensities, clip_min=clip_min)
@@ -556,7 +555,7 @@ def multi_modal(
         }
     fluxes = pd.Series(fluxes, name='v')
     if batch_size == 1:
-        model.set_fluxes(fluxes=fluxes)
+        model.set_fluxes(labelling_fluxes=fluxes)
 
     measurements, basebayes, true_theta = None, None, None
     if which_measurements is not None:
@@ -586,7 +585,7 @@ def multi_modal(
         if include_bom:
             bom = MVN_BoundaryObservationModel(model, ['a_in'], None)
 
-        up = UniRoundedFleXchPrior(model._fcm, cache_size=1000)
+        up = UniformRoundedFleXchPrior(model._fcm, cache_size=1000)
 
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
         true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, pandalize=True)

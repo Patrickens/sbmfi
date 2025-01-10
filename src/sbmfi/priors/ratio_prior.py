@@ -1,4 +1,3 @@
-import psutil
 import multiprocessing as mp
 import math
 import cvxpy as cp
@@ -6,20 +5,19 @@ import numpy as np
 import pandas as pd
 import warnings
 import torch
-from torch.distributions.constraints import Constraint, _Dependent, _Interval
+from torch.distributions.constraints import Constraint
 from PolyRound.api import PolyRoundApi
-from sbmfi.core.model import LabellingModel, RatioMixin
-from sbmfi.core.reaction import LabellingReaction
-from sbmfi.core.linalg import LinAlg, TorchBackend, NumpyBackend
+from sbmfi.core.model import RatioMixin
+from sbmfi.core.linalg import NumpyBackend
 from sbmfi.core.polytopia import LabellingPolytope, FluxCoordinateMapper, \
     PolytopeSamplingModel, project_polytope, transform_polytope_keep_transform, \
     H_representation, V_representation
 
 from collections import OrderedDict
-from typing import Iterable, Union, Optional, Dict
+from typing import Union
 from torch.distributions import constraints
 
-from sbmfi.inference.priors import _BasePrior
+from sbmfi.priors.uniform import _BasePrior
 
 class _RatioSupport(Constraint):
     def __init__(

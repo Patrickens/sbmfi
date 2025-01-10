@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
-from typing import Iterable, Union, Dict, Tuple
+from typing import Union, Dict
 import tqdm
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.simulfuncs import (
@@ -17,11 +17,13 @@ from sbmfi.core.observation import (
     BoundaryObservationModel,
     MDV_ObservationModel,
 )
+from sbmfi.core.polytopia import make_theta_polytope
 from sbmfi.core.util import (
     hdf_opener_and_closer,
     make_multidex,
-    profile,
+    profile
 )
+
 
 
 warnings.simplefilter('ignore', pt.NaturalNameWarning)
@@ -108,8 +110,26 @@ class _BaseSimulator(object):
         return self._did.copy()
 
     @property
-    def theta_id(self):
-        return self._fcm.theta_id
+    def theta_id(self):  # any simulator subclass has the following theta_id
+        return self._fcm.theta_id(coordinate_id='rounded', hemi=False, log_xch=False)
+
+    def check_theta(self, theta, tolerance=1e-8, pandalize=True):
+        # checks whether all of the samples in theta are rounded and not log transformed and not rescaled
+        pol = make_theta_polytope(self._fcm)
+
+        index = None
+        if isinstance(theta, pd.DataFrame):
+            index = theta.index
+            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
+
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+
+        A = self._la.get_tensor(values=pol.A.values)
+        b = self._la.get_tensor(values=pol.b.values) + tolerance
+        valid = (A @ theta.T <= b).T  # same as _CannonicalPolytopeSupport.check in priors, but there it has to be torch
+        return valid.view(*vape[:-1], self._A.shape[0])
 
     def _pandalize_data(self, data, index, n_obs, return_mdvs=False):
         if return_mdvs:
@@ -145,7 +165,7 @@ class _BaseSimulator(object):
         if len(vape) > 2:
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
 
-        fluxes = self._fcm.map_theta_2_fluxes(theta)
+        fluxes = self._fcm.map_theta_2_fluxes(theta, 'rounded', rescale_val=None)
 
         if mdvs is None:
             if len(fluxes.shape) > 2:
@@ -415,7 +435,6 @@ class DataSetSim(_BaseSimulator):
             break_i=-1,
             close_pool=True,
             show_progress=False,
-            save_fluxes=False,
     ) -> {}:
 
         if isinstance(theta, pd.DataFrame):
@@ -425,13 +444,11 @@ class DataSetSim(_BaseSimulator):
         if len(vape) > 2:
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
 
-        fluxes = self._fcm.map_theta_2_fluxes(theta)
+        fluxes = self._fcm.map_theta_2_fluxes(theta, rescale_val=None)
         if fluxes.shape[0] <= self._la._batch_size:
             raise ValueError('impossible')
 
         result = {}
-        if save_fluxes:
-            result['fluxes'] = fluxes
         result['validx'] = self._la.get_tensor(shape=(fluxes.shape[0], len(self._obmods)), dtype=np.bool_)
         result['theta'] = theta  # save stratified theta!!
 
@@ -521,11 +538,7 @@ class DataSetSim(_BaseSimulator):
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    from sbmfi.inference.priors import UniRoundedFleXchPrior
-    from sbmfi.inference.complotting import SMC_PLOT
-    from sbmfi.inference.bayesian import SMC
-    from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
-    import pickle
+    from sbmfi.priors.uniform import UniformRoundedFleXchPrior
 
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
@@ -536,7 +549,7 @@ if __name__ == "__main__":
         which_labellings=['A', 'B']
 
     )
-    up = UniRoundedFleXchPrior(model.flux_coordinate_mapper, cache_size=20)
+    up = UniformRoundedFleXchPrior(model.flux_coordinate_mapper, cache_size=20)
     dss = DataSetSim(
         model=model,
         substrate_df=kwargs['substrate_df'],

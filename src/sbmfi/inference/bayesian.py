@@ -1,5 +1,5 @@
 from sbmfi.core.simulator import _BaseSimulator, DataSetSim
-from sbmfi.inference.priors import _BasePrior, BaseRoundedPrior
+from sbmfi.priors.uniform import _BasePrior, BaseRoundedPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
 from sbmfi.core.model import LabellingModel
 import math
@@ -9,10 +9,7 @@ import pandas as pd
 import tqdm
 from typing import Dict
 from functools import partial
-from sbmfi.core.util import profile
 from sbi.inference.posteriors.base_posterior import NeuralPosterior
-import time
-from line_profiler import line_profiler
 import xarray as xr
 
 # from line_profiler import line_profiler
@@ -94,7 +91,11 @@ class _BaseBayes(_BaseSimulator):
             if theta.shape[0] > 1:
                 raise ValueError
             theta = theta.iloc[0]
-        self._true_theta = self._la.atleast_2d(self._la.get_tensor(values=theta.loc[self.theta_id].values))
+        true_theta = self._la.atleast_2d(self._la.get_tensor(values=theta.loc[self.theta_id].values))
+        within_bounds = self.check_theta(true_theta)
+        if not within_bounds.all():
+            raise ValueError('the passed true theta is not within the ')
+        self._true_theta = true_theta
         self._true_theta_id = theta.name
 
     def simulate_true_data(self, n_obs=0, pandalize=True):
@@ -462,7 +463,7 @@ class _BaseBayes(_BaseSimulator):
         allpha = pol_dist / A_dist
         alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
 
-        if chord_std.ndim > 1:
+        if not isinstance(chord_std, float) and chord_std.ndim > 1:
             # this means that we passed a covariance matrix and we need to compute std along the line
             chord_std = self._la.sqrt(self._la.sum(((sphere_sample @ chord_std) * sphere_sample), -1))
 
@@ -707,8 +708,7 @@ class MCMC(_BaseBayes):
             self._la._batch_size = batch_size
             self._model.build_model(**self._fcm.fcm_kwargs)
 
-        n_rounded = self._fcm._sampler._F_round.A.shape[1] + self._nx
-        chains = self._la.get_tensor(shape=(n, n_chains, n_rounded))  # TODO this should be the number of dimensions in rounded coord system!
+        chains = self._la.get_tensor(shape=(n, n_chains, len(self.theta_id)))  # TODO this should be the number of dimensions in rounded coord system!
         post_probs = self._la.get_tensor(shape=(n, n_chains))
         accept_rate = self._la.get_tensor(shape=(n_chains,), dtype=np.int64)
 
@@ -716,10 +716,7 @@ class MCMC(_BaseBayes):
             sim_data = self._la.get_tensor(shape=(n, n_chains, len(self.data_id)))
 
         if initial_points is None:
-            y = self._sampler.get_initial_points(num_points=n_chains)
-            if self._prior._xch_prior is not None:
-                xch_basis_points = self._prior._xch_prior.sample((n_chains, ))
-                y = self._la.cat([y, xch_basis_points], dim=-1)
+            y = self._prior.sample((n_chains, ))
         else:
             y = initial_points
 
@@ -736,7 +733,7 @@ class MCMC(_BaseBayes):
                 )
             raise NotImplementedError('this is complicated, since we need to weight samples by the prior somehow')
 
-        chord_ys = self._la.get_tensor(shape=(1 + n_cdf, n_chains, n_rounded))
+        chord_ys = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.true_theta)))
         chord_post_probs = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
         chord_prop_probs = self._la.get_tensor(shape=(1 + n_cdf, 1 + n_cdf, n_chains))
         pert_post_probs = self.potential(y)
@@ -1069,7 +1066,6 @@ class SMC(_BaseBayes):
             theta_cov,
         )
 
-
     def _arviz_2_partial_mdv(self, result: az.InferenceData):
         # this renames stuff so that the data is now partial MDVs and the log-ratio data is called lr_data
 
@@ -1121,6 +1117,9 @@ class SMC(_BaseBayes):
         )
         result.observed_data['observed_data'] = observed
         return result
+
+    def restore_populations_from_InferenceData(self, az_InfDat: az.InferenceData):
+        pass
 
     def run(
             self,
@@ -1181,13 +1180,12 @@ class SMC(_BaseBayes):
                     log_weights = self._la.log(1 / n * self._la.ones(n))
 
                     if return_all_populations:
-                        all_particles = [particles]
-                        all_log_weights = [log_weights]
-                        all_distances = [dist]
-                        all_epsilons = [epsilon]
-                        all_theta_cov = [self._la.get_tensor((self._K, self._K))]
+                        self._all_particles = [particles]
+                        self._all_log_weights = [log_weights]
+                        self._all_distances = [dist]
+                        self._all_epsilons = [epsilon]
                         if return_data:
-                            all_data = [data[sortidx][:n]]
+                            self._all_data = [data[sortidx][:n]]
                 else:
                     if distance_based_decay:
                         # Quantile of last population
@@ -1198,7 +1196,7 @@ class SMC(_BaseBayes):
                         epsilon *= epsilon_decay
 
                     particles, log_weights, dist, data, theta_cov = self._sample_next_population(
-                        particles=particles,
+                        particles=particles,  # TODO: work out how to do this when keyboard interrupted
                         log_weights=log_weights,
                         epsilon=epsilon,
                         population_batch=population_batch,
@@ -1209,24 +1207,23 @@ class SMC(_BaseBayes):
                         evaluate_prior=evaluate_prior,
                     )
                     if return_all_populations:
-                        all_particles.append(particles)
-                        all_log_weights.append(log_weights)
-                        all_distances.append(dist)
-                        all_epsilons.append(epsilon)
-                        all_epsilons.append(epsilon)
+                        self._all_particles.append(particles)
+                        self._all_log_weights.append(log_weights)
+                        self._all_distances.append(dist)
+                        self._all_epsilons.append(epsilon)
                         if return_data:
-                            all_data.append(data)
+                            self._all_data.append(data)
         except Exception as e:
             if e is not KeyboardInterrupt:
                 raise
         finally:
             if return_all_populations:
-                particles = self._la.stack(all_particles, 0)
-                log_weights = self._la.stack(all_log_weights, 0)
-                dist = self._la.stack(all_distances, 0)
-                epsilon = self._la.stack(all_epsilons, 0)
+                particles = self._la.stack(self._all_particles, 0)
+                log_weights = self._la.stack(self._all_log_weights, 0)
+                dist = self._la.stack(self._all_distances, 0)
+                epsilon = self._la.stack(self._all_epsilons, 0)
                 if return_data:
-                    data = self._la.stack(all_data, 0)
+                    data = self._la.stack(self._all_data, 0)
             else:
                 # add the 'chains' dimension
                 particles = particles[None, ...]
@@ -1299,13 +1296,8 @@ if __name__ == "__main__":
     pd.set_option('display.width', 1000)
     np.set_printoptions(linewidth=500)
 
-    from sbmfi.models.small_models import spiro, multi_modal
-    from sbmfi.models.build_models import build_e_coli_anton_glc, _bmid_ANTON
-    from sbmfi.inference.priors import UniRoundedFleXchPrior, ProjectionPrior
-    from sbmfi.inference.complotting import PlotMonster
-    from sbmfi.core.polytopia import FluxCoordinateMapper, PolytopeSamplingModel, fast_FVA
-    import pickle
-    from sbmfi.core.observation import MVN_BoundaryObservationModel
+    from sbmfi.models.small_models import spiro
+    from sbmfi.priors.uniform import UniformRoundedFleXchPrior
 
     model, kwargs = spiro(
         backend='torch',
@@ -1329,7 +1321,7 @@ if __name__ == "__main__":
         clip_min=None,
         transformation='ilr',
     )
-    prior = UniRoundedFleXchPrior(model, cache_size=100)
+    prior = UniformRoundedFleXchPrior(model, cache_size=100)
     smc = SMC(
         model=model,
         substrate_df=kwargs['substrate_df'],

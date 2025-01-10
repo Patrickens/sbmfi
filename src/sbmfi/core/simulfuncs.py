@@ -68,7 +68,7 @@ def simulator_worker(task: dict, model=None) -> dict:
             i = j - step
         fluxes_batch = fluxes_chunk[i: j]
         try:
-            MODEL.set_fluxes(fluxes=fluxes_batch, trim=False)  # trim has to be False!
+            MODEL.set_fluxes(labelling_fluxes=fluxes_batch, trim=False)  # trim has to be False!
             mdv_chunk[i: j] = MODEL.cascade()
         except Exception as e:
             print(1, e)
@@ -79,7 +79,7 @@ def simulator_worker(task: dict, model=None) -> dict:
             except:
                 print(2, e)
             if type_jacobian == 'free':
-                jacobian_batch = MODEL._fcm.free_jacobian(jacobian_batch, fluxes=fluxes_batch)
+                jacobian_batch = MODEL._fcm.rounded_jacobian(jacobian_batch, fluxes=fluxes_batch)
             jacobian_chunk[i: j] = jacobian_batch
 
     # NB filter failed simulations (metabolite not summing to 1 or values outside of [0, 1]
