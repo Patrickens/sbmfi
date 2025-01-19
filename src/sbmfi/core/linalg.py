@@ -838,8 +838,8 @@ class LinAlg(object):
                 uptri_x = x[0, cols]
                 uptri_mu = mu[rows, 0]
             else:
-                lo = lo[rows]
-                hi = hi[rows]
+                lo = lo[rows, 0]  # used to be lo[rows, 0] and hi[rows, 0], chaged because of dimension errors
+                hi = hi[rows, 0]
                 uptri_x = x[rows, cols]
                 uptri_mu = mu[cols, rows]
             uptri_probs = pdf(uptri_x, lo, hi, uptri_mu, std)

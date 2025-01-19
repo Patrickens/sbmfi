@@ -9,14 +9,7 @@ from sbmfi.core.observation import MDV_ObservationModel, MDV_LogRatioTransform
 def init_simulator(model: LabellingModel, epsilon=1e-12):
     global _MODEL, _EPSILON
     _MODEL = model
-    fcm_kwargs = model._fcm_kwargs
-    fcm_kwargs.pop('free_reaction_id', None)
-    fcm_kwargs.pop('verbose', None)
-    model.build_model(  # TODO need to update with fcm_kwargs
-        free_reaction_id=model.labelling_fluxes_id,
-        verbose=False,
-        **fcm_kwargs
-    )  # necessary after pickling
+    model.build_model(free_reaction_id=model.labelling_fluxes_id)  # necessary after pickling
     _EPSILON = epsilon
 
 

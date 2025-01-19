@@ -85,15 +85,14 @@ class LabellingModel(Model):
 
         # collections of metabolites
         self._measurements = DictList()  # these are the metabolites/ EMUs that we simulate labelling for since they are measured
-        self._pseudo_metabolites = DictList()
+        self._pseudo_metabolites = DictList()  # all the products of pseudo reactions e.g. all amino acids
 
         # collections of reactions of various sorts
         self._biomass_id: str = None
-        self.pseudo_reactions     = DictList()
+        self.pseudo_reactions     = DictList()  # used to simulate the labelling of products of linear pathways e.g. amino acids
         self._labelling_reactions = DictList()  # reactions for which all reactants and products are present and carry carbon
-        self._chosen_rid = []
+        self._free_reaction_id = []
 
-        self._fcm_kwargs = {}
         self._initialize_state()  # sets even more attributes; function is reused when building the model
 
         self.groups = DictList() # TODO: no functionality has been implemented or tested for groups
@@ -323,7 +322,7 @@ class LabellingModel(Model):
 
     def _set_free_reactions(self, free_reaction_id: Iterable = None):
         if free_reaction_id is None:
-            free_reaction_id = self._chosen_rid
+            free_reaction_id = self._free_reaction_id
         free_reaction_id = list(free_reaction_id)
 
         # this is because we typically have measurements for input/bm/boundary reactions!
@@ -353,7 +352,7 @@ class LabellingModel(Model):
         user_chosen.sort(key=lambda x: \
             free_reaction_id.index(_rev_reactions_rex.sub('', x.id)) if x.id not in free_reaction_id else x.id
         )
-        self._chosen_rid = user_chosen.list_attr('id')
+        self._free_reaction_id = user_chosen.list_attr('id')
         self._labelling_reactions = fwd + boundary + bm + user_chosen + zero_facet + rev
 
     def _fix_metabolite_reference_mess(self, reaction, atom_map):
@@ -504,7 +503,8 @@ class LabellingModel(Model):
             is_biomass = _find_biomass_rex.search(reactants) is not None
             if is_biomass:
                 if (self._biomass_id is not None) and (self._biomass_id != reac_id):
-                    raise ValueError('watch out, more than one biomass reaction in reac_kwargs!')
+                    raise ValueError(f'watch out, more than one biomass reaction in reac_kwargs! '
+                                     f'self._biomass_id = {self._biomass_id}, reac_id = {reac_id}')
                 self._biomass_id = reac_id
                 continue
             if reac_id in self.pseudo_reactions:
@@ -524,7 +524,7 @@ class LabellingModel(Model):
 
         if self._is_built:
             # TODO respect previously set free fluxes I guess?
-            self.build_model(**self._fcm.fcm_kwargs)
+            self.build_model(free_reaction_id=self._free_reaction_id)
 
     def make_sbml_writable(self):
         # we need to do this since there are a bunch of things that writing to sbml does not like if I remember correctly
@@ -693,16 +693,14 @@ class LabellingModel(Model):
         self._set_free_reactions(free_reaction_id=free_reaction_id)
 
     @abstractmethod
-    def build_model(self, free_reaction_id=None, kernel_id='svd', verbose=False):
+    def build_model(self, free_reaction_id=None, verbose=False):
         self._initialize_state()
+        self.prepare_polytopes(free_reaction_id, verbose)
         self._fcm = FluxCoordinateMapper(
             model=self,
-            kernel_id=kernel_id,
-            free_reaction_id=free_reaction_id,
             pr_verbose=verbose,
             linalg=self._la,
         )
-        self._fcm_kwargs = self._fcm.fcm_kwargs
         self._set_state()
 
     @abstractmethod
@@ -930,7 +928,6 @@ class EMU_Model(LabellingModel):
                 self._xemus.setdefault(i, DictList())
                 self._yemus.setdefault(i, DictList())
             emus[met_weight].append(met_emu)
-        self._ns   = num_el_s
         self._s    = self._la.get_tensor(shape=(self._la._batch_size, num_el_s))
         self._dsdv = self._la.get_tensor(shape=(self._la._batch_size, num_el_s))
         self._sum  = self._la.get_tensor(
@@ -1075,8 +1072,8 @@ class EMU_Model(LabellingModel):
                     row = self._xemus[emu.weight].index(emu)
                 self._emu_indices[emu] = matrix, dmdv, row
 
-    def build_model(self, free_reaction_id=None, kernel_id='svd', verbose=False):
-        super().build_model(free_reaction_id, kernel_id, verbose)
+    def build_model(self, free_reaction_id=None, verbose=False):
+        super().build_model(free_reaction_id, verbose)
         self._initialize_emu_split()
 
         for reaction in self.labelling_reactions + self.pseudo_reactions:

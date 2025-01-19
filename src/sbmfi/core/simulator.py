@@ -96,7 +96,8 @@ class _BaseSimulator(object):
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self._model.build_model(**self._model._fcm_kwargs)
+        model = state.get('_model')
+        self._model.build_model(free_reaction_id=model._free_reaction_id)
 
     @property
     def data_id(self):
@@ -108,28 +109,6 @@ class _BaseSimulator(object):
                 did.extend(self._bom.boundary_id.tolist())
             self._did = pd.MultiIndex.from_tuples(did, names=['labelling_id', 'data_id'])
         return self._did.copy()
-
-    @property
-    def theta_id(self):  # any simulator subclass has the following theta_id
-        return self._fcm.theta_id(coordinate_id='rounded', hemi=False, log_xch=False)
-
-    def check_theta(self, theta, tolerance=1e-8, pandalize=True):
-        # checks whether all of the samples in theta are rounded and not log transformed and not rescaled
-        pol = make_theta_polytope(self._fcm)
-
-        index = None
-        if isinstance(theta, pd.DataFrame):
-            index = theta.index
-            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
-
-        vape = theta.shape
-        if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
-
-        A = self._la.get_tensor(values=pol.A.values)
-        b = self._la.get_tensor(values=pol.b.values) + tolerance
-        valid = (A @ theta.T <= b).T  # same as _CannonicalPolytopeSupport.check in priors, but there it has to be torch
-        return valid.view(*vape[:-1], self._A.shape[0])
 
     def _pandalize_data(self, data, index, n_obs, return_mdvs=False):
         if return_mdvs:
@@ -150,45 +129,42 @@ class _BaseSimulator(object):
 
     def simulate(
             self,
-            theta=None,
+            labelling_fluxes=None,
             n_obs=3,
             return_mdvs=False, # whether to return mdvs, observation_average or noisy observations
             pandalize=False,
             mdvs=None,
     ):
         index = None
-        if isinstance(theta, pd.DataFrame):
-            index = theta.index
-            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
+        if isinstance(labelling_fluxes, pd.DataFrame):
+            index = labelling_fluxes.index
+            labelling_fluxes = self._la.get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values)
 
-        vape = theta.shape
-        if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
-
-        fluxes = self._fcm.map_theta_2_fluxes(theta, 'rounded', rescale_val=None)
+        if len(labelling_fluxes.shape) > 2:
+            raise ValueError(f'only handles (n_samples x n_fluxes) data, got {labelling_fluxes.shape}')
 
         if mdvs is None:
-            if len(fluxes.shape) > 2:
+            if len(labelling_fluxes.shape) > 2:
                 raise ValueError('pass n_samples x n_fluxes array!')
-            n_f = fluxes.shape[0]
-            self._model.set_fluxes(fluxes, index, trim=True)  # this is where wrongly shaped fluxes are caught!
-            fluxes = self._model._fluxes
+            n_f = labelling_fluxes.shape[0]
+            self._model.set_fluxes(labelling_fluxes, index, trim=True)  # this is where wrongly shaped fluxes are caught!
+            labelling_fluxes = self._model._fluxes
         elif return_mdvs:
             raise ValueError('return passed MDVS?')
         else:  # this is for when we pass theta and mdvs and the model batch_size does not match the shape of fluxes
-            fluxes = self._fcm.frame_fluxes(fluxes, index, trim=True)
+            labelling_fluxes = self._fcm.frame_fluxes(labelling_fluxes, index, trim=True)
             n_f = mdvs.shape[0]
 
         slicer = 0 if n_obs == 0 else slice(None)
         n_obshape = max(1, n_obs)
 
         if return_mdvs:
-            result = self._la.get_tensor(shape=(n_f, len(self._obmods), self._model._ns))
+            result = self._la.get_tensor(shape=(n_f, len(self._obmods), int(self._model._s.shape[-1])))
         else:
             result = self._la.get_tensor(shape=(n_f, n_obshape, len(self.data_id)))
             if self._bomsize > 0:
                 result[:, slicer, -self._bomsize:] = self._bom.sample_observation(
-                    fluxes[:, self._bo_idx], n_obs=n_obs
+                    labelling_fluxes[:, self._bo_idx], n_obs=n_obs
                 )
 
         for i, (labelling_id, obmod) in enumerate(self._obmods.items()):
@@ -247,7 +223,6 @@ class _BaseSimulator(object):
             'fluxes': self._fcm.fluxes_id,
             'mdv': self._model.state_id,
             'data': self.data_id,
-            'theta': self.theta_id,
         }.items():
             if what == 'data':
                 what_id = pd.MultiIndex.from_frame(pd.read_hdf(hdf.filename, key='data_id', mode=hdf.mode))
@@ -270,7 +245,6 @@ class _BaseSimulator(object):
             # this signals that the hdf has been freshly created
             self._substrate_df.to_hdf(hdf.filename, key='substrate_df', mode=hdf.mode, format='table')
             pt.Array(hdf.root, name='mdv_id', obj=self._model.state_id.values.astype(str))
-            pt.Array(hdf.root, name='theta_id', obj=self.theta_id.values.astype(str))
             pt.Array(hdf.root, name='fluxes_id', obj=self._model._fcm.fluxes_id.values.astype(str))  # NB these are the untrimmed fluxes
             self.data_id.to_frame(index=False).to_hdf(hdf.filename, key='data_id', mode=hdf.mode, format='table')
         else:
@@ -344,7 +318,7 @@ class _BaseSimulator(object):
 
         samples_id = pd.RangeIndex(start, stop, step, name='samples_id')
 
-        if what in ('fluxes', 'theta'):
+        if what == 'fluxes':
             xcs_id = pd.Index(hdf.root[f'{what}_id'].read().astype(str), name=f'{what}_id')
             return pd.DataFrame(xcsarr, index=samples_id, columns=xcs_id)
 
@@ -363,9 +337,9 @@ class _BaseSimulator(object):
                 for i in range(len(labelling_id))], axis=1, keys=labelling_id
             )
 
-    def __call__(self, theta, n_obs=3, pandalize=False, **kwargs):
-        vape = theta.shape
-        data = self.simulate(theta, n_obs, return_mdvs=False, pandalize=pandalize)
+    def __call__(self, labelling_fluxes, n_obs=3, pandalize=False, **kwargs):
+        vape = labelling_fluxes.shape
+        data = self.simulate(labelling_fluxes, n_obs, return_mdvs=False, pandalize=pandalize)
         if pandalize:
             return data
         n_obshape = max(1, n_obs)
@@ -428,7 +402,7 @@ class DataSetSim(_BaseSimulator):
 
     def simulate_set(
             self,
-            theta,
+            labelling_fluxes,
             n_obs=3,
             fluxes_per_task=None,
             what='data',
@@ -437,49 +411,44 @@ class DataSetSim(_BaseSimulator):
             show_progress=False,
     ) -> {}:
 
-        if isinstance(theta, pd.DataFrame):
-            theta = self._la.get_tensor(values=theta.loc[:, self.theta_id].values)
+        if isinstance(labelling_fluxes, pd.DataFrame):
+            labelling_fluxes = self._la.get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values)
 
-        vape = theta.shape
-        if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
-
-        fluxes = self._fcm.map_theta_2_fluxes(theta, rescale_val=None)
-        if fluxes.shape[0] <= self._la._batch_size:
-            raise ValueError('impossible')
+        if labelling_fluxes.ndim > 2:
+            raise ValueError(f'only handles (n_samples x n_fluxes) data, got {labelling_fluxes.shape}')
 
         result = {}
-        result['validx'] = self._la.get_tensor(shape=(fluxes.shape[0], len(self._obmods)), dtype=np.bool_)
-        result['theta'] = theta  # save stratified theta!!
+        result['validx'] = self._la.get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods)), dtype=np.bool_)
+        result['fluxes'] = labelling_fluxes
 
-        fluxes = self._model._fcm.frame_fluxes(fluxes, trim=True)
+        labelling_fluxes = self._model._fcm.frame_fluxes(labelling_fluxes, trim=True)
 
         if what not in ('all', 'data', 'mdv'):
             raise ValueError('not sure what to simulate')
-        if fluxes.shape[0] < self._la._batch_size:
+        if labelling_fluxes.shape[0] < self._la._batch_size:
             raise ValueError(f'n must be at least batch size: {self._la._batch_size}')
 
         if what != 'data':
-            result['mdv'] = self._la.get_tensor(shape=(fluxes.shape[0], len(self._obmods), len(self._model.state_id)))
+            result['mdv'] = self._la.get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods), len(self._model.state_id)))
         if what != 'mdv':
             n_obshape = max(1, n_obs)
-            result['data'] = self._la.get_tensor(shape=(fluxes.shape[0], n_obshape, len(self.data_id)))
+            result['data'] = self._la.get_tensor(shape=(labelling_fluxes.shape[0], n_obshape, len(self.data_id)))
 
         if (self._bomsize > 0) and (what != 'mdv'):
             slicer = 0 if n_obs == 0 else slice(None)
-            bo_fluxes = fluxes[:, self._bo_idx]
+            bo_fluxes = labelling_fluxes[:, self._bo_idx]
             result['data'][:, slicer, -self._bomsize:] = self._bom(bo_fluxes, n_obs=n_obs)
 
         if fluxes_per_task is None:
-            fluxes_per_task = math.ceil(fluxes.shape[0] / max(self._num_processes, 1))
+            fluxes_per_task = math.ceil(labelling_fluxes.shape[0] / max(self._num_processes, 1))
 
-        fluxes_per_task = min(fluxes.shape[0], fluxes_per_task)
+        fluxes_per_task = min(labelling_fluxes.shape[0], fluxes_per_task)
 
         tasks = observator_tasks(
-            fluxes, substrate_df=self._substrate_df, fluxes_per_task=fluxes_per_task, n_obs=n_obs, what=what
+            labelling_fluxes, substrate_df=self._substrate_df, fluxes_per_task=fluxes_per_task, n_obs=n_obs, what=what
         )
         if show_progress:
-            pbar = tqdm.tqdm(total=fluxes.shape[0] * self._substrate_df.shape[0], ncols=100)
+            pbar = tqdm.tqdm(total=labelling_fluxes.shape[0] * self._substrate_df.shape[0], ncols=100)
 
         if self._num_processes == 0:
             init_observer(self._model, self._obmods, self._eps)
@@ -508,21 +477,20 @@ class DataSetSim(_BaseSimulator):
         return result
 
     def __call__(
-            self, theta, n_obs=5, fluxes_per_task=None, close_pool=False, show_progress=False, pandalize=False,
+            self, labelling_fluxes, n_obs=5, fluxes_per_task=None, close_pool=False, show_progress=False, pandalize=False,
             return_time=False, **kwargs
     ):
         index = None
-        if isinstance(theta, pd.DataFrame):
-            index = theta.index
+        if isinstance(labelling_fluxes, pd.DataFrame):
+            index = labelling_fluxes.index
 
-        vape = theta.shape
+        vape = labelling_fluxes.shape
         result = self.simulate_set(
-            theta, n_obs,
+            labelling_fluxes, n_obs,
             fluxes_per_task=fluxes_per_task,
             what='data',
             close_pool=close_pool,
             show_progress=show_progress,
-            save_fluxes=False,
         )
 
         data = result['data']
@@ -549,24 +517,25 @@ if __name__ == "__main__":
         which_labellings=['A', 'B']
 
     )
-    up = UniformRoundedFleXchPrior(model.flux_coordinate_mapper, cache_size=20)
+    up = UniformRoundedFleXchPrior(model.flux_coordinate_mapper)
     dss = DataSetSim(
         model=model,
         substrate_df=kwargs['substrate_df'],
         mdv_observation_models=kwargs['basebayes']._obmods,
         boundary_observation_model=kwargs['basebayes']._bom,
-        num_processes=1,
+        num_processes=2,
     )
 
-    samples = up.sample((50,))
+    samples = up.sample((1000,))
+    labelling_fluxes = model.flux_coordinate_mapper.map_theta_2_fluxes(samples, rescale_val=None)
 
     result = dss.simulate_set(
-        theta=samples,
+        labelling_fluxes=labelling_fluxes,
         n_obs=2,
         show_progress=True,
         close_pool=False,
     )
-    print(result['theta'].shape)
+    print(result.keys())
 
 
     # smc_tomek = "C:\python_projects\sbmfi\SMC_e_coli_glc_tomek_obsmod_copy_NEW.nc"

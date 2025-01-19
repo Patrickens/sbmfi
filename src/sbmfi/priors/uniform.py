@@ -11,8 +11,7 @@ from torch.types import _size
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.polytopia import LabellingPolytope, FluxCoordinateMapper, \
-    PolytopeSamplingModel, fast_FVA, rref_and_project, sample_polytope, project_polytope, compute_volume, \
-    make_theta_polytope
+    PolytopeSamplingModel, sample_polytope, compute_volume, make_theta_polytope
 from typing import Iterable, Union, List, Dict
 from torch.distributions import constraints
 from torch.distributions import Distribution

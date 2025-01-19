@@ -32,8 +32,10 @@ from ray.tune.stopper import TrialPlateauStopper
 
 
 def flow_constructor(
-        fcm: FluxCoordinateMapper = None,
-        circular=True,
+        fcm: FluxCoordinateMapper,
+        coordinate_id,
+        log_xch,
+        rescale_val,
         embedding_net=None,
         num_context_channels=None,
         autoregressive=True,
@@ -45,37 +47,32 @@ def flow_constructor(
         init_identity=True,
         permute='lu',
         p=None,
-        scale=0.3,
 ):
     # prior_flow just makes a normalizing flow that matches samples from a prior
     #   thus not needing to fuck around with context = conditioning on data
 
-    if fcm._rescale_val is None:
-        raise ValueError('needs to have a tail_bound!')
+    n_theta = len(fcm.theta_id(coordinate_id, log_xch))
 
-    if circular and not (fcm._sampler.basis_coordinates == 'cylinder'):
-        raise ValueError('needs to have cylinder base_coordinates or logit ya schmuckington')
-    elif not circular and not (fcm._sampler.basis_coordinates == 'rounded'):
-        raise ValueError('we need to have roonded coordenates ya goon')
-
-    n_theta = len(fcm.theta_id)
-
-    if circular:
-        if (fcm._nx > 0) and fcm.logit_xch_fluxes:
+    if coordinate_id not in ['cylinder', 'rounded']:
+        raise ValueError(f'flow training only coordinate_id sho')
+    elif coordinate_id == 'rounded':
+        # training a flow on polytope coordinates is only for comparison purposes
+        if log_xch:
+            raise ValueError
+        ind = list(range(n_theta - fcm._nx, n_theta))
+        scale = torch.ones(n_theta)
+        scale[-fcm._nx:] *= rescale_val * 2  # need to pass the width!
+        base = UniformGaussian(ndim=n_theta, ind=ind, scale=scale)
+    elif coordinate_id == 'cylinder':
+        if rescale_val is None:
+            raise ValueError(f'flow only works when all values are rescaleval')
+        if (fcm._nx > 0) and log_xch:
             ind = list(range(n_theta - fcm._nx))
             scale = torch.ones(n_theta)
-            scale[:-fcm._nx] *= fcm._rescale_val * 2  # need to pass the width!
-            base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
+            scale[:-fcm._nx] *= rescale_val * 2  # need to pass the width!
+            base = UniformGaussian(ndim=n_theta, ind=ind, scale=scale)
         else:
-            base = Uniform(shape=len(fcm.theta_id), low=-fcm._rescale_val, high=fcm._rescale_val)
-    else:
-        if (fcm._nx > 0) and not fcm.logit_xch_fluxes:
-            ind = list(range(n_theta - fcm._nx, n_theta))
-            scale = torch.ones(n_theta)
-            scale[-fcm._nx:] *= fcm._rescale_val * 2  # need to pass the width!
-            base = UniformGaussian(ndim=len(fcm.theta_id), ind=ind, scale=scale)
-        else:
-            base = DiagGaussianScale(n_theta, trainable=True, scale=scale)
+            base = Uniform(shape=n_theta, low=-rescale_val, high=rescale_val)
 
     transforms = []
     for i in range(num_transforms):
@@ -85,27 +82,27 @@ def flow_constructor(
             num_hidden_channels=num_hidden_channels,
             num_context_channels=num_context_channels,
             num_bins=num_bins,
-            tail_bound=fcm._rescale_val,
+            tail_bound=rescale_val,
             activation=nn.ReLU,
             dropout_probability=dropout_probability,
             init_identity=init_identity,
         )
-        if circular:
+        if coordinate_id == 'cylinder':
             common_kwargs['ind_circ'] = [0]
-        if circular and autoregressive:
+        if (coordinate_id == 'cylinder') and autoregressive:
             transform = CircularAutoregressiveRationalQuadraticSpline(
                 **common_kwargs,
                 permute_mask=True,
             )
-        elif circular and not autoregressive:
+        elif (coordinate_id == 'cylinder') and not autoregressive:
             transform = CircularCoupledRationalQuadraticSpline(
                 **common_kwargs,
                 reverse_mask=False,
                 mask=None,
             )
-        elif not circular and autoregressive:
+        elif (coordinate_id == 'rounded') and autoregressive:
             transform = AutoregressiveRationalQuadraticSpline(**common_kwargs)
-        else:
+        elif (coordinate_id == 'rounded') and not autoregressive:
             transform = CoupledRationalQuadraticSpline(**common_kwargs)
 
         if permute == 'lu':

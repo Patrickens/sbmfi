@@ -137,7 +137,8 @@ def fast_FVA(polytope: LabellingPolytope, full=False):
         objective.value[i] = 1.0
         problem.solve(solver=cp.GUROBI, ignore_dpp=True)
         if problem.status != 'optimal':
-            raise ValueError
+            # raise ValueError(f'{reaction_id}: {problem.status}')
+            print(f'{reaction_id}: {problem.status}')
         reac_max = round(problem.value, 4)
         objective.value[i] = -1.0
         problem.solve(solver=cp.GUROBI, ignore_dpp=True)
@@ -159,31 +160,32 @@ def _set_cdd_lib(number_type='float'):
         _CDD = cdd.gmp
 
 
-def _cdd_mat_pol(mat_vec, eq=None, return_polyhedron=True, number_type='float', reptype=cdd.RepType.INEQUALITY, canonicalize=True):
+def _cdd_mat_pol(ineq, eq=None, return_polyhedron=True, number_type='float', reptype=cdd.RepType.INEQUALITY, canonicalize=True):
     cdd_version = [int(_) for _ in version('pycddlib').split('.')]
 
-    (A, b) = mat_vec
+    (A, b) = ineq
     if b.ndim < 2:
         b = b[:, None]
     np_arr = np.hstack([b, -A])
 
     lin_set = ()
     if eq is not None:
-        (S, h) = mat_vec
+        (S, h) = eq
         if h.ndim < 2:
             h = h[:, None]
         if cdd_version[0] > 2:
-            eq_arr = np.hstack([h, S])
+            eq_arr = np.hstack([h, -S])  # TODO S or -S not sure
             np_arr = np.vstack([np_arr, eq_arr])
             lin_set = np.arange(b.shape[0], np_arr.shape[0])
-
     if cdd_version[0] > 2:  # changes from version 3:  https://pycddlib.readthedocs.io/en/stable/changes.html#version-3-0-0-4-october-2024
         _set_cdd_lib(number_type)
-        if number_type == 'float':
+        if number_type == 'fraction':
             fractionater = np.vectorize(lambda x: Fraction(x))
             np_arr = fractionater(np_arr)
-
         matrix = _CDD.matrix_from_array(np_arr, rep_type=reptype, lin_set=lin_set)
+        if canonicalize:
+            sets = _CDD.matrix_canonicalize(matrix)  # TODO for some reason lin_set is set here????
+            matrix.lin_set = ()  # TODO THIS IS WEIRD
         return _CDD.polyhedron_from_matrix(matrix) if return_polyhedron else matrix
     else:
         matrix = cdd.Matrix(np_arr, number_type=number_type)
@@ -213,9 +215,12 @@ def _cdd_mat_ar(mat: cdd.Matrix | cdd.gmp.Matrix):
 
 # function copied from https://github.com/stephane-caron/pypoman
 def project_polyhedron(proj, ineq, eq=None, canonicalize=True, number_type='float'):
-    raise ValueError('does not yet work after update of the pycddlib API for version >= 3.x.x')
-    P = _cdd_mat_pol(ineq, eq, True, number_type=number_type, reptype=cdd.RepType.INEQUALITY)
+    # raise ValueError('does not yet work after update of the pycddlib API for version >= 3.x.x')
 
+    P = _cdd_mat_pol(
+        ineq, eq, return_polyhedron=True, number_type=number_type,
+        reptype=cdd.RepType.INEQUALITY, canonicalize=canonicalize
+    )
     # OLD code
     # linsys = cdd.Matrix(np.hstack([b, -A]), number_type=number_type)
     # linsys.rep_type = cdd.RepType.INEQUALITY
@@ -239,6 +244,8 @@ def project_polyhedron(proj, ineq, eq=None, canonicalize=True, number_type='floa
             vertices.append(np.dot(E, V[i, 1:]) + f)
         else:  # ray
             rays.append(np.dot(E, V[i, 1:]))
+
+    # print(13, vertices, rays)
     return vertices, rays
 
 
@@ -332,7 +339,7 @@ def project_polytope(
         vertices_tol=1e-10,
         number_type='float'
 ):
-    raise ValueError('not yet tested after pycddlib API change with version >= 3.x.x')
+    # raise ValueError('not yet tested after pycddlib API change with version >= 3.x.x')
     # computes the projection/ infinite shadow of the labelling-polytope onto the exchange flux dimensions
     # https://github.com/stephane-caron/pypoman
     # https://pycddlib.readthedocs.io/en/latest/index.html
@@ -342,7 +349,7 @@ def project_polytope(
     if p is None:
         p = pd.Series(0.0, index=P.index)
     ineq = (polytope.A.values, polytope.b.values)
-    proj = (P.values, p.values)
+    proj = (-P.values, p.values)
     if polytope.S is None:
         eq = None
     else:
@@ -365,7 +372,7 @@ def rref_and_project(
         P: pd.DataFrame,
         settings: PolyRoundSettings = PolyRoundSettings(),
         number_type='float',
-        round=4,
+        round=0,
 ):
     if not P.index.isin(polytope.A.columns).all():
         raise ValueError('projection fluxes not in polytope')
@@ -373,12 +380,28 @@ def rref_and_project(
     cols = polytope.A.columns
     if polytope.S is None:
         raise ValueError('need untransformed polytope')
+    print(polytope.S)
+    pppol, _, _, _ = transform_polytope_keep_transform(polytope, settings, kernel_id='rref')
+    print(pppol.A)
+    print(pppol.b)
+
+    x, dist = ChebyshevFinder.chebyshev_center(polytope, settings)
     transformation, free_vars = rref_null_space(polytope.S, tolerance=settings.numerics_threshold)
+    T_1 = pd.DataFrame(0.0, index=transformation.columns, columns=transformation.index)
+    T_1.loc[transformation.columns, transformation.columns] = np.eye(len(free_vars))
+
+    x_star = T_1 @ x
+    tau = (x - (transformation @ x_star))
+    tau[abs(tau) < settings.numerics_threshold] = 0.0
+    polytope.apply_shift(tau.values)
     polytope.transformation.columns = cols
     polytope.apply_transformation(transformation)
     polytope.A.columns = transformation.columns
     if round > 0:
         polytope.A = polytope.A.round(round)
+    print(12312312)
+    print(polytope.A)
+    print(polytope.b)
     return project_polytope(polytope, P, vertices_tol=settings.numerics_threshold, number_type=number_type)
 
 
@@ -753,6 +776,8 @@ class PolytopeSamplingModel(object):
             self._T_1 = self._T.copy()
             self._tau = np.zeros(F_simp.A.shape[1])
 
+        # self._Ft = LabellingPolytope.from_Polytope(F_trans, polytope)
+
         F_round, self._E, self._E_1, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
         self._F_round = LabellingPolytope.from_Polytope(F_round)
         self._log_det_E = np.log(np.linalg.eig(self._E)[0]).sum()
@@ -791,6 +816,7 @@ class PolytopeSamplingModel(object):
         rounded = self._la.tensormul_T(self._E_1, transformed - self._epsilon.T)
         if pandalize:
             rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
+            rounded.index.name = 'samples_id'
         return rounded
 
     def map_rounded_2_fluxes(self, rounded: pd.DataFrame, pandalize=False):
@@ -808,6 +834,7 @@ class PolytopeSamplingModel(object):
 
         if pandalize:
             fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_ids)
+            fluxes.index.name = 'samples_id'
         return fluxes
 
     def get_initial_points(self, num_points: int):
@@ -849,14 +876,13 @@ class FluxCoordinateMapper(object):
             model: 'LabellingModel',
             pr_verbose = False,
             kernel_id ='svd',  # basis for null-space of simplified polytope
-            free_reaction_id = None,
             linalg: LinAlg = None,
             **kwargs
     ):
         # this is if we rebuild model and set new free reactions
-        free_reaction_id = [] if free_reaction_id is None else free_reaction_id
-        if not model._is_built or not model.labelling_fluxes_id[-len(free_reaction_id):].isin(free_reaction_id).all():
-            model.prepare_polytopes(free_reaction_id)
+        # free_reaction_id = [] if free_reaction_id is None else list(free_reaction_id)
+        if len(model._labelling_reactions) == 0:
+            raise ValueError('build the model first')
 
         self._la = linalg if linalg else model._la
 
@@ -901,14 +927,6 @@ class FluxCoordinateMapper(object):
     @property
     def fwd_id(self):
         return self._fwd_id
-
-    @property
-    def fcm_kwargs(self):
-        return {
-            'free_reaction_id': self.fluxes_id[-self._sampler.dimensionality:],
-            'kernel_id': self._sampler.kernel_id, # kernel_basis
-            'verbose': self._sampler._pr_settings.verbose,
-        }
 
     def net_theta_id(self, coordinate_id='rounded', hemi=False):
         if coordinate_id == 'transformed':
@@ -996,6 +1014,7 @@ class FluxCoordinateMapper(object):
 
         if pandalize:
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.net_theta_id('ball', hemi))
+            result.index.name = 'samples_id'
         return result
 
     def _map_ball_2_rounded(self, ball, hemi: bool=False, alpha_root: float=None, pandalize=False):
@@ -1025,6 +1044,7 @@ class FluxCoordinateMapper(object):
         rounded = directions * alpha
         if pandalize:
             rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self.net_theta_id(coordinate_id='rounded'))
+            rounded.index.name = 'samples_id'
         return rounded
 
     def _map_ball_2_cylinder(self, ball, hemi=False, rescale_val=1.0, pandalize=False):
@@ -1054,6 +1074,7 @@ class FluxCoordinateMapper(object):
 
         if pandalize:
             cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=self.net_theta_id(coordinate_id='cylinder'))
+            cylinder.index.name = 'samples_id'
         return cylinder
 
     def _map_cylinder_2_ball(self, cylinder, hemi=False, rescale_val=1.0, pandalize=False):
@@ -1081,6 +1102,7 @@ class FluxCoordinateMapper(object):
             ball[..., :i] *= self._la.sqrt(1.0 - ball[..., [i]] ** 2)
         if pandalize:
             ball = pd.DataFrame(self._la.tonp(ball), index=index, columns=self.net_theta_id(coordinate_id='ball'))
+            ball.index.name = 'samples_id'
         return ball
 
     def _map_rounded_2_theta(
@@ -1103,6 +1125,7 @@ class FluxCoordinateMapper(object):
 
         if pandalize:
             theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.net_theta_id(coordinate_id))
+            theta.index.name = 'samples_id'
         return theta
 
     def _map_net_theta_2_fluxes(
@@ -1125,6 +1148,7 @@ class FluxCoordinateMapper(object):
 
         if pandalize:
             net_fluxes = pd.DataFrame(self._la.tonp(net_fluxes), index=index, columns=self._sampler.reaction_ids)
+            net_fluxes.index.name = 'samples_id'
         return net_fluxes
 
     def _map_fluxes_2_net_theta(
@@ -1147,6 +1171,7 @@ class FluxCoordinateMapper(object):
 
         if pandalize:
             net_theta = pd.DataFrame(self._la.tonp(net_theta), index=index, columns=self.net_theta_id(coordinate_id))
+            net_theta.index.name = 'samples_id'
         return net_theta
 
     def _rescale_xch(self, xch_fluxes, rescale_val=1.0, to_rescale_val=True):
@@ -1171,30 +1196,30 @@ class FluxCoordinateMapper(object):
             xch_fluxes, lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1], rev=False
         ))
 
-    def frame_fluxes(self, fluxes: Union[pd.DataFrame, pd.Series, np.array], samples_id=None, trim=True):
-        if isinstance(fluxes, pd.Series):
+    def frame_fluxes(self, labelling_fluxes: Union[pd.DataFrame, pd.Series, np.array], samples_id=None, trim=True):
+        if isinstance(labelling_fluxes, pd.Series):
             # needed to have correct dimensions
-            fluxes = fluxes.to_frame(name=fluxes.name).T
+            labelling_fluxes = labelling_fluxes.to_frame(name=labelling_fluxes.name).T
 
-        if isinstance(fluxes, pd.DataFrame):
-            samples_id = fluxes.index  # this means that the passed samples_id is ignored!
-            fluxes = self._la.get_tensor(values=fluxes.loc[:, self._F.A.columns].values)
+        if isinstance(labelling_fluxes, pd.DataFrame):
+            samples_id = labelling_fluxes.index  # this means that the passed samples_id is ignored!
+            labelling_fluxes = self._la.get_tensor(values=labelling_fluxes.loc[:, self._F.A.columns].values)
 
-        fluxes = self._la.atleast_2d(fluxes)
+        labelling_fluxes = self._la.atleast_2d(labelling_fluxes)
 
         if samples_id is None:
-            self._samples_id = fluxes.shape[0]
+            self._samples_id = labelling_fluxes.shape[0]
         else:
             self._samples_id = pd.Index(samples_id)
-            if len(samples_id) != fluxes.shape[0]:
+            if len(samples_id) != labelling_fluxes.shape[0]:
                 raise ValueError('batch-size does not match samples_id size')
             elif self._samples_id.duplicated().any():
                 raise ValueError('non-unique sample ids')
         if trim:
-            fluxes = fluxes[..., len(self._F.non_labelling_reactions):]
-        if fluxes.shape[-1] != self._n_lr:
-            raise ValueError(f'wrong shape brahh, should be {self._n_lr}, is {fluxes.shape}, maybe wrong trim?')
-        return fluxes
+            labelling_fluxes = labelling_fluxes[..., len(self._F.non_labelling_reactions):]
+        if labelling_fluxes.shape[-1] != self._n_lr:
+            raise ValueError(f'wrong shape brahh, should be {self._n_lr}, is {labelling_fluxes.shape}, maybe wrong trim?')
+        return labelling_fluxes
 
     def compute_dgibbsr(self, thermo_fluxes: pd.DataFrame, pandalize=False):
         if self._nx == 0:
@@ -1218,6 +1243,7 @@ class FluxCoordinateMapper(object):
             dgibbsr /= 1000.0
         if pandalize:
             dgibbsr = pd.DataFrame(self._la.tonp(dgibbsr), index=index, columns=self._fwd_id + '_xch')
+            dgibbsr.index.name = 'samples_id'
         return dgibbsr
 
     def compute_xch_fluxes(self, dgibbsr: pd.DataFrame):
@@ -1321,6 +1347,7 @@ class FluxCoordinateMapper(object):
             fluxes[..., self._only_rev_idx] *= -1
         if pandalize:
             fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.fluxes_id)
+            fluxes.index.name = 'samples_id'
         return fluxes
 
     def map_theta_2_fluxes(
@@ -1348,11 +1375,14 @@ class FluxCoordinateMapper(object):
         if return_thermo:
             if pandalize:
                 thermo_fluxes = pd.DataFrame(self._la.tonp(thermo_fluxes), index=index, columns=self.thermo_fluxes_id)
+                thermo_fluxes.index.name = 'samples_id'
             return thermo_fluxes
 
         labelling_fluxes = self.map_thermo_2_fluxes(thermo_fluxes, pandalize=pandalize)
-        if pandalize and index is not None:
-            labelling_fluxes.index = index
+        if pandalize:
+            if index is not None:
+                labelling_fluxes.index = index
+            labelling_fluxes.index.name = 'samples_id'
         return labelling_fluxes
 
     def map_fluxes_2_thermo(self, fluxes: pd.DataFrame, pandalize=False):
@@ -1382,6 +1412,7 @@ class FluxCoordinateMapper(object):
             thermo_fluxes[..., self._fwd_idx] = net
         if pandalize:
             thermo_fluxes = pd.DataFrame(self._la.tonp(thermo_fluxes), index=index, columns=self.thermo_fluxes_id)
+            thermo_fluxes.index.name = 'samples_id'
         return thermo_fluxes
 
     def map_fluxes_2_theta(
@@ -1421,6 +1452,7 @@ class FluxCoordinateMapper(object):
 
         if pandalize:
             theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.theta_id(coordinate_id, hemi, log_xch))
+            theta.index.name = 'samples_id'
         return theta
 
     def to_linalg(self, linalg: LinAlg):
@@ -1715,7 +1747,7 @@ if __name__ == "__main__":
         ratios=True,
         build_simulator=True,
         add_cofactors=True,
-        which_measurements='lcms',
+        which_measurements=None,
         seed=2,
         measured_boundary_fluxes=('h_out',),
         which_labellings=['A', 'B'],
@@ -1727,6 +1759,36 @@ if __name__ == "__main__":
         clip_min=None,
         transformation='ilr',
     )
+    cyl_fcm = FluxCoordinateMapper(
+        model=model,
+        pr_verbose=False,
+        kernel_id='svd',  # basis for null-space of simplified polytope
+    )
+
+    # fcm = FluxCoordinateMapper(model, kernel_id='rref')
+    # psm = PolytopeSamplingModel(fcm._Fn, kernel_id='rref')
+    # print(fast_FVA(psm._Ft))
+
+    # polytope = model.flux_coordinate_mapper._Fn
+    # F_simp = polytope
+    # pr_set = model.flux_coordinate_mapper._sampler._pr_settings
+    # if F_simp.S is not None:
+    #     F_simp = PolyRoundApi.simplify_polytope(F_simp, settings=pr_set, normalize=False)
+    # F_trans = LabellingPolytope.from_Polytope(F_simp, polytope)
+    # if F_simp.S is not None:
+    #     Ft, T, T_1, tau = transform_polytope_keep_transform(F_simp, pr_set, 'rref')
+    # projected_fluxes = ['h_out', 'bm']
+    # pol = model._fcm._sampler._F_round
+    # V_rep = V_representation(pol)
+    # print(V_rep)
+    # settings = model._fcm._sampler._pr_settings
+    # spol = PolyRoundApi.simplify_polytope(pol, settings=settings, normalize=False)
+    # pol = LabellingPolytope.from_Polytope(spol, pol)
+    # P = pd.DataFrame(0.0, index=projected_fluxes, columns=pol.A.columns)
+    # P.loc[projected_fluxes, projected_fluxes] = np.eye(len(projected_fluxes))
+    # pp = rref_and_project(pol, P, settings, number_type='float')
+    # print(P)
+
 
     # model, kwargs = spiro(backend='numpy', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None)
     # fcm = FluxCoordinateMapper(

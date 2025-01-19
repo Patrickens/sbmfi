@@ -1620,9 +1620,10 @@ def _parse_anton_fluxes():
     model, kwargs = build_e_coli_anton_glc(build_simulator=False)
     free_id = ['ME1', 'PGK', 'ICL', 'PGI', 'EDA', 'PPC', 'biomass_rxn', 'EX_glc__D_e', 'EX_ac_e']
     model.reactions.get_by_id('EX_glc__D_e').bounds = (-10.0, -10.0)
-    model.build_model(free_reaction_id=free_id, kernel_id='rref')
-    thermo_pol = model._fcm._Ft
-    net_pol = model._fcm._Fn
+    model.build_model(free_reaction_id=free_id)
+    fcm = FluxCoordinateMapper(model, kernel_id='rref')
+    thermo_pol = fcm._Ft
+    net_pol = fcm._Fn
     # pickle.dump(thermo_pol, open('tp.p', 'wb'))
 
     # thermo_pol = pickle.load(open('tp.p', 'rb'))
@@ -2264,10 +2265,7 @@ def simulator_factory(
     if measurements is not None:
         model.set_measurements(measurement_list=measurements)
     if build_simulator:
-        model.build_model(
-            free_reaction_id=free_reaction_id,
-            kernel_id=kernel_id,
-        )
+        model.build_model(free_reaction_id=free_reaction_id)
     return model
 
 

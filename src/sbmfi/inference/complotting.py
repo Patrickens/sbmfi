@@ -14,15 +14,6 @@ import colorcet
 from sbmfi.core.polytopia import thermo_2_net_polytope
 
 
-
-# def make_v_rep(fcm: FluxCoordinateMapper):
-#     try:
-#         V_representation(fcm.)
-#
-#     except:
-#         polytope = PolyRoundApi.simplify_polytope(polytope, normalize=False)
-#         polytope, _, _, _ = transform_polytope_keep_transform(polytope, kernel_id='svd')
-
 class PlotMonster(object):
     _ALLFONTSIZES = {
         'xlabel': 12,
@@ -90,27 +81,19 @@ class PlotMonster(object):
         if ('posterior' not in inference_data) and ('prior' in inference_data):
             self._ingroup = 'prior'
 
-        if not all(fcm.theta_id.isin(inference_data[self._ingroup].theta_id.values)):
+        if not all(fcm.theta_id().isin(inference_data[self._ingroup].theta_id.values)):
             print(self._ingroup, )
-            print(fcm.theta_id)
+            print(fcm.theta_id())
             print(inference_data[self._ingroup].theta_id.values)
             raise ValueError
 
         if v_rep is None:
             # NOTE: this only works with transformed polytope, because of the floating point arithmetic of cddlib!
             #   therefore we pass the net-flux polytope which is then simplified and transformed
-            v_rep = V_representation(fcm._Fn)
-
-            if fcm.coordinate_id == 'rounded':
-                v_rep = v_rep.values
-                E_1 = fcm._la.tonp(fcm._sampler._E_1)
-                epsilon = fcm._la.tonp(fcm._sampler._epsilon)
-                v_rep = (E_1 @ (v_rep - epsilon.T).T).T  # = rounded
-                v_rep = pd.DataFrame(v_rep, columns=fcm._sampler._rounded_id)
+            v_rep = V_representation(fcm._sampler._F_round)
 
         self._v_rep = v_rep
-        polytope = fcm._sampler._F_trans if fcm.coordinate_id == 'transformed' else fcm._sampler._F_round
-        self._fva = fast_FVA(polytope)
+        self._fva = fast_FVA(fcm._sampler._F_round)
         if 'observed_data' in self._data:
             self._odf = self._load_observed_data()
         self._ttdf = self._load_true_theta()
@@ -358,6 +341,7 @@ class PlotMonster(object):
         else:
             raise ValueError
 
+        print(var1_id, var2_id, what_var, what_point, label, color)
         if what_point == 'max_prob':
             if what_var not in self._max_prob_point:
                 raise ValueError(f'{what_var} not in InferenceData')
@@ -371,6 +355,7 @@ class PlotMonster(object):
             else:
                 to_plot = self._odf
             linstyle = 'dotted'
+        print(to_plot)
 
         if label is None:
             label = what_point
@@ -383,7 +368,7 @@ class PlotMonster(object):
                 opts['linewidth'] = opts.pop('line_width')
                 opts['linestyle'] = opts.pop('line_dash')
             return hv.VLine(data).opts(**opts) * hv.Spikes(data, label=label).opts(**opts)
-        opts = dict(size=22)
+        opts = dict(size=4)
         if self._hvb:
             opts['s'] = opts.pop('size')
         return hv.Points(to_plot.loc[:, [var1_id, var2_id]], kdims=[xax, yax], label=what_point).opts(
@@ -650,17 +635,44 @@ if __name__ == "__main__":
     import matplotlib
     import pickle
 
-    file = "C:\python_projects\sbmfi\src\sbmfi\inference\spiro_20000samples_10steps_alldata.nc"
+    file = "C:\python_projects\sbmfi\src\sbmfi\isspiro_5000samples_12steps_alldata.nc"
+    model, kwargs = spiro(
+        backend='torch',
+        auto_diff=False,
+        batch_size=1,
+        add_biomass=True,
+        v2_reversible=True,
+        ratios=True,
+        build_simulator=True,
+        add_cofactors=True,
+        which_measurements=None,
+        seed=2,
+        measured_boundary_fluxes=('h_out',),
+        which_labellings=['A', 'B'],
+        include_bom=True,
+        v5_reversible=False,
+        n_obs=0,
+        kernel_id='svd',
+        L_12_omega=1.0,
+        clip_min=None,
+        transformation='ilr',
+    )
     data = az.InferenceData.from_netcdf(file)
-    fcm = pickle.load(open(r"C:\python_projects\sbmfi\fcm.p",'rb'))
+    fcm = model.flux_coordinate_mapper
     smc_plot = SMC_PLOT(
         fcm=fcm,  # this should be in the sampled basis!
         inference_data=data,
         v_rep=None,
         hv_backend='bokeh',
     )
-    plott = smc_plot.grand_theta_plot('R_svd0', 'R_svd2')
-    output_file(filename="custom_filename.html", title="plot1")
+
+
+    plott = smc_plot.plot_evolution('R_svd0',)
+    # plott = smc_plot.grand_data_plot(['A: ilr_C_0', 'A: ilr_C_1', 'A: ilr_D_0', 'A: ilr_D_1', 'A: ilr_H_0',
+    #    'A: ilr_L_0', 'A: ilr_L_1', 'A: ilr_L_2', 'A: ilr_L|[1,2]_0',
+    #    'B: ilr_C_0', 'B: ilr_D_0', 'B: ilr_H_{M+Cl}_0', 'B: ilr_H_0',
+    #    'B: ilr_L|[1,2]_0', 'BOM: h_out', 'BOM: bm'], plot_map=False)
+    output_file(filename="custom_filename2.html", title="plot1")
     aaa = show(hv.render(plott), new='tab')
 
     # data_id = ['A: ilr_C_0', 'A: ilr_C_1', 'A: ilr_D_0', 'A: ilr_D_1', 'A: ilr_H_0',
