@@ -8,7 +8,7 @@ from cobra import Metabolite
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.metabolite import EMU
-from sbmfi.core.polytopia import FluxCoordinateMapper, rref_and_project, LabellingPolytope
+from sbmfi.core.polytopia import FluxCoordinateMapper, project_polytope, LabellingPolytope
 from sbmfi.core.util import (
     make_multidex,
     _bigg_compartment_ids
@@ -967,9 +967,7 @@ class BoundaryObservationModel(object):
             pol = LabellingPolytope.from_Polytope(spol, pol)
             P = pd.DataFrame(0.0, index=self._bound_id, columns=pol.A.columns)
             P.loc[self._bound_id, self._bound_id] = np.eye(n)
-            self._boundary_pol = rref_and_project(
-                pol, P=P, number_type=number_type, settings=self._fcm._sampler._pr_settings
-            )
+            self._boundary_pol = project_polytope(pol, P, settings=settings)
             self._A = self._la.get_tensor(values=self._boundary_pol.A.values)
             self._b = self._la.get_tensor(values=self._boundary_pol.b.values)[:, None]
 

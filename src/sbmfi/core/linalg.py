@@ -111,7 +111,7 @@ class NumpyBackend(object):
                 if dtype is None:
                     dtype = values.dtype
                     if dtype in (np.float32, np.float64):
-                        dtype = self._def_dtype  # maing sure that sbi works
+                        dtype = self._def_dtype  # making sure that sbi works
             elif dtype is None:
                 dtype = self._def_dtype
             A = np.zeros(shape=shape, dtype=dtype)
@@ -513,7 +513,7 @@ class TorchBackend(object):
     def randu(self, shape, dtype=np.double):
         if dtype is None:
             dtype = self._def_dtype
-        elif not isinstance(dtype, torch.dtype):
+        elif not isinstance(dtype, torch.dtype):  # TODO kinda slow/ugly for something that is used so much...
             dtype = _NP_TORCH_DTYPE[dtype]
         return torch.rand(shape, generator=self._rng, dtype=dtype, device=self._device)
 
@@ -770,6 +770,11 @@ class LinAlg(object):
         return (norm_cdf - alpha) / (beta - alpha)
 
     def trunc_norm_inv_cdf(self, u, lo, hi, mu=0.0, std=1.0, return_log_prob=False):
+        # truncated multivariate normal sampling
+        # https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
+        # publication: Efficient Sampling Methods for Truncated Multivariate
+        #   Normal and Student-t Distributions Subject to Linear
+        #   Inequality Constraints
         alpha = self.norm_cdf(lo, mu, std)
         beta  = self.norm_cdf(hi, mu, std)
         uu = alpha + u * (beta - alpha)
@@ -813,7 +818,7 @@ class LinAlg(object):
     def triu_indices(self, n, k):
         return self._BACKEND.triu_indices(n, k)
 
-    def bounded_distribution_log_prob(self, x, lo, hi, mu, std=0.1, which='unif', old_is_new=False, unsqueeze=True):
+    def bounded_distribution_log_prob(self, x, lo, hi, mu, std=0.1, which='unif', old_is_new=False, unsqueeze=True, k=1):
         if not (lo.shape == hi.shape):  # TODO should work with float lo and hi
             raise ValueError
 
@@ -833,7 +838,8 @@ class LinAlg(object):
             raise ValueError
 
         if old_is_new:
-            rows, cols = self.triu_indices(x.shape[1], k=1)
+            rows, cols = self.triu_indices(x.shape[1], k=k)  # INCLUDE DIAGONALS SETTING k=0,
+            diags = self.arange(x.shape[1])
             if unsqueeze:
                 uptri_x = x[0, cols]
                 uptri_mu = mu[rows, 0]
@@ -846,7 +852,9 @@ class LinAlg(object):
             out_shape = tuple(np.maximum(x.shape, mu.shape))
             log_probs = self.get_tensor(shape=out_shape)
             log_probs[rows, cols] = uptri_probs
-            return log_probs + self.transax(log_probs, dim0=0, dim1=1)
+            log_probs = log_probs + self.transax(log_probs, dim0=0, dim1=1)
+            log_probs[diags, diags] /= 2
+            return log_probs
         else:
             return pdf(x, lo, hi, mu, std)
 
@@ -877,7 +885,7 @@ class LinAlg(object):
     def cartesian(self, A, ):
         pass
 
-    def min_pos_max_neg(self, alpha, return_what=1, keepdims=False):
+    def min_pos_max_neg(self, alpha, return_what=1, keepdims=False, return_arg=False):
         inf = float('inf')
         if return_what > -1:
             alpha_max = self.vecopy(alpha)

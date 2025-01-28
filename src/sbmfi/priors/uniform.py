@@ -32,7 +32,7 @@ def sampling_tasks(
         sampling_function = sample_polytope,
         linalg: LinAlg = None,
         return_psm = False,
-        return_what = 'basis',
+        return_what = 'rounded',
 ):
     if (A_constraint_df is None) and (S_constraint_df is None) and (b_constraint_df is None):
         raise ValueError
@@ -119,6 +119,13 @@ def volume_tasks(
         }
         kwargs = {key: kwargs.get(key) for key in func_kwargs}
         yield tuple(kwargs.values())  # because cannot pickle dict_values... god I hate dict_keys and dict_values
+
+
+def sizifier(fn):
+    def inner():
+        return
+    return fn
+
 
 class _CannonicalPolytopeSupport(_Dependent):  #
     def __init__(
@@ -211,8 +218,7 @@ class _BasePrior(Distribution):
         raise NotImplementedError
 
     def sample_pandalize(self, n: int):
-        result = self.sample((n, ))
-        return pd.DataFrame(self._la.tonp(result), columns=self.theta_id)
+        return pd.DataFrame(self._la.tonp(self.sample_n(n)), columns=self.theta_id)
 
 
 class BaseRoundedPrior(_BasePrior):
@@ -231,8 +237,17 @@ class BaseRoundedPrior(_BasePrior):
         # supp.to(dtype=torch.float32)  # TODO maybe pass dtype as a kwarg or maybe always enforce float32
         return supp
 
-    def rsample(self, sample_shape: _size = torch.Size()) -> torch.Tensor:
-        raise NotImplementedError
+    def rsample(self, sample_shape: _size = torch.Size(), density: torch.distributions.Distribution=None, n_cdf: int = 5) -> torch.Tensor:
+        if not isinstance(sample_shape, torch.Size):
+            sample_shape = torch.Size(sample_shape)
+        n = sample_shape.numel()
+        n_burn = 500 if self._initial_points is None else 0  # dont need burnin if we already sampled
+        results = sample_polytope(
+            model=self._fcm._sampler, initial_points=self._initial_points, n=n, n_burn=n_burn, new_initial_points=True,
+            thinning_factor=3, n_chains=6, return_what='rounded', target_density=density, n_cdf=n_cdf,
+        )
+        self._initial_points = results['new_initial_points']
+        return results['rounded']
 
     @property
     def theta_id(self) -> pd.Index:
@@ -286,8 +301,8 @@ class XchFluxPrior(_BaseXchFluxPrior):  # TODO rename
             mu_sigma: pd.DataFrame=None,  # for truncated normal sampling
     ):
         self._which = 'unif'
-        self._mu = 0.0
-        self._std = 0.0
+        self._mu = 0.5
+        self._std = 0.2
         super().__init__(model)
         if mu_sigma is not None:
             self._which = 'gauss'
@@ -338,17 +353,9 @@ class UniformRoundedFleXchPrior(BaseRoundedPrior):
     def rsample(self, sample_shape: _size = torch.Size()) -> torch.Tensor:
         if not isinstance(sample_shape, torch.Size):
             sample_shape = torch.Size(sample_shape)
-        n = sample_shape.numel()
-        n_burn = 500 if self._initial_points is None else 0 # dont need burnin if we already sampled
-
-        results = sample_polytope(
-            model=self._fcm._sampler, initial_points=self._initial_points, n=n, n_burn=n_burn, new_initial_points=True,
-            thinning_factor=3, n_chains=6, return_what='rounded'
-        )
-        self._initial_points = results['new_initial_points']
-        rounded_xch = results['rounded']
+        rounded_xch = super(UniformRoundedFleXchPrior, self).rsample(sample_shape)
         if self._fcm._nx > 0:
-            xch_samples = self._xch_prior.sample((n,))
+            xch_samples = self._xch_prior.sample(sample_shape)
             rounded_xch = self._la.cat([rounded_xch, xch_samples], dim=-1)
         return rounded_xch
 

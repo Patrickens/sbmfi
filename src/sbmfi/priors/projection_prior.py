@@ -1,6 +1,11 @@
-from sbmfi.priors.uniform import *
+from torch.types import _size
 
-class ProjectionPrior(UniformRoundedFleXchPrior):
+from sbmfi.priors.uniform import *
+from sbmfi.priors.uniform import _BaseXchFluxPrior, BaseRoundedPrior
+from sbmfi.core.polytopia import project_polytope, fast_FVA
+
+
+class ProjectionPrior(BaseRoundedPrior):
     # TODO I noticed that for the biomass flux, it is rarely sampled over 0.3, thus here we
     #  sample boundary fluxes in a projected polytope and then constrain and sample just like with ratios
 
@@ -13,26 +18,22 @@ class ProjectionPrior(UniformRoundedFleXchPrior):
             xch_prior: _BaseXchFluxPrior = None,
             projection_pol: LabellingPolytope = None,
             num_processes: int = 0,
-            number_type='float',
     ):
-        super(ProjectionPrior, self).__init__(model, xch_prior, num_processes=num_processes)
-        raise NotImplementedError('does now work with new API')
+        super(ProjectionPrior, self).__init__(model, num_processes=num_processes)
         if projection_pol is None:
             pol = self._fcm._Fn
-            settings = self._fcm._sampler._pr_settings
-            spol = PolyRoundApi.simplify_polytope(pol, settings=settings, normalize=False)
-            pol = LabellingPolytope.from_Polytope(spol, pol)
             P = pd.DataFrame(0.0, index=projected_fluxes, columns=pol.A.columns)
             P.loc[projected_fluxes, projected_fluxes] = np.eye(len(projected_fluxes))
-            try:
-                self._projection_pol = rref_and_project(pol, P=P, number_type=number_type, settings=settings)
-            except:
-                self._projection_pol = project_polytope(pol, P=P, number_type=number_type)
+            self._projection_pol = project_polytope(pol, P)
         else:
             if not projection_pol.A.columns.isin(projected_fluxes).all():
                 raise ValueError(f'wrong projection pol: {projection_pol.A.columns}, '
                                  f'wrt projected fluxes {projected_fluxes}')
             self._projection_pol = projection_pol
+
+        if (self._fcm._nx > 0) and (xch_prior is None):
+            xch_prior = XchFluxPrior(self._fcm)
+        self._xch_prior = xch_prior
 
         self._volumes = None
         self._boundary_psm = PolytopeSamplingModel(self._projection_pol)
@@ -40,7 +41,7 @@ class ProjectionPrior(UniformRoundedFleXchPrior):
         self._projection_fva = fast_FVA(self._projection_pol)
 
     def _run_tasks(
-            self, tasks, fn=sample_polytope, break_i=-1, scramble=True,
+            self, tasks, fn=sample_polytope, scramble=True,
             what='rounded', return_results=False, n_tasks=0, desc=None
     ):
         if n_tasks:
@@ -54,8 +55,6 @@ class ProjectionPrior(UniformRoundedFleXchPrior):
             results = []
             for i, task in enumerate(pbar):
                 results.append(fn(*task))
-                if (break_i > -1) and (i > break_i):
-                    break
         if n_tasks:
             pbar.close()
 
@@ -73,7 +72,6 @@ class ProjectionPrior(UniformRoundedFleXchPrior):
                     psms = [r['psm'] for r in results]
                 return whatensor, {'log_det_E': log_det_E, 'psms': psms}
             return whatensor
-
         elif fn == compute_volume:
             return pd.DataFrame(results)
         else:
@@ -84,6 +82,52 @@ class ProjectionPrior(UniformRoundedFleXchPrior):
             self._validate_sample(value)
 
         raise NotImplementedError
+
+    def _generate_boundary_tasks(self, n_boundary, n_flux=10, rel_tol=0.01, return_psm=False):
+        boundary_result = sample_polytope(
+            self._boundary_psm, n=n_boundary, initial_points=self._projection_initial_points,
+            new_initial_points=True, return_what='rounded', return_psm=return_psm,
+        )
+
+        self._projection_initial_points = boundary_result['new_initial_points']
+        boundary_samples = self._boundary_psm.map_rounded_2_fluxes(boundary_result['rounded'], pandalize=True)
+        lb = boundary_samples.copy()
+        ub = boundary_samples.copy()
+        lb.columns += '|lb'
+        ub.columns += '|ub'
+
+        if rel_tol > 0.0:
+            bounds_tol = (self._projection_fva['max'] - self._projection_fva['min']) * rel_tol * 0.5
+            lb += bounds_tol.values
+            ub -= bounds_tol.values
+            lb = lb.clip(lower=self._projection_fva['min'].values, upper=self._projection_fva['max'].values, axis=1)
+            ub = ub.clip(lower=self._projection_fva['min'].values, upper=self._projection_fva['max'].values, axis=1)
+
+        b_constraint_df = pd.concat([lb, -ub], axis=1)  # NB this dataframe contains all the bounds for the b vector
+
+        what_volume = kwargs.get('what_volume', None)  # 'polytope', 'log_det_E'
+        return sampling_tasks(
+            self._fcm._Fn, b_constraint_df=b_constraint_df, counts=n_flux, return_what='fluxes',
+            return_psm=what_volume=='polytope',
+        )
+
+    def rsample(self, n_boundary=1000, n_flux=10, rel_tol=0.01, **kwargs) -> torch.Tensor:
+        sampling_task_generator = self._generate_boundary_tasks(n_boundary, n_flux, rel_tol, **kwargs)
+        thermo_fluxes = self._run_tasks(
+            sampling_task_generator, scramble=True, what='fluxes', return_results=False, desc='sampling fluxes'
+        )
+        if self._fcm._nx > 0:
+            xch_basis_samples = self._xch_prior.sample((n_boundary * n_flux, ))
+            thermo_fluxes = self._la.cat([thermo_fluxes, xch_basis_samples], dim=-1)
+            self._fcm.map
+
+    def sample(self, n_boundary=1000, n_flux=10, rel_tol=0.01, **kwargs) -> torch.Tensor:
+        """
+        Generates a sample_shape shaped sample or sample_shape shaped batch of
+        samples if the distribution parameters are batched.
+        """
+        with torch.no_grad():
+            return self.rsample(n_boundary=n_boundary, n_flux=n_flux, rel_tol=rel_tol)
 
     def _fill_caches(
             self, n=100, n_flux=10, rel_tol=0.01, break_i=-1, close_pool=True, scramble=False,
@@ -150,4 +194,14 @@ class ProjectionPrior(UniformRoundedFleXchPrior):
 
 
 if __name__ == "__main__":
-    pass
+    from sbmfi.models.small_models import spiro
+    from sbmfi.core.polytopia import fast_FVA
+
+    model, kwargs = spiro(backend='torch', build_simulator=True, v2_reversible=True)
+    model, kwargs = spiro(backend='torch', build_simulator=True)
+    pp = ProjectionPrior(model, projected_fluxes=['bm', 'h_out'])
+    fva = fast_FVA(pp._fcm._Fn)
+    # print(pp._fcm._Fn.b)
+    # print(fva)
+
+    pp.sample(n_boundary=20, rel_tol=0.01)

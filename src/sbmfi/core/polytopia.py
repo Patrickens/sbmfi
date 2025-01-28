@@ -37,9 +37,9 @@ class LabellingPolytope(Polytope):
             non_labelling_reactions: pd.Index = None
     ):
         if b is not None:
-            b.name = 'ineq'
+            b.name = 'ub'
         if h is not None:
-            b.name = 'eq'
+            h.name = 'eq'
         Polytope.__init__(self, A=A, b=b, S=S, h=h)
         self._mapper: dict = mapper if mapper else {}
         self._objective: dict = objective if objective else {}
@@ -367,44 +367,6 @@ def project_polytope(
     return LabellingPolytope(A=pd.DataFrame(A, columns=P.index), b=pd.Series(b), mapper=None)
 
 
-def rref_and_project(
-        polytope: LabellingPolytope,
-        P: pd.DataFrame,
-        settings: PolyRoundSettings = PolyRoundSettings(),
-        number_type='float',
-        round=0,
-):
-    if not P.index.isin(polytope.A.columns).all():
-        raise ValueError('projection fluxes not in polytope')
-    polytope = polytope.copy()
-    cols = polytope.A.columns
-    if polytope.S is None:
-        raise ValueError('need untransformed polytope')
-    print(polytope.S)
-    pppol, _, _, _ = transform_polytope_keep_transform(polytope, settings, kernel_id='rref')
-    print(pppol.A)
-    print(pppol.b)
-
-    x, dist = ChebyshevFinder.chebyshev_center(polytope, settings)
-    transformation, free_vars = rref_null_space(polytope.S, tolerance=settings.numerics_threshold)
-    T_1 = pd.DataFrame(0.0, index=transformation.columns, columns=transformation.index)
-    T_1.loc[transformation.columns, transformation.columns] = np.eye(len(free_vars))
-
-    x_star = T_1 @ x
-    tau = (x - (transformation @ x_star))
-    tau[abs(tau) < settings.numerics_threshold] = 0.0
-    polytope.apply_shift(tau.values)
-    polytope.transformation.columns = cols
-    polytope.apply_transformation(transformation)
-    polytope.A.columns = transformation.columns
-    if round > 0:
-        polytope.A = polytope.A.round(round)
-    print(12312312)
-    print(polytope.A)
-    print(polytope.b)
-    return project_polytope(polytope, P, vertices_tol=settings.numerics_threshold, number_type=number_type)
-
-
 def thermo_2_net_polytope(polytope: LabellingPolytope, verbose=False):
     if len(polytope.mapper) == 0: # NB this is already a net_pol
         if verbose:
@@ -459,7 +421,6 @@ def extract_labelling_polytope(
             variables_id[key.name]: val for key, val in
                 constraint.get_linear_coefficients(constraint.variables).items()
         }
-
         if equality:
             S_rows[constraint.name] = coefs
             h_rows[constraint.name] = ub
@@ -501,7 +462,7 @@ def extract_labelling_polytope(
     A = A.loc[:, bvar.index]
     S = S.loc[:, bvar.index]
 
-    if coordinates == 'thermo':
+    if (coordinates == 'thermo') and len(b) > 0:
         wherho  = b.index.str.contains(_rho_constraints_rex)
         whernet = b.index.str.contains(_net_constraint_rex)
         A = A.loc[~(wherho | whernet)]
@@ -881,7 +842,8 @@ class FluxCoordinateMapper(object):
     ):
         # this is if we rebuild model and set new free reactions
         # free_reaction_id = [] if free_reaction_id is None else list(free_reaction_id)
-        if len(model._labelling_reactions) == 0:
+        # if len(model._labelling_reactions) == 0:
+        if not model._is_built:
             raise ValueError('build the model first')
 
         self._la = linalg if linalg else model._la
@@ -950,6 +912,8 @@ class FluxCoordinateMapper(object):
             raise ValueError(f'{coordinate_id}')
 
     def xch_theta_id(self, log_xch=False):
+        if len(self._fwd_id) == 0:
+            return pd.Index(name='xch_theta_id')
         if not log_xch:
             return (self._fwd_id + '_xch').rename(name='xch_theta_id')
         return ('L_' + self._fwd_id + '_xch').rename(name='xch_theta_id')
@@ -1029,18 +993,15 @@ class FluxCoordinateMapper(object):
 
         if alpha_root is None:
             alpha_root = self._sampler.dimensionality
-
         alpha_frac = self._la.float_power(alpha_frac, 1.0 / alpha_root)
 
         allpha = self._sampler._h.T / self._la.tensormul_T(self._sampler._G, directions)
         alpha_max = self._la.min_pos_max_neg(allpha, return_what=0 if hemi else 1, keepdims=True)
-
         if hemi:
             alpha_min, alpha_max = alpha_max
             alpha = alpha_frac * (alpha_max - alpha_min) + alpha_min  # fraction of chord
         else:
             alpha = alpha_frac * alpha_max  # fraction of max distance from polytope boundary
-
         rounded = directions * alpha
         if pandalize:
             rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self.net_theta_id(coordinate_id='rounded'))
@@ -1053,6 +1014,7 @@ class FluxCoordinateMapper(object):
             index = ball.index
         if ball.shape[-1] < 3:
             raise ValueError('not possible for polytopes K<3')
+            return ball
         output = self._la.vecopy(ball)
         for i in reversed(range(2, ball.shape[-1] - 1)):
             output[..., :i] /= self._la.sqrt(1.0 - output[..., [i]] ** 2)
@@ -1081,7 +1043,7 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(cylinder, pd.DataFrame):
             index = cylinder.index
-
+        cylinder = cylinder[:]
         if (rescale_val is not None) and (rescale_val != 1):
             # scales cylinder to [-1, 1]
             cylinder = (cylinder + rescale_val) / (2 * rescale_val) * 2 - 1
@@ -1136,7 +1098,6 @@ class FluxCoordinateMapper(object):
         if isinstance(net_theta, pd.DataFrame):
             index = net_theta.index
             net_theta = self._la.get_tensor(values=net_theta.loc[:, self.net_theta_id].values)
-
         if coordinate_id == 'transformed':
             net_fluxes = self._la.tensormul_T(self._sampler._T, net_theta) + self._sampler._tau.T  # = transformed
         else:
@@ -1358,7 +1319,8 @@ class FluxCoordinateMapper(object):
         if isinstance(theta, pd.DataFrame):
             index = theta.index
             theta = self._la.get_tensor(values=theta.loc[:, self.theta_id(coordinate_id, hemi, log_xch)].values)
-
+        else:
+            theta = self._la.vecopy(theta)  # theta is modified in-place in some map function, so we need to copy here
         if self._nx > 0:
             net_theta = theta[..., :-self._nx]  # this selects the net-variables
             xch_fluxes = theta[..., -self._nx:]
@@ -1483,20 +1445,469 @@ def make_theta_polytope(fcm: FluxCoordinateMapper):
     return LabellingPolytope(A=pd.concat([A, A_xch], axis=0), b=pd.concat([net_polytope.b, b_xch]))
 
 
+import numpy as np
+
+class TjelmelandTransitions:
+    """
+    Constructs Tjelmeland's multi-proposal Markov transition matrices
+    (Peskun or Barker) for a set of states x_set = [x_0, x_1, ..., x_K].
+    """
+
+    def __init__(self, linalg, n_chains, log_pi, log_q, force_jump=False):
+        """
+        Parameters
+        ----------
+        log_pi : callable
+            log_pi(x) -> float, log of the target density at x (up to a constant).
+        log_q : callable
+            log_q(x_from, x_to) -> float, log of proposal PDF q(x_from-> x_to).
+        force_jump : bool
+            If True, ensures T[i,i] = 0 so the chain always moves away from x_i.
+            If False, we allow T[i,i] = leftover. Often still ends up 0 in practice.
+        """
+        self._la = linalg
+        self.n_chains = n_chains
+        self.log_pi = log_pi
+        self.log_q = log_q
+        self.force_jump = force_jump
+
+    def _build_log_w_matrix(self, x_set, log_prob_q):
+        """
+        Build the log of the "reverse weights" w_{i->j} = pi(x_j)*q(x_j-> x_i).
+
+        Returns
+        -------
+        log_w : np.ndarray, shape (n,n)
+            log_w[i,j] = log of pi(x_j)*q(x_j->x_i) if i!=j, else -inf.
+        """
+        n = len(x_set)
+        log_pi = self._la.get_tensor(values=np.full((n, n, self.n_chains), fill_value=-np.inf, dtype=float))
+        if log_prob_q is None:
+            log_q = self._la.get_tensor(values=np.full((n, n, self.n_chains), fill_value=-np.inf, dtype=float))
+        else:
+            log_q = log_prob_q
+
+        # diag = self._la.arange(n)
+        # log_prob_q[diag, diag] = -float('inf')
+
+        for i in range(n):
+            for j in range(n):
+                # if i != j:
+                log_pi[i, j] = self.log_pi(x_set[j])
+                if log_prob_q is None:
+                    if i != j:
+                        log_q[i, j] = self.log_q(x_set[j], x_set[i])
+
+        # print(log_q[..., 0])
+        # print(log_pi[..., 0])
+        # print((log_pi + log_q)[..., 0])
+        return log_pi + log_q
+
+    def peskun_transition_matrix(self, x_set, log_prob_q):
+        """
+        Construct Tjelmeland's Peskun transition matrix for x_set
+        by normalizing w_{i->j} row-by-row.
+        """
+        n = len(x_set)
+        log_w = self._build_log_w_matrix(x_set, log_prob_q)
+        T = np.zeros((n, n), dtype=float)
+
+        for i in range(n):
+            # Set diagonal to -inf just to be safe (already done, but in case)
+            log_w[i, i] = -np.inf
+
+            row_i = log_w[i, :]
+            rmax = np.max(row_i)
+            if np.isinf(rmax):
+                # If the entire row is -inf => no valid transitions
+                T[i, i] = 1.0
+                continue
+
+            # Exponentiate row i in a numerically stable way
+            exprow = np.exp(row_i - rmax)
+            row_sum = np.sum(exprow)
+            if row_sum > 0:
+                T[i, :] = exprow / row_sum
+                if self.force_jump:
+                    # Force zero probability of staying put
+                    T[i, i] = 0.0
+                    # Re-normalize if we zeroed out T[i,i]
+                    s2 = T[i, :].sum()
+                    if s2 > 0:
+                        T[i, :] /= s2
+            else:
+                T[i, i] = 1.0
+
+        return T
+
+    def barker_transition_matrix(self, x_set, log_prob_q):
+        """
+        Construct Tjelmeland's Barker transition matrix for x_set:
+            1) w[i,j] = exp(log_w[i,j]),
+            2) phi[i,j] = w[i,j]/(w[i,j] + w[j,i]) for i!=j, else 0,
+            3) T[i,j] = phi[i,j]/sum_{k!=i} phi[i,k].
+        """
+        n = len(x_set)
+        log_w = self._build_log_w_matrix(x_set, log_prob_q)
+        print(log_w[..., 0])
+
+        # Exponentiate each row in a stable manner
+        w = self._la.zeros((n, n, self.n_chains), dtype=float)
+        for i in range(n):
+            row_i = log_w[i, :]
+            row_i[i] = -np.inf
+            # rmax = np.max(row_i)
+            rmax = self._la.max(row_i)
+            if np.isinf(rmax):
+                # all -inf => w[i,:] remains 0
+                continue
+            # exprow = np.exp(row_i - rmax)
+            exprow = self._la.exp(row_i - rmax)
+            w[i, :] = exprow
+        print(w[..., 0])
+
+        # Now compute phi[i,j] = w[i,j] / (w[i,j] + w[j,i])
+        # We'll do this in vectorized form: phi = w / (w + w^T)
+        # but ensure we skip dividing by zero
+        denom = w + self._la.transax(w, dim0=1, dim1=0)
+        phi = self._la.zeros(w.shape)
+        mask = (denom > 0)
+        phi[mask] = w[mask] / denom[mask]
+
+        # Zero the diagonal
+        # np.fill_diagonal(phi, 0.0)
+        diag = self._la.arange(n)
+        phi[diag, diag] = 0.0
+
+        # Build T by row-normalizing phi
+        T = self._la.zeros((n, n, self.n_chains), dtype=float)
+        for i in range(n):
+            row_vals = phi[i, :]
+            s = self._la.sum(row_vals)
+            if s > 0:
+                T[i, :] = row_vals / s
+                if self.force_jump:
+                    # Force no self-transition
+                    T[i, i] = 0.0
+                    s2 = T[i, :].sum()
+                    if s2 > 0:
+                        T[i, :] /= s2
+            else:
+                # If row sum = 0, stay put
+                T[i, i] = 1.0
+
+        return T
+
+    def sample_next_state(self, i_current, T):
+        """
+        Given a row-stochastic matrix T and current index i_current,
+        sample the next index from T[i_current,:].
+        """
+        p = T[i_current, :]
+        return np.random.choice(len(p), p=p)
+
+
+
+class MultiProposal():
+    def __init__(
+            self,
+            model: PolytopeSamplingModel,
+            target_density: 'torch.distributions.Distribution',
+            n_cdf=7,
+            proposal_density_id='gauss',
+            chord_std=0.4,
+            transition_id='peskun',
+            always_jump=False,
+            return_log_prob_pi=True,  # if we need to compute Z, we should save the log_probs for all proposals
+    ):
+        self._la = model._la
+
+        if proposal_density_id not in ['gauss', 'unif']:
+            raise ValueError('not a valid proposal_id')
+        self._is_unif = proposal_density_id == 'unif'
+
+        if not hasattr(target_density, 'log_prob'):
+            raise ValueError('cannot evaluate target density')
+        self._pi = target_density
+
+        self._n_cdf = n_cdf
+        self._jump = always_jump
+        self._retlp = return_log_prob_pi
+
+        if transition_id not in ['barker', 'peskun']:
+            raise ValueError(f'not a valid transition transition_id: {transition_id} not in (barker, peskun)')
+        self._barker = transition_id == 'barker'
+
+        self._non_isotropic = False
+        if not isinstance(chord_std, float):
+            if (chord_std.ndim != 2) or (chord_std.shape[0] != model.dimensionality):
+                raise ValueError('check shape of covariance matrix')
+            try:
+                self._la.LU(chord_std)
+            except:
+                raise ValueError('not a valid covariance matrix')
+            self._non_isotropic = True
+        self._chord_std = chord_std
+
+        self._n_chains = 0
+        self._selecta = None
+        self._line_x = None
+        # self._log_prob_pi = None
+
+
+
+            # this means that we passed a covariance matrix and we need to compute std along the line
+
+        # line_xs = model._la.get_tensor(shape=(1 + n_cdf, n_chains, K))
+        # log_probs = model._la.get_tensor(shape=(1 + n_cdf, n_chains))
+        # log_probs[0, :] = density.log_prob(x)  # ordering of the samples from the PDF does not matter for inverse sampling
+        # log_probs_selecta = model._la.arange(n_chains)
+
+    def proposal(self, x, direction, alpha_min, alpha_max):
+        log_prob = None
+
+        if self._is_unif:
+            alpha = self._la.sample_bounded_distribution(  # dont need log_probs, since they cancel out
+                shape=(self._n_cdf, ), lo=alpha_min, hi=alpha_max
+            )
+        else:
+            if self._non_isotropic:
+                chord_std = self._la.sqrt(self._la.sum(((direction @ self._chord_std) * direction), -1))
+            alpha = self._la.sample_bounded_distribution(  #  mu = 0.0, since the current alpha = 0.0
+                shape=(self._n_cdf, ), lo=alpha_min, hi=alpha_max, std=chord_std, which='gauss', return_log_prob=self._barker
+            )
+            if self._barker:
+                alpha, log_prob = alpha
+            else:
+                n_chains, n_dim = x.shape
+                if (self._n_chains != n_chains):
+                    self._alpha = self._la.zeros((self._n_cdf + 1, n_chains))
+                self._alpha[1:] = alpha
+
+            log_prob = self._la.bounded_distribution_log_prob(
+                    x=self._alpha, lo=alpha_min, hi=alpha_max, mu=self._alpha, std=chord_std, which='gauss', old_is_new=True, k=1
+                )
+        return x + alpha[..., None] * direction, log_prob
+
+    def log_q(self, x_i, x_j):
+        pass
+
+    def choose(self, weights, rnd):
+        max_log_probs = self._la.max(weights, dim=0)
+        normalized = weights - max_log_probs[None, :]
+        probs = self._la.exp(normalized)
+        cdf = self._la.cumsum(probs, 0)  # empirical CDF
+        cdf = cdf / cdf[-1, :]  # numbers between 0 and 1, now find the one closest to rnd to determine which sample is accepted
+        accept_idx = self._la.argmin(abs(cdf - rnd[None, :]), 0, keepdim=False)  # indices of accepted samples
+        weights[0, :] = weights[accept_idx, self._selecta]  # set the log-probs of the current sample
+        return self._line_xs[accept_idx, self._selecta]
+
+    def __call__(self, x, direction, alpha_min, alpha_max):
+        # THIS PUBLICATION HAS AN EASY PESKUN EXPLANATION FFS...
+        # On parallelizable Markov chain Monte Carlo algorithms with waste-recycling
+        # THIS ONE HAS THE SAME RESULTS
+        # A general construction for parallelizing Metropolis−Hastings algorithms
+
+        n_chains, n_dim = x.shape
+        if self._n_chains != n_chains:
+            self._selecta = self._la.arange(n_chains)
+            self._line_xs = self._la.get_tensor(shape=(1 + self._n_cdf, n_chains, n_dim))
+
+        self._line_xs[0] = x
+
+        self._line_xs[1:], log_q = self.proposal(x, direction, alpha_min, alpha_max)
+        log_prob_pi = self._pi.log_prob(self._line_xs)
+
+        log_probs = log_prob_pi
+        if log_q is not None:
+            log_probs = log_prob_pi + log_q.sum(1)
+
+        log_probs = log_probs - self._la.max(log_probs, dim=0)
+        probs = self._la.exp(log_probs)
+
+        if self._barker:
+            probs = probs / probs.sum(0)
+            # multinomial with probs!
+            return
+
+        a = self._la.multinomial(1, p=(probs / probs.sum(0)).T)
+        probs[1:] = (probs[1:] / probs[0])
+        probs[1:][probs[1:] > 1.0] = 1.0
+        probs[1:] *= 1 / self._n_cdf
+        probs[0] = 1.0 - self._la.sum(probs[1:], 0)
+
+        a = self._la.multinomial(1, p=probs.T)
+        print(probs)
+
+
+        # if not self._barker:
+        #     log_prob_pi = self._la.tile(self._log_prob_pi, (self._n_cdf + 1, 1, 1))
+        # # print(self._log_prob_pi[...,0])
+        # # print(log_q[...,0])
+        #
+        # if self._barker:
+        #     weights = self._log_prob_pi
+        #     if log_q is not None:
+        #         weights[1:] += log_q
+        #
+        #     return self.choose(weights, rnd)
+        #
+        # weights = self._log_prob_pi
+        # if log_q is not None:
+        #     weights = self._log_prob_pi + log_q  # not that here log_q is n_cdf + 1 in the first dimension!!
+        #
+        # print(self._log_prob_pi[..., 0])
+        # print(log_q[..., 0])
+        # return
+        #
+        # finished = False
+        #
+        #
+        # max_log_probs = self._la.max(weights, dim=0)
+        # normalized = weights - max_log_probs[None, :]
+        # P = self._la.exp(normalized)
+        # P = P / P.sum(1, keepdims=True)
+        #
+        # ranger = list(range(self._n_cdf + 1))
+        #
+        # n = self._n_cdf + 1
+        # self._where = self._la.zeros((n_chains, n), dtype=np.float64)
+        #
+        #
+        # non_diag = self._la.ones((n, n)) - self._la.eye(n)
+        # u_num = self._la.ones((n, n_chains))
+        # u_denom = self._la.zeros((n, n_chains))
+        #
+        # numm = self._la.ones((n_chains, n))
+        # denomm = self._la.zeros((n_chains, n))
+        #
+        # # def compute_ut(Pt, At):
+        # #     """
+        # #     Compute u^t based on the given formula.
+        # #
+        # #     Parameters:
+        # #     Pt : np.ndarray
+        # #         Transition probability matrix of shape (M, M)
+        # #     At : set
+        # #         Set of selected elements, a subset of {0, ..., M-1}
+        # #
+        # #     Returns:
+        # #     float
+        # #         The computed u^t value
+        # #     """
+        # #     ut_values = []
+        # #     for k in At:
+        # #         numerator = 1 - sum(Pt[k, l] for l in range(Pt.shape[0]) if l not in At)
+        # #         denominator = sum(Pt[k, l] for l in At if l != k)
+        # #         if denominator != 0:
+        # #             ut_values.append(numerator / denominator)
+        # #
+        # #     return min(ut_values) if ut_values else None  # Return None if At is empty
+        #
+        # print(P[..., 0])
+        # while not finished:
+        #     diags = P[self._diags, self._diags]
+        #     diag_idxs, chain_idxs = self._la.where(abs(diags) > 1e-12)
+        #     if len(diag_idxs) <= 1:
+        #         return self.choose(P[0], rnd)
+        #
+        #     # P_1 = self._la.vecopy(P)
+        #     P_1 = self._la.zeros(P.shape)
+        #     u_num[:] = 1.0
+        #     u_denom[:] = 0.0
+        #     for k in ranger:
+        #         # self._where[:] = 1
+        #         # self._where[:, diag_idxs] = 0
+        #         # numm[:, k] = 1.0 - self._where @ P[k]
+        #         # self._where[:] = 0
+        #         # self._where[:, diag_idxs] = 1
+        #         # self._where[:, k] = 0
+        #         # denomm[:, k] = self._where @ P[k]
+        #         for l in ranger:
+        #             if l not in diag_idxs:
+        #                 u_num[k] -= P[k, l]
+        #             if l in diag_idxs and (l != k):
+        #                 u_denom[k] += P[k, l]
+        #     print(u_num.T)
+        #     print(u_denom.T)
+        #     print((u_num / u_denom).T)
+        #     u_t = self._la.min(u_num / u_denom, 0)
+        #     print(u_t)
+        #
+        #     for k in ranger:
+        #         for l in ranger:
+        #             if (k not in diag_idxs) or (l not in diag_idxs):
+        #                 P_1[k, l] = P[k, l]
+        #             elif (k in diag_idxs) and (l in diag_idxs):
+        #                 P_1[k,l] = u_t * P[k, l]
+        #             elif (k in diag_idxs) and (k == l):
+        #                 # print(k in diag_idxs, l in diag_idxs)
+        #                 P_1[k, l] = 1.0 - sum([P_1[k, l] for l in ranger if l != k])
+        #     # for k in diag_idxs:
+        #     #     for l in diag_idxs:
+        #     #         if k != l:
+        #     #             P_1[k, l] *= u_t
+        #
+        #     print(P[..., 0])
+        #     print(P_1[..., 0])
+        #     P_1[diag_idxs, diag_idxs] = (1.0 - non_diag @ P_1).sum(1)[diag_idxs]
+        #     print(P_1[..., 0])
+        #     print(P_1[..., 0].sum(0))
+        #     print(P_1[..., 0].sum(1))
+        #     finished = True
+        #     P = P_1
+
+
+
+
+
+
+
+
+        # print(555555)
+        # trans = TjelmelandTransitions(self._la, n_chains, log_pi=self._pi.log_prob, log_q=self.log_q, force_jump=False)
+        # print(123123)
+        # barker = trans.barker_transition_matrix(line_xs, log_prob_q)
+        # print(65464)
+        # print(barker[..., 0])
+
+        #
+
+
+
+
+        # self._line_xs[1:], self._q_log_probs[1:] = self.proposal(x, direction, alpha_min, alpha_max)
+        # self._pi_log_probs[1:] = self._pi.log_prob(self._line_xs[1:])
+        # print(self._q_log_probs[1:])
+
+
+        # line_alphas = self._la.randu(shape=(n_cdf, n_chains, 1)) * (alpha_max - alpha_min)[None, :, None] + alpha_min[None, :, None]
+        # log_probs[1:, ] = target_density.log_prob(line_xs[1:])
+        # max_log_probs = model._la.max(log_probs, dim=0)
+        #
+        # normalized = log_probs - max_log_probs[None, :]
+        # probs = model._la.exp(normalized)  # TODO make sure this does not underflow!
+        # cdf = model._la.cumsum(probs, 0)  # empirical CDF
+        # cdf = cdf / cdf[-1, :]  # numbers between 0 and 1, now find the one closest to rnd to determine which sample is accepted
+        # accept_idx = model._la.argmin(abs(cdf - rnd[None, :]), 0, keepdim=False)  # indices of accepted samples
+        # log_probs[0, :] = log_probs[accept_idx, log_probs_selecta]  # set the log-probs of the current sample
+        # x = line_xs[accept_idx, log_probs_selecta]
+        # line_xs[0, :] = x  # set the log-probs of the current sample
+
+
 def sample_polytope(
         model: Union[PolytopeSamplingModel, LabellingPolytope],
         n: int = 2000,
         n_burn: int = 100,
         initial_points = None,
         thinning_factor = 3,
-        n_chains: int = 4,
+        n_chains: int = 2,
         new_initial_points=False,
         return_psm = False,
         phi: float = None,
         linalg: LinAlg = None,
-        kernel_basis: str = 'svd',
-        density=None,
-        n_cdf=5,
+        kernel_id: str = 'svd',
+        proposer=None,
         return_arviz=False,
         return_what='rounded',
 ):
@@ -1526,7 +1937,7 @@ def sample_polytope(
 
     result = {}
     if isinstance(model, LabellingPolytope):
-        model = PolytopeSamplingModel(model, kernel_id=kernel_basis, linalg=linalg)
+        model = PolytopeSamplingModel(model, kernel_id=kernel_id, linalg=linalg)
         if return_psm:
             result['psm'] = model
         result['log_det_E'] = model.log_det_E
@@ -1546,21 +1957,15 @@ def sample_polytope(
     if initial_points is None:
         x = model.get_initial_points(num_points=n_chains)
     else:
-        x = initial_points
-        if not x.shape[0] == n_chains:
+        if not initial_points.shape[0] == n_chains:
             raise ValueError
+        x = initial_points
 
-    if density is not None:
-        import torch
-        if not isinstance(density, torch.distributions.Distribution) and (model._la.backend == 'torch'):
-            raise NotImplementedError(f'sampling densities only works with torch distributions: {type(density)} '
-                                      f'combined with torch LinAlg backend: {model._la.backend}')
-        line_xs = model._la.get_tensor(shape=(1 + n_cdf, n_chains, K))
-        log_probs = model._la.get_tensor(shape=(1 + n_cdf, n_chains))
-        log_probs[0, :] = density.log_prob(x)  # ordering of the samples from the PDF does not matter for inverse sampling
-        log_probs_selecta = model._la.arange(n_chains)
+    if proposer is not None:
+        if not (model._la.backend == 'torch'):
+            raise NotImplementedError(f'LinAlg backend: {model._la.backend}, should be torch')
 
-    biatch = min(2500, n_tot)
+    biatch = min(5000, n_tot)  # batching this makes it a bit faster
     for i in range(n_tot):
         # given x, the next point in the chain is x+alpha*r
         #             # it also satisfies A(x+alpha*r)<=b which implies A*alpha*r<=b-Ax
@@ -1572,13 +1977,12 @@ def sample_polytope(
             # uniform samples from unit ball in d dims
             sphere_samples = model._la.sample_hypersphere(shape=(biatch, n_chains, K))
             # batch compute distances to all planes
-            # A_dist = model._G[None, ...] @ model._la.transax(sphere_samples)
             A_dist = model._la.tensormul_T(model._G, sphere_samples)
-            rands = model._la.randu((biatch, n_chains), dtype=model._G.dtype)
+            if proposer is None:
+                rands = model._la.randu((biatch, n_chains), dtype=model._G.dtype)
 
         sphere_sample = sphere_samples[i % biatch]
         ar = A_dist[i % biatch]
-        rnd = rands[i % biatch]
         dist = model._h.T - model._la.tensormul_T(model._G, x)
         dist[dist < 0.0] = 0.0
         allpha = dist / ar
@@ -1599,30 +2003,19 @@ def sample_polytope(
             alpha_max = model._la.minimum(phi_max, alpha_max)
             alpha_min = model._la.maximum(phi_min, alpha_min)
 
-        if density is None:
+        if proposer is None:
             # this means we do vanilla hit-and-run with uniform proposal along the line
+            rnd = rands[i % biatch]
             alpha = alpha_min + rnd * (alpha_max - alpha_min)
             x = x + alpha[:, None] * sphere_sample
         else:
             # construct points along the line-segment and compute the empirical CDF from which we select the next step
-            line_alphas = model._la.randu(shape=(n_cdf, n_chains, 1)) * (alpha_max - alpha_min)[None, :, None] + alpha_min[None, :, None]
-            line_xs[1:] = x + line_alphas * rnd
-            log_probs[1:, ] = density.log_prob(line_xs[1:])
-            max_log_probs = model._la.max(log_probs, dim=0)
-
-            normalized = log_probs - max_log_probs[None, :]
-            probs = model._la.exp(normalized)  # TODO make sure this does not underflow!
-            cdf = model._la.cumsum(probs, 0)  # empirical CDF
-            cdf = cdf / cdf[-1, :]  # numbers between 0 and 1, now find the one closest to rnd to determine which sample is accepted
-            accept_idx = model._la.argmin(abs(cdf - rnd[None, :]), 0, keepdim=False)  # indices of accepted samples
-            log_probs[0, :] = log_probs[accept_idx, log_probs_selecta]  # set the log-probs of the current sample
-            x = line_xs[accept_idx, log_probs_selecta]
-            line_xs[0, :] = x  # set the log-probs of the current sample
+            x = proposer(x, sphere_sample, alpha_min, alpha_max)
+            return
 
         j = i - n_burn
         if (j > -1) & (j % thinning_factor == 0):
-            k = j // thinning_factor
-            chains[k] = x
+            chains[j // thinning_factor] = x
 
     rounded_samples = model._la.view(chains, (n_chains * n_per_chain, K))[:n, :]
 
@@ -1733,41 +2126,86 @@ def compute_volume(
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
+    import pickle
     import pandas as pd
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
     pd.set_option('display.width', 1000)
+    from sbmfi.priors.mog import MixtureOfGaussians
+    # model, kwargs = spiro('torch')
+    # psm = model.flux_coordinate_mapper._sampler
+    # pickle.dump(psm, open('psm.p', 'wb'))
+    psm = pickle.load(open('psm.p', 'rb'))
+    res = sample_polytope(psm, n=2)
+    import torch
+    means = res['rounded']
+    covs = torch.eye(means.shape[-1])
+    covs = torch.stack([covs] * means.shape[0])
 
-    model, kwargs = spiro(
-        backend='torch',
-        auto_diff=False,
-        batch_size=1,
-        add_biomass=True,
-        v2_reversible=True,
-        ratios=True,
-        build_simulator=True,
-        add_cofactors=True,
-        which_measurements=None,
-        seed=2,
-        measured_boundary_fluxes=('h_out',),
-        which_labellings=['A', 'B'],
-        include_bom=True,
-        v5_reversible=False,
-        n_obs=0,
-        kernel_id='svd',
-        L_12_omega=1.0,
-        clip_min=None,
-        transformation='ilr',
-    )
-    cyl_fcm = FluxCoordinateMapper(
-        model=model,
-        pr_verbose=False,
-        kernel_id='svd',  # basis for null-space of simplified polytope
-    )
+    weights = torch.as_tensor([0.3, 0.9])
+    covs *= weights[:, None, None]
 
+    target = MixtureOfGaussians(means=means, covariances=covs, weights=weights / weights.sum())
+    mp = MultiProposal(psm, target, n_cdf=3, chord_std=torch.eye(psm.dimensionality) * torch.as_tensor([0.1,0.2,0.3,0.4]))
+
+    sample_polytope(psm, proposer=mp, n_chains=6)
+
+    # sample_polytope(psm)
+
+
+
+
+
+
+
+
+
+
+
+    # model, kwargs = spiro(
+    #     backend='torch',
+    #     auto_diff=False,
+    #     batch_size=1,
+    #     add_biomass=True,
+    #     v2_reversible=True,
+    #     ratios=False,
+    #     build_simulator=True,
+    #     add_cofactors=True,
+    #     which_measurements=None,
+    #     seed=2,
+    #     measured_boundary_fluxes=('h_out',),
+    #     which_labellings=['A', 'B'],
+    #     include_bom=True,
+    #     v5_reversible=False,
+    #     n_obs=0,
+    #     kernel_id='svd',
+    #     L_12_omega=1.0,
+    #     clip_min=None,
+    #     transformation='ilr',
+    # )
+
+    # pickle.dump((model, kwargs), open('spiro.p', 'wb'))
+    # model, kwargs = pickle.load(open('spiro.p', 'rb'))
+    # model.build_model()
+    # import torch
+    # fcm = FluxCoordinateMapper(model)
+    # samples = torch.rand((3000, len(fcm.theta_id())))
+    #
+    # kwargs = dict(coordinate_id='cylinder', rescale_val=1.0, alpha_root=None)
+    #
+    # # ther = fcm.map_theta_2_fluxes(samples, return_thermo=True, pandalize=True, **kwargs)
+    # # cyl = fcm.map_fluxes_2_theta(ther, is_thermo=True, **kwargs)
+    # # print(samples[:3])
+    # # print(cyl[:3])
+    #
+    # ther = fcm.map_theta_2_fluxes(samples, return_thermo=True, pandalize=True, coordinate_id='cylinder', rescale_val=1.0, alpha_root=100)
+    # ther = fcm.map_theta_2_fluxes(samples, return_thermo=True, pandalize=True, coordinate_id='cylinder', rescale_val=1.0, alpha_root=4)
+    # ther = fcm.map_theta_2_fluxes(samples, return_thermo=True, pandalize=True, coordinate_id='cylinder', rescale_val=1.0, alpha_root=0.01)
+
+    # cyl = fcm.map_fluxes_2_theta(ther, pandalize=True, coordinate_id='cylinder', rescale_val=1.0, alpha_root=4)
+    # cyl = fcm.map_fluxes_2_theta(ther, pandalize=True, coordinate_id='cylinder', rescale_val=1.0, alpha_root=4)
     # fcm = FluxCoordinateMapper(model, kernel_id='rref')
     # psm = PolytopeSamplingModel(fcm._Fn, kernel_id='rref')
-    # print(fast_FVA(psm._Ft))
 
     # polytope = model.flux_coordinate_mapper._Fn
     # F_simp = polytope
@@ -1780,14 +2218,12 @@ if __name__ == "__main__":
     # projected_fluxes = ['h_out', 'bm']
     # pol = model._fcm._sampler._F_round
     # V_rep = V_representation(pol)
-    # print(V_rep)
     # settings = model._fcm._sampler._pr_settings
     # spol = PolyRoundApi.simplify_polytope(pol, settings=settings, normalize=False)
     # pol = LabellingPolytope.from_Polytope(spol, pol)
     # P = pd.DataFrame(0.0, index=projected_fluxes, columns=pol.A.columns)
     # P.loc[projected_fluxes, projected_fluxes] = np.eye(len(projected_fluxes))
     # pp = rref_and_project(pol, P, settings, number_type='float')
-    # print(P)
 
 
     # model, kwargs = spiro(backend='numpy', v2_reversible=True, v5_reversible=False, build_simulator=False, which_measurements=None)
@@ -1810,10 +2246,7 @@ if __name__ == "__main__":
     # # # P = _cdd_mat_pol(ineq, None, True, number_type, cdd.RepType.INEQUALITY)
     # # # g = _cdd_dual(P)
     # # # V = _cdd_mat_ar(g)
-    # # print(np_arr)
-    # # print(np_arr.dtype)
     # # matrix = cdd.matrix_from_array(np_arr, rep_type=cdd.RepType.INEQUALITY)
-    # # print(matrix)
     # # polyhedron = cdd.polyhedron_from_matrix(matrix)
     # # matrix = cdd.copy_output(polyhedron)
     # # V = np.array(matrix.array).astype(float)
@@ -1849,7 +2282,6 @@ if __name__ == "__main__":
     # # np_arr = fractionater(np_arr)
     # mat = cdd.matrix_from_array(np_arr, rep_type=cdd.RepType.INEQUALITY)
 
-    # print(cdd.polyhedron_from_matrix(mat))
 
     # import numpy as np
     # from fractions import Fraction
@@ -1858,19 +2290,14 @@ if __name__ == "__main__":
     # np_arr = np.array([[1.1, 1.2, 1.3], [1.4, 1.5, 1.6]])
     # fractionater = np.vectorize(lambda x: Fraction(x))
     # np_arr = fractionater(np_arr)
-    # print(cdd_gmp.matrix_from_array(np_arr, rep_type=cdd_gmp.RepType.INEQUALITY))
     # from importlib.metadata import version
     #
-    # print(version("pycddlib"))
 
     # sampler = fcm._sampler
     # res = sample_polytope(sampler, n=10, n_burn=0, n_chains=5, n_cdf=6, return_what='rounded')
     # rounded = res['rounded']
-    # print(pd.DataFrame(rounded, columns=sampler.basis_id))
     # ball = sampler._map_rounded_2_ball(rounded, pandalize=False)
-    # print(ball)
     # ball = sampler._map_ball_2_rounded(ball, pandalize=False)
-    # print(ball)
 
     # up = UniformNetPrior(fcm, cache_size=10)
     # s = up.sample((10, ))

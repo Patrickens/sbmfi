@@ -88,8 +88,6 @@ class PlotMonster(object):
             raise ValueError
 
         if v_rep is None:
-            # NOTE: this only works with transformed polytope, because of the floating point arithmetic of cddlib!
-            #   therefore we pass the net-flux polytope which is then simplified and transformed
             v_rep = V_representation(fcm._sampler._F_round)
 
         self._v_rep = v_rep

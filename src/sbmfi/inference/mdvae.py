@@ -199,30 +199,23 @@ class MDVAE_Dataset(Dataset):
         else:
             raise ValueError
 
-        if standardize:
-            self.data_mean = data.mean(0, keepdims=True)
-            self.data_std = data.std(0, keepdims=True)
-            if mu is not None:
-                self.mu_mean = mu.mean(0, keepdims=True)
-                self.mu_std = mu.std(0, keepdims=True)
-                if (self.mu_std < 1e-6).any():
-                    raise ValueError('there are non-informative data-dimensions!')
+        self.data_mean = data.mean(0, keepdims=True)
+        self.data_std = data.std(0, keepdims=True)
+        if mu is not None:
+            self.mu_mean = mu.mean(0, keepdims=True)
+            self.mu_std = mu.std(0, keepdims=True)
+            if (self.mu_std < 1e-6).any():
+                raise ValueError('there are non-informative data-dimensions!')
 
-            data, mu = self.standardize(data, mu)
+        if standardize:
+            data = (data - self.data_mean) / self.data_std
+            # data = (data * self.data_std) + self.data_mean # reverse
+            if mu is not None:
+                mu = (mu - self.mu_mean) / self.mu_std
+                # mu = (mu * self.mu_std) + self.mu_mean # reverse
 
         self.data = data
         self.mu = mu
-
-    def standardize(self, data: torch.Tensor, mu: torch.Tensor = None, reverse=False):
-        if reverse:
-            data = (data * self.data_std) + self.data_mean
-            if mu is not None:
-                mu = (mu * self.mu_std) + self.mu_mean
-        else:
-            data = (data - self.data_mean) / self.data_std
-            if mu is not None:
-                mu = (mu - self.mu_mean) / self.mu_std
-        return data, mu
 
     def __len__(self):
         return self.data.shape[0]

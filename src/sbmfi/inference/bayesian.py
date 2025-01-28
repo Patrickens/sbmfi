@@ -1,7 +1,11 @@
+import torch.distributions
+import psutil
+import multiprocessing as mp
 from sbmfi.core.simulator import _BaseSimulator, DataSetSim
 from sbmfi.priors.uniform import _BasePrior, BaseRoundedPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
 from sbmfi.core.model import LabellingModel
+from sbmfi.core.simulfuncs import init_observer
 import math
 import arviz as az
 import numpy as np
@@ -17,6 +21,8 @@ import xarray as xr
 # from sbmfi.core.util import profile
 
 # profile2 = line_profiler.LineProfiler()
+
+
 class _BaseBayes(_BaseSimulator):
 
     def __init__(
@@ -489,6 +495,189 @@ class _BaseBayes(_BaseSimulator):
         return log_probs
 
 
+class _BasePotential():
+    def __init__(self, model: _BaseBayes, return_data: bool=True):
+        self._m = model
+        self._la = model._la
+        self._return_data = return_data
+
+    def _simulate_data(self, theta):
+        pass
+
+    def __call__(self, theta):
+        raise NotImplementedError
+
+class Exact(_BasePotential):
+    def __init__(self, model: _BaseBayes, return_data=True):
+        for k, (labelling_id, obmod) in enumerate(model._obmods.items()):
+            model.set_input_labelling(model._substrate_df.loc[labelling_id])  # NB check whether valid susbtrate_df
+            if not hasattr(obmod, 'log_lik'):
+                raise ValueError(f'model {obmod} for labelling {labelling_id} does not have a log_lik function,'
+                                 f'exact inference not possible')
+        if (model._bom is not None) and not hasattr(model._bom, 'log_lik'):
+            raise ValueError('BoundaryObservationModel does not have log_lik method, exact inference not possible')
+        super(self, _BasePotential).__init__(model, return_data)
+
+    def log_lik(self, theta):
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+        labelling_fluxes = self._m._fcm.map_theta_2_fluxes(theta, rescale_val=None)
+        mu_o = self._m.simulate(labelling_fluxes, n_obs=0)
+
+        n_f = self._m._model._fluxes.shape[0]
+        n_meas = self._m._x_meas.shape[0]
+        n_bom = 1 if self._m._bomsize > 0 else 0
+
+        log_lik = self._la.get_tensor(shape=(n_f, n_meas, len(self._m._obmods) + n_bom))
+
+        # FUCKING AROOND
+        # difff = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
+        # truedist = ((theta - self._true_theta) ** 2).mean(1)
+
+        if self._m._bomsize > 0:
+            bo_meas = self._m._x_meas[:, -self._m._bomsize:]
+            mu_bo = mu_o[:, 0, -self._m._bomsize:]
+            log_lik[..., -1] = self._m._bom.log_lik(bo_meas=bo_meas, mu_bo=mu_bo)
+
+            # FUCKING AROOND
+            # mu_bo = self._la.atleast_2d(mu_bo)  # shape = batch x n_bo
+            # bo_meas = self._la.atleast_2d(bo_meas)  # shape = n_obs x n_bo
+            # diff_bo = mu_bo[:, None, :] - bo_meas[:, None, :]  # shape = batch x n_obs x n_bo
+            # difff[..., -1] = (diff_bo ** 2).sum(-1)
+
+        for i, (labelling_id, obmod) in enumerate(self._m._obmods.items()):
+            j, k = self._m._obsize[labelling_id]
+            x_meas_o = self._m._x_meas[..., j:k]
+            mu_o_i = mu_o[:, 0, j:k]
+            ll = obmod.log_lik(x_meas_o, mu_o_i)
+            log_lik[..., i] = ll
+
+            # FUCKING AROOND
+            # x_meas = self._la.atleast_2d(x_meas_o)  # shape = n_meas x n_mdv
+            # mu_oo = self._la.atleast_2d(mu_o_i)  # shape = batch x n_d
+            # diff = mu_oo[:, None, :] - x_meas[:, None, :]  # shape = n_obs x batch x n_d
+            # difff[..., i] = (diff ** 2).sum(-1)
+
+        if sum:  # summing over observation models and over
+            log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
+
+        if self._return_data:
+            return log_lik, mu_o
+        return log_lik
+
+    def log_prob(self, theta):
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+
+        n_f = theta.shape[0]
+        k = len(self._m._obmods) + (1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
+        n_meas = self._m._x_meas.shape[0]
+        log_prob = self._la.get_tensor(shape=(n_f, n_meas, k))
+
+        # if evaluate_prior:
+        #     # NB not necessary for uniform prior
+        #     # NB this also checks support! the hr is guaranteed to sample within the support
+        #     # NB since priors are currently torch objects, this will not work with numpy backend
+        #     #   which has proven the faster option for the hr-sampler
+        #     log_prob[..., -1] = self._prior.log_prob(theta)
+
+        log_lik = self.log_lik(theta, False)
+        if self._return_data:
+            log_lik, mu_o = log_lik
+
+        log_prob[..., :-1] = log_lik
+        log_prob = self._la.view(self._la.sum(log_prob, axis=(1, 2), keepdims=False), shape=vape[:-1])
+        if self._return_data:
+            return log_prob, self._la.view(mu_o, shape=(*vape[:-1], len(self._did)))
+        return log_prob
+
+    def __call__(self, theta):
+        pass
+
+class DistanceKernel(_BasePotential):
+    def __call__(
+            self,
+            theta,
+            epsilon,
+            n_obs=5,
+            metric='rmse',
+            return_data=False,
+            **kwargs
+    ):
+        if self._x_meas is None:
+            raise ValueError('set an observation first')
+        # NB we do not evaluate the log_prob of the measured boundary fluxes, since it is a constant for _x_meas
+
+        vape = theta.shape
+        if len(vape) > 2:
+            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta, rescale_val=None)
+        data = self.__call__(labelling_fluxes, n_obs=n_obs, **kwargs)
+
+        time = None
+        if isinstance(data, tuple):
+            data, time = data
+
+        data = self._la.unsqueeze(data, 0)  # artificially add a chains dimension!
+        if metric == 'rmse':
+            fobmod = next(iter(self._obmods.values()))
+            distances = fobmod.rmse(data, self._x_meas).squeeze(0)
+        else:
+            # TODO think of other distance metrics
+            raise ValueError
+
+        n_obshape = max(1, n_obs)
+        distances = self._la.view(distances, shape=vape[:-1])
+        if epsilon > -float('inf'):
+            distances[distances > epsilon] = float('nan')  # this indicates we reject samples with a large distance!
+        data = self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
+        if return_data:
+            distances = distances, data
+        if time is not None:
+            return distances, time
+        return distances
+
+class Arbitrary():
+    def __init__(
+            self,
+            density: torch.distributions.Distribution,
+    ):
+        self.density = density
+
+    def __call__(self, theta, x_meas, return_data=False):
+        if return_data:
+            raise NotImplementedError
+        return self.density.log_prob(theta, context=x_meas)
+
+
+
+class Proposal():
+    def __init__(self):
+        pass
+
+
+class PerturbParticle():
+    pass
+
+
+class Transition(object):
+    def __init__(
+            self,
+            linalg,
+            n_cdf: int,
+
+    ):
+        self._P = linalg.get_tensor  # transition kernel G
+
+    def barker(self):
+        pass
+
+    def peskun(self):
+        pass
+
+
 class MCMC(_BaseBayes):
     SYMMETRIC_PROPOSALS = ['gauss', 'unif']
     def accept_reject(self, i, post_probs, prop_probs=None, pre_sample_batch=5000, peskunize=True):
@@ -572,15 +761,7 @@ class MCMC(_BaseBayes):
 
                 P_j[diag_idxs, diag_idxs] = (1 - self._non_diag @ P_j)[diag_idxs]
                 print(P_j)
-
-
-
                 # P_j[]
-
-
-
-
-
 
                 # non_diag = self._la.vecopy(self._non_diag)
 
@@ -644,10 +825,7 @@ class MCMC(_BaseBayes):
         if self._la._batch_size != batch_size:
             # this way the batch processing is corrected
             self._la._batch_size = batch_size
-            self._model.build_model(
-                free_reaction_id=self._model._free_reaction_id,
-                kernel_id=self._model._fcm._sampler.kernel_id
-            )
+            self._model.build_model(free_reaction_id=self._model._free_reaction_id)
 
         chains = self._la.get_tensor(shape=(n, n_chains, len(self.theta_id)))  # TODO this should be the number of dimensions in rounded coord system!
         post_probs = self._la.get_tensor(shape=(n, n_chains))
@@ -816,7 +994,7 @@ class MCMC(_BaseBayes):
             )
 
 
-class SMC(_BaseBayes):
+class SMC(_BaseBayes, DataSetSim):
     # https://www.annualreviews.org/doi/pdf/10.1146/annurev-ecolsys-102209-144621
     #  https://jblevins.org/notes/smc-intro
     #  https://www.stats.ox.ac.uk/~doucet/doucet_defreitas_gordon_smcbookintro.pdf
@@ -837,16 +1015,17 @@ class SMC(_BaseBayes):
                     raise ValueError(f'Observationmodel {obsmod} does not have a transformation and therefore '
                                      f'euclidian distance is not defined (data lies on simplices)')
         super(SMC, self).__init__(model, substrate_df, mdv_observation_models, prior, boundary_observation_model)
+
+        if num_processes < 0:
+            num_processes = psutil.cpu_count(logical=False)
         self._num_processes = num_processes
-        self._dss = DataSetSim(
-            model=model,
-            substrate_df=self._substrate_df,
-            mdv_observation_models=self._obmods,
-            boundary_observation_model=self._bom,
-            num_processes=num_processes,
-        )
-        # this is so that we can make compute_distances use the right simulation function
-        self.__call__ = partial(self._dss.__call__, close_pool=False)
+
+        self._mp_pool = None
+        if num_processes > 0:
+            self._mp_pool = mp.Pool(
+                processes=self._num_processes, initializer=init_observer,
+                initargs=(self._model, self._obmods)
+            )
 
     def _calculate_new_log_weights(
             self,
@@ -1280,16 +1459,24 @@ if __name__ == "__main__":
     # print(smc._fcm.fluxes_id)
     # print(cyl_fcm.fluxes_id)
 
-    mcmc = MCMC(
+    smc = SMC(
         model=model,
         substrate_df=kwargs['substrate_df'],
         mdv_observation_models=kwargs['basebayes']._obmods,
         boundary_observation_model=kwargs['basebayes']._bom,
         prior=prior,
     )
-    mcmc.set_measurement(x_meas=kwargs['measurements'])
-    mcmc.set_true_theta(theta=kwargs['true_theta'])
-    result = mcmc.run(n_chains=2, n_cdf=4, peskunize=False, chord_proposal='gauss')
+
+    # mcmc = MCMC(
+    #     model=model,
+    #     substrate_df=kwargs['substrate_df'],
+    #     mdv_observation_models=kwargs['basebayes']._obmods,
+    #     boundary_observation_model=kwargs['basebayes']._bom,
+    #     prior=prior,
+    # )
+    # mcmc.set_measurement(x_meas=kwargs['measurements'])
+    # mcmc.set_true_theta(theta=kwargs['true_theta'])
+    # result = mcmc.run(n_chains=2, n_cdf=4, peskunize=False, chord_proposal='gauss')
 
 
 

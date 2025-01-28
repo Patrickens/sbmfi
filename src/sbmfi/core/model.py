@@ -112,16 +112,14 @@ class LabellingModel(Model):
         if pseudo_reactions is not None:
             for r in pseudo_reactions:
                 r._model = self
-
         input_labelling = state.get('_input_labelling')
         if input_labelling is not None:
             self.set_input_labelling(input_labelling=input_labelling)
-
         measurements = state.get('_measurements')
         if measurements is not None:
             self._measurements = DictList()
             self.set_measurements(measurement_list=measurements)
-
+        self._labelling_reactions = DictList()  # gets set in metabolites_in_state; which calls labelling_fluxes_id
         linalg = state.get('_la')
         if linalg is not None:
             self._initialize_state()
@@ -146,7 +144,6 @@ class LabellingModel(Model):
 
         odict['_pseudo_metabolites'] = DictList()
         odict['_labelling_reactions'] = DictList()
-
         return odict
 
     def _initialize_state(self):
@@ -170,7 +167,7 @@ class LabellingModel(Model):
 
     @property
     def labelling_fluxes_id(self) -> pd.Index:
-        return pd.Index(self.labelling_reactions.list_attr('id'), name='fluxes_id')
+        return pd.Index(self.labelling_reactions.list_attr('id'), name='labelling_fluxes_id')
 
     @property
     def state_id(self) -> pd.Index:
@@ -322,7 +319,10 @@ class LabellingModel(Model):
 
     def _set_free_reactions(self, free_reaction_id: Iterable = None):
         if free_reaction_id is None:
+            free_reaction_id = []
+        if len(free_reaction_id) == 0:
             free_reaction_id = self._free_reaction_id
+
         free_reaction_id = list(free_reaction_id)
 
         # this is because we typically have measurements for input/bm/boundary reactions!
@@ -351,7 +351,7 @@ class LabellingModel(Model):
                 fwd.append(reaction)
         user_chosen.sort(key=lambda x: \
             free_reaction_id.index(_rev_reactions_rex.sub('', x.id)) if x.id not in free_reaction_id else x.id
-        )
+                         )
         self._free_reaction_id = user_chosen.list_attr('id')
         self._labelling_reactions = fwd + boundary + bm + user_chosen + zero_facet + rev
 
@@ -521,10 +521,7 @@ class LabellingModel(Model):
             # TODO where did fixed_atom_map go?
             fixed_atom_map = self._fix_metabolite_reference_mess(reaction=reaction, atom_map=atom_map)
             reaction.set_atom_map(atom_map=fixed_atom_map)
-
-        if self._is_built:
-            # TODO respect previously set free fluxes I guess?
-            self.build_model(free_reaction_id=self._free_reaction_id)
+        self._is_built = False
 
     def make_sbml_writable(self):
         # we need to do this since there are a bunch of things that writing to sbml does not like if I remember correctly
@@ -696,11 +693,13 @@ class LabellingModel(Model):
     def build_model(self, free_reaction_id=None, verbose=False):
         self._initialize_state()
         self.prepare_polytopes(free_reaction_id, verbose)
+        self._is_built = True
         self._fcm = FluxCoordinateMapper(
             model=self,
             pr_verbose=verbose,
             linalg=self._la,
         )
+        self._is_built = False  # set True by the child class again after  build-steps are completed successfully
         self._set_state()
 
     @abstractmethod
@@ -1255,21 +1254,97 @@ class RatioEMU_Model(EMU_Model, RatioMixin): pass
 if __name__ == "__main__":
     # from pta.sampling.tfs import sample_drg
     from sbmfi.settings import BASE_DIR
-    from sbmfi.priors.uniform import *
-    from sbmfi.models.build_models import build_e_coli_tomek, build_e_coli_anton_glc
-    from sbmfi.models.small_models import spiro
+    # from sbmfi.priors.uniform import *
+    # from sbmfi.models.build_models import build_e_coli_tomek, build_e_coli_anton_glc
+    # from sbmfi.models.small_models import spiro
 
     import pickle
+    reaction_kwargs = {
+        'a_in': {
+            'lower_bound': 10.0, 'upper_bound': 10.0,
+            'atom_map_str': '∅ --> A/ab'
+        },
+        # 'a_in': {
+        #     'lower_bound': -10.0, 'upper_bound': -10.0,
+        #     'atom_map_str': 'A/ab --> ∅'
+        # },
+        'd_out': {
+            'upper_bound': 100.0,
+            'atom_map_str': 'D/abc --> ∅'
+        },
+        'f_out': {
+            'upper_bound': 100.0,
+            'atom_map_str': 'F/a --> ∅'
+        },
+        'h_out': {
+            'upper_bound': 100.0,
+            'atom_map_str': 'H/ab --> ∅'
+        },
+        'v1': {
+            'upper_bound': 100.0,
+            'atom_map_str': 'A/ab --> B/ab'
+        },
+        'v2': {
+            'lower_bound': 0.0, 'upper_bound': 100.0,
+            # 'rho_min': 0.1, 'rho_max': 0.8,
+            'atom_map_str': 'B/ab --> E/ab'
+        },
+        'v3': {
+            'upper_bound': 100.0,
+            'atom_map_str': 'B/ab + E/cd --> C/abcd'
+        },
+        'v4': {
+            'upper_bound': 100.0,  # 'lower_bound': -10.0,
+            'atom_map_str': 'E/ab --> H/ab'
+        },
+        # 'v5': {
+        #     'upper_bound': 100.0,
+        #     'atom_map_str': 'C/abcd --> F/a + D/bcd'
+        # },
+        'v5': {  # NB this is an always reverse reaction!
+            'lower_bound': -100.0,  # 'upper_bound': 100.0
+            'atom_map_str': 'F/a + D/bcd  <-- C/abcd',  # <--  ==>
+            # 'atom_map_str': 'F/a + D/bcd  <=> C/abcd',  # <--  ==>
+        },
+        'v6': {
+            'upper_bound': 100.0,
+            'atom_map_str': 'D/abc --> E/ab + F/c'
+        },
+        'v7': {
+            'upper_bound': 100.0,
+            'atom_map_str': 'F/a + F/b --> H/ab'
+        },
+        'vp': {
+            'lower_bound': 0.0,  # 'upper_bound': 100.0,
+            'pseudo': True,
+            'atom_map_str': 'C/abcd + D/efg + H/hi --> L/abgih'
+        },
+    }
+    metabolite_kwargs = {
+        'A': {'formula': 'C2H4O5'},
+        'B': {'formula': 'C2HPO3'},
+        'C': {'formula': 'C4H6N4OS'},
+        'D': {'formula': 'C3H2'},
+        'E': {'formula': 'C2H4O5'},
+        'F': {'formula': 'CH2'},
+        'G': {'formula': 'CH2'},  # not used
+        'H': {'formula': 'C2H2'},
+        'L': {'formula': 'C5KNaSH'},  # pseudo-metabolite
+        'L|[1,2]': {'formula': 'C2H2O7'},  # pseudo-metabolite
+        'P': {'formula': 'C2H'},
+    }
+    linalg = LinAlg(backend='torch', batch_size=1, device='cpu',)
+    model = RatioEMU_Model(linalg=linalg, name='niks')
+    model.add_reactions(
+        reaction_kwargs=reaction_kwargs,
+        metabolite_kwargs=metabolite_kwargs
+    )
+    labelling = pd.Series([0.0, 1.0, 0.0, 0.0], index=['A/00', 'A/01', 'A/10', 'A/11'])
+    model.set_input_labelling(labelling)
 
-    model, kwargs = build_e_coli_anton_glc(batch_size=2)
-    sdf = kwargs['substrate_df'].loc[['[1]Glc']]
-    adf = kwargs['anton']['annotation_df']
-    free_id = ['EX_glc__D_e', 'EX_ac_e', 'biomass_rxn']
-    model.build_model(free_reaction_id=free_id)
-    f = pd.read_excel(r"C:\python_projects\pysumo\src\sumoflux\estimate\f2.xlsx", index_col=0).iloc[:2]
-    model.set_fluxes(f)
-    model.cascade()
-    s = model.state
+
+    model.set_measurements(['H', 'C', 'D'])
+    # model.build_model(['d_out', 'v4'])
 
 
     # fcm = FluxCoordinateMapper(model=m)

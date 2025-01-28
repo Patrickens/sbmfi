@@ -354,31 +354,31 @@ class DataSetSim(_BaseSimulator):
             mdv_observation_models: Dict[str, MDV_ObservationModel],
             boundary_observation_model: BoundaryObservationModel = None,
             num_processes=0,
-            epsilon=1e-12,
     ):
         super(DataSetSim, self).__init__(model, substrate_df, mdv_observation_models, boundary_observation_model)
-        self._eps = epsilon
+
         if num_processes < 0:
             num_processes = psutil.cpu_count(logical=False)
         self._num_processes = num_processes
+
         self._mp_pool = None
         if num_processes > 0:
-            self._mp_pool = self._get_mp_pool()
+            self._mp_pool = mp.Pool(
+                processes=self._num_processes, initializer=init_observer,
+                initargs=(self._model, self._obmods)
+            )
 
     def __getstate__(self):
         if self._mp_pool is not None:
-            self._mp_pool.close()
+            self._mp_pool.terminate()
             self._mp_pool.join()
         self._mp_pool = None
         return self.__dict__.copy()
 
-    def _get_mp_pool(self):
-        if (self._mp_pool is None) or (hasattr(self._mp_pool, '_state') and (self._mp_pool._state == 'CLOSE')):
-            self._mp_pool = mp.Pool(
-                processes=self._num_processes, initializer=init_observer,
-                initargs=(self._model, self._obmods, self._eps)
-            )
-        return self._mp_pool
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if self._num_processes > 0:
+            self._mp_pool = mp.Pool(self._num_processes)
 
     def _fill_results(self, result, worker_result):
         input_labelling = worker_result['input_labelling']
@@ -407,7 +407,6 @@ class DataSetSim(_BaseSimulator):
             fluxes_per_task=None,
             what='data',
             break_i=-1,
-            close_pool=True,
             show_progress=False,
     ) -> {}:
 
@@ -451,7 +450,7 @@ class DataSetSim(_BaseSimulator):
             pbar = tqdm.tqdm(total=labelling_fluxes.shape[0] * self._substrate_df.shape[0], ncols=100)
 
         if self._num_processes == 0:
-            init_observer(self._model, self._obmods, self._eps)
+            init_observer(self._model, self._obmods)
             for i, task in enumerate(tasks):
                 worker_result = obervervator_worker(task)
                 self._fill_results(result, worker_result)
@@ -462,15 +461,11 @@ class DataSetSim(_BaseSimulator):
                 if (break_i > -1) and (i > break_i):
                     break
         else:
-            mp_pool = self._get_mp_pool()
-            for worker_result in mp_pool.imap_unordered(obervervator_worker, iterable=tasks):
+            for worker_result in self._mp_pool.imap_unordered(obervervator_worker, iterable=tasks):
                 self._fill_results(result, worker_result)
                 if show_progress:
                     i, j = worker_result['start_stop']
                     pbar.update(n = j - i)
-            if close_pool:
-                mp_pool.close()
-                mp_pool.join()
         if show_progress:
             pbar.close()
             result['running_time'] = pbar.format_dict['elapsed']
@@ -489,7 +484,6 @@ class DataSetSim(_BaseSimulator):
             labelling_fluxes, n_obs,
             fluxes_per_task=fluxes_per_task,
             what='data',
-            close_pool=close_pool,
             show_progress=show_progress,
         )
 
@@ -533,7 +527,6 @@ if __name__ == "__main__":
         labelling_fluxes=labelling_fluxes,
         n_obs=2,
         show_progress=True,
-        close_pool=False,
     )
     print(result.keys())
 

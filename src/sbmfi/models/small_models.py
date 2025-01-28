@@ -275,6 +275,9 @@ def spiro(
         model.add_reactions([ex_cof])
         fluxes['EX_cof'] = fluxes['v3']
 
+    if add_biomass or add_cofactors:
+        model.build_model()
+
     fluxes = pd.Series(fluxes, name='v')
     if (batch_size == 1) and build_simulator:
         model.set_fluxes(labelling_fluxes=fluxes)
@@ -758,7 +761,7 @@ if __name__ == "__main__":
     # model, kwargs = spiro(
     #     backend='torch', add_biomass=True, v2_reversible=True, v5_reversible=True,
     #     batch_size=1, which_measurements='lcms', build_simulator=True, which_labellings=list('CD'),
-    #     kernel_id='rref',
+    #     kernel_id='rref', ratios=False
     # )
     model, kwargs = spiro(
         backend='torch',
@@ -766,7 +769,7 @@ if __name__ == "__main__":
         batch_size=1,
         add_biomass=True,
         v2_reversible=True,
-        ratios=True,
+        ratios=False,
         build_simulator=True,
         add_cofactors=True,
         which_measurements='lcms',
@@ -781,6 +784,87 @@ if __name__ == "__main__":
         clip_min=None,
         transformation='ilr',
     )
+
+    # reaction_kwargs = {
+    #     'a_in': {
+    #         'lower_bound': 10.0, 'upper_bound': 10.0,
+    #         'atom_map_str': '∅ --> A/ab'
+    #     },
+    #     # 'a_in': {
+    #     #     'lower_bound': -10.0, 'upper_bound': -10.0,
+    #     #     'atom_map_str': 'A/ab --> ∅'
+    #     # },
+    #     'd_out': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'D/abc --> ∅'
+    #     },
+    #     'f_out': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'F/a --> ∅'
+    #     },
+    #     'h_out': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'H/ab --> ∅'
+    #     },
+    #     'v1': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'A/ab --> B/ab'
+    #     },
+    #     'v2': {
+    #         'lower_bound': 0.0, 'upper_bound': 100.0,
+    #         'rho_min': 0.1, 'rho_max': 0.8,
+    #         'atom_map_str': 'B/ab ==> E/ab'
+    #     },
+    #     'v3': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'B/ab + E/cd --> C/abcd'
+    #     },
+    #     'v4': {
+    #         'upper_bound': 100.0,  # 'lower_bound': -10.0,
+    #         'atom_map_str': 'E/ab --> H/ab'
+    #     },
+    #     # 'v5': {
+    #     #     'upper_bound': 100.0,
+    #     #     'atom_map_str': 'C/abcd --> F/a + D/bcd'
+    #     # },
+    #     'v5': {  # NB this is an always reverse reaction!
+    #         'lower_bound': -100.0,  # 'upper_bound': 100.0
+    #         'atom_map_str': 'F/a + D/bcd  <== C/abcd',  # <--  ==>
+    #         # 'atom_map_str': 'F/a + D/bcd  <=> C/abcd',  # <--  ==>
+    #     },
+    #     'v6': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'D/abc --> E/ab + F/c'
+    #     },
+    #     'v7': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'F/a + F/b --> H/ab'
+    #     },
+    #     'vp': {
+    #         'lower_bound': 0.0,  # 'upper_bound': 100.0,
+    #         'pseudo': True,
+    #         'atom_map_str': 'C/abcd + D/efg + H/hi --> L/abgih'
+    #     },
+    # }
+    # metabolite_kwargs = {
+    #     'A': {'formula': 'C2H4O5'},
+    #     'B': {'formula': 'C2HPO3'},
+    #     'C': {'formula': 'C4H6N4OS'},
+    #     'D': {'formula': 'C3H2'},
+    #     'E': {'formula': 'C2H4O5'},
+    #     'F': {'formula': 'CH2'},
+    #     'G': {'formula': 'CH2'},  # not used
+    #     'H': {'formula': 'C2H2'},
+    #     'L': {'formula': 'C5KNaSH'},  # pseudo-metabolite
+    #     'L|[1,2]': {'formula': 'C2H2O7'},  # pseudo-metabolite
+    #     'P': {'formula': 'C2H'},
+    # }
+    # linalg = LinAlg(backend='torch', batch_size=1, device='cpu', )
+    # model = EMU_Model(linalg=linalg)
+    # model.add_reactions(
+    #     reaction_kwargs=reaction_kwargs,
+    #     metabolite_kwargs=metabolite_kwargs
+    # )
 
 
     # model, kwargs = spiro(

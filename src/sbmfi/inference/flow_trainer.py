@@ -11,6 +11,7 @@ from sbmfi.inference.normflows_patch import (
     EmbeddingConditionalNormalizingFlow,
     DiagGaussianScale
 )
+from normflows.core import ConditionalNormalizingFlow
 from torch.utils.data import DataLoader
 from normflows.flows.neural_spline.wrapper import (
     CoupledRationalQuadraticSpline,
@@ -29,6 +30,40 @@ from pathlib import Path
 import ray
 from ray import tune
 from ray.tune.stopper import TrialPlateauStopper
+from torch.utils.data import Dataset, DataLoader, random_split
+from normflows.flows.neural_spline.autoregressive import MaskedPiecewiseRationalQuadraticAutoregressive
+from normflows.nets.made import MADE
+
+class Flow_Dataset(Dataset):
+    def __init__(self, data: torch.Tensor, theta: torch.Tensor, standardize=True):
+        if theta.shape[0] != data.shape[0]:
+            raise ValueError
+
+        if data.ndim == 3:
+            n, n_obs, n_d = data.shape
+            if theta.ndim == 2:
+                theta = theta.tile(n_obs, 1, 1).transpose(0, 1)
+
+        if (data.ndim == 3) and (theta.ndim == 3):
+            data = data.view(n * n_obs, n_d)
+            n_t = theta.shape[-1]
+            theta = theta.contiguous().view(n * n_obs, n_t)
+
+        self.data_mean = data.mean(0, keepdims=True)
+        self.data_std = data.std(0, keepdims=True)
+
+        if standardize:
+            data = (data - self.data_mean) / self.data_std
+            # data = (data * self.data_std) + self.data_mean # reverse
+
+        self.data = data
+        self.theta = theta
+
+    def __len__(self):
+        return self.data.shape[0]
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.theta[idx]
 
 
 def flow_constructor(
@@ -47,22 +82,26 @@ def flow_constructor(
         init_identity=True,
         permute='lu',
         p=None,
+        device='cpu',
 ):
     # prior_flow just makes a normalizing flow that matches samples from a prior
     #   thus not needing to fuck around with context = conditioning on data
 
     n_theta = len(fcm.theta_id(coordinate_id, log_xch))
 
+    if not torch.cuda.is_available():
+        device = 'cpu'
+
     if coordinate_id not in ['cylinder', 'rounded']:
         raise ValueError(f'flow training only coordinate_id sho')
     elif coordinate_id == 'rounded':
-        # training a flow on polytope coordinates is only for comparison purposes
         if log_xch:
-            raise ValueError
+            raise NotImplementedError
         ind = list(range(n_theta - fcm._nx, n_theta))
         scale = torch.ones(n_theta)
         scale[-fcm._nx:] *= rescale_val * 2  # need to pass the width!
         base = UniformGaussian(ndim=n_theta, ind=ind, scale=scale)
+        base.scale.to(device)
     elif coordinate_id == 'cylinder':
         if rescale_val is None:
             raise ValueError(f'flow only works when all values are rescaleval')
@@ -73,6 +112,8 @@ def flow_constructor(
             base = UniformGaussian(ndim=n_theta, ind=ind, scale=scale)
         else:
             base = Uniform(shape=n_theta, low=-rescale_val, high=rescale_val)
+            base.low = base.low.to(device)
+            base.high = base.high.to(device)
 
     transforms = []
     for i in range(num_transforms):
@@ -123,7 +164,7 @@ def flow_constructor(
 
 
     flow = EmbeddingConditionalNormalizingFlow(q0=base, flows=transforms, embedding_net=embedding_net, p=p)
-
+    flow.to(device=device)
     return flow
 
 
@@ -383,105 +424,157 @@ def flow_trainer(
 if __name__ == "__main__":
 
     import pickle
+    import math
 
-    cyl_fcm = pickle.load(open("C:\python_projects\sbmfi\cyl_fcm.p",'rb'))
-    dataloader = pickle.load(open(r"C:\python_projects\sbmfi\50k_dataloader.p",'rb'))
+    batch_size = 1024
 
-    prior_flow = flow_constructor(
-        fcm=cyl_fcm,
-        circular=True,
-        embedding_net=None,
-        num_context_channels=None,
+    dataset, fcm = pickle.load(open(r"C:\python_projects\sbmfi\dat_fcm.p",'rb'))
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)  # WORKS WITH batch_size=2048, try 1024
+
+    # n_data = data.shape[-1]
+    # n_hidden = math.ceil(n_data / 1.5)
+    # n_latent = math.ceil(n_data / 3)
+    # n_hidlay = 2
+    # embedding_net = [torch.nn.Linear(n_data, n_hidden), torch.nn.LeakyReLU(0.01)]
+    # for i in range(n_hidlay):
+    #     embedding_net.extend([torch.nn.Linear(n_hidden, n_hidden), torch.nn.LeakyReLU(0.01)])
+    # embedding_net.append(torch.nn.Linear(n_hidden, n_latent))
+    # embedding_net = torch.nn.Sequential(*embedding_net)
+    #
+
+    common_kwargs = dict(
+        fcm=fcm,
+        coordinate_id='cylinder',
+        rescale_val=1.0,
+        log_xch=True,
         autoregressive=True,
         num_blocks=4,
-        num_hidden_channels=20,
-        num_bins=10,
-        dropout_probability=0.0,
-        num_transforms=5,
+        num_hidden_channels=128,
+        num_bins=8,
+        dropout_probability=0.1,
+        num_transforms=10,
         init_identity=True,
-        permute='lu',
+        permute=None,
         p=None,
-        scale=0.3,
+        device='cuda:0'
     )
 
-    n_epoch = 5
-    LR_gamma = 1.0
-    learning_rate = 1e-3
-    weight_decay = 1e-4
 
-    n_steps = n_epoch * len(dataloader)
-    pbar = tqdm.tqdm(total=n_steps, ncols=120, position=0)
-    optimizer = torch.optim.Adam(prior_flow.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    cond_flow = flow_constructor(
+        num_context_channels=dataset[0][0].shape[-1],
+        **common_kwargs
+    )
+    from torch.profiler import profile, record_function, ProfilerActivity
+    x, theta = next(iter(dataloader))
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        with record_function("model_inference"):
+            cond_flow.forward_kld(theta, x)
 
-    if LR_gamma < 1.0:
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=LR_gamma, last_epoch=-1)
-
-
-
-    try:
-        get_val = lambda x: x.to('cpu').data.numpy()
-        losses = []
-        for epoch in range(n_epoch):
-            for i, (chunk,) in enumerate(dataloader):
-                loss = prior_flow.forward_kld(chunk)
-                optimizer.zero_grad()
-                if ~(torch.isnan(loss) | torch.isinf(loss)):
-                    loss.backward()
-                    optimizer.step()
-                else:
-                    raise ValueError(f'loss: {loss}')
-                np_loss = get_val(loss)
-                losses.append(float(np_loss))
-                pbar.update()
-                pbar.set_postfix(loss=np_loss.round(4))
-    except KeyboardInterrupt:
-        pass
-    except Exception as e:
-        print(e)
-        raise e
-    finally:
-        pbar.close()
+    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
 
 
+    def autoregressive_net_forward(self: MADE, inputs, context=None):
+        outputs = self.preprocessing(inputs)
+        outputs = self.initial_layer(outputs)
+        if context is not None:
+            outputs += self.context_layer(context)
+        for block in self.blocks:
+            outputs = block(outputs, context)
+        outputs = self.final_layer(outputs)
+        return outputs
+
+    def mprqat_forward(self: MaskedPiecewiseRationalQuadraticAutoregressive, inputs, context=None):
+        # autoregressive_params = self.autoregressive_net(inputs, context)
+        autoregressive_params = autoregressive_net_forward(self.autoregressive_net, inputs, context)
+        outputs, logabsdet = self._elementwise_forward(inputs, autoregressive_params)
+        return outputs, logabsdet
+
+    def inverse(self: CircularAutoregressiveRationalQuadraticSpline, z, context=None):
+        # z, log_det = self.mprqat(z, context=context)
+        z, log_det = mprqat_forward(self.mprqat, z, context=context)
+        return z, log_det.view(-1)
+
+    def forward_kld(self: EmbeddingConditionalNormalizingFlow, x, context=None):
+        log_q = torch.zeros(len(x), device=x.device)
+        z = x
+        for i in range(len(self.flows) - 1, -1, -1):
+            # z, log_det = self.flows[i].inverse(z, context=context)
+            z, log_det = inverse(self.flows[i], z, context=context)
+            log_q += log_det
+        log_q += self.q0.log_prob(z, context=context)
+        return -torch.mean(log_q)
+
+    def sample(self: ConditionalNormalizingFlow, num_samples, context=None):
+        z, log_q = self.q0(num_samples, context=context)
+        print(z)
+        for flow in self.flows:
+            z, log_det = flow(z, context=context)
+            log_q -= log_det
+        return z, log_q
+
+    def train_main(dataloader, flow: ConditionalNormalizingFlow, optimizer=None, losses=None, n_epoch=25, scheduler=None, learning_rate=1e-4, weight_decay=1e-4, LR_gamma=1.0):
+        n_steps = n_epoch * len(dataloader)
+        pbar = tqdm.tqdm(total=n_steps, ncols=120, position=0)
+
+        if optimizer is None:
+            optimizer = torch.optim.Adam(flow.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+        if (LR_gamma < 1.0) and (scheduler is None):
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=LR_gamma, last_epoch=-1)
+
+        try:
+            get_val = lambda x: x.to('cpu').data.numpy()
+            if losses is None:
+                losses = []
+            for epoch in range(n_epoch):
+                for i, (x_chunk, theta_chunk) in enumerate(dataloader):
+                    context = None
+                    if hasattr(flow.flows[0].mprqat.autoregressive_net, 'context_layer'):
+                        context = x_chunk
+                    # loss = forward_kld(flow, theta_chunk, context)
+                    loss = flow.forward_kld(theta_chunk)
+                    return
+                    optimizer.zero_grad()
+                    if ~(torch.isnan(loss) | torch.isinf(loss)):
+                        loss.backward()
+                        nn.utils.clip_grad_norm_(flow.parameters(), max_norm=1.0)
+                        optimizer.step()
+                    else:
+                        raise ValueError(f'loss: {loss}')
+                    np_loss = get_val(loss)
+                    losses.append(float(np_loss))
+                    pbar.update()
+                    pbar.set_postfix(loss=np_loss.round(4))
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            print(e)
+            raise e
+        finally:
+            pbar.close()
+        return flow, losses
 
 
-    # mdv_ds = torch.load(r"C:\python_projects\sbmfi\mdv_ds.pt")
-    # model, kwargs = spiro(
-    #     backend='torch', v2_reversible=True, v5_reversible=False, build_simulator=True, which_measurements='com',
-    #     which_labellings=['A', 'B']
+
+
+    # n_epoch = 5
+    # LR_gamma = 1.0
     #
-    # )
-    # up = UniNetFluxPrior(model.flux_coordinate_mapper, cache_size=100000)
-    # fcm_cyl = FluxCoordinateMapper(
-    #     model,
-    #     kernel_basis='svd',  # basis for null-space of simplified polytope
-    #     basis_coordinates='cylinder',  # which variables will be considered free (basis or simplified)
-    #     logit_xch_fluxes=False,  # whether to logit exchange fluxes
-    #     hemi_sphere=False,
-    #     scale_bound=1.0,
-    # )
-
-    # mdv_flow = flow_constructor(
-    #     fcm=fcm_cyl,
-    #     circular=True,
-    #     embedding_net=None,
-    #     num_context_channels=mdv_ds.data.shape[-1],
-    #     autoregressive=True,
-    #     num_blocks=4,
-    #     num_hidden_channels=20,
-    #     num_bins=10,
-    #     dropout_probability=0.0,
-    #     num_transforms=3,
-    #     init_identity=True,
-    #     permute=None,
-    #     p=None,
-    #     scale=0.3,
-    # )
+    # learning_rate = 1e-4
+    # weight_decay = 1e-4
     #
-    # # flow_trainer(mdv_flow, mdv_ds, max_iter=50)
-    # #
-    # x, y = mdv_ds[[123456]]
-    # num_samples = 50
-    # xx = torch.tile(x, (num_samples, 1))
-    # samples = mdv_flow.sample(num_samples=num_samples, context=x)
+    # cond_optimizer = torch.optim.Adam(cond_flow.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    # cond_losses = []
+    # # train_main(dataloader, cond_flow, cond_optimizer, cond_losses)
+    # x_chunk, theta_chunk = next(iter(dataloader))
+    # a = cond_flow.forward_kld(x=theta_chunk.to('cuda:0'), context=x_chunk.to('cuda:0'))
+    # x,lq = cond_flow.sample(4)
+    # s = cond_flow.q0.log_prob(x)
+    # print(s)
+    # prior_losses = []
+    # prior_optimizer = torch.optim.Adam(prior_flow.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    # train_main(dataloader, prior_flow, prior_optimizer, prior_losses)
+
+
+
 

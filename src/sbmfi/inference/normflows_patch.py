@@ -16,13 +16,11 @@ from normflows.utils.masks import create_alternating_binary_mask
 from normflows.utils.nn import PeriodicFeaturesElementwise
 from normflows.utils.splines import DEFAULT_MIN_DERIVATIVE
 import inspect
-from torch.utils.data import Dataset, DataLoader, random_split
 from normflows.nets.made import MaskedLinear
 
-from sbmfi.core.util import profile
-from line_profiler import line_profiler
-
-prof = line_profiler.LineProfiler()
+# from sbmfi.core.util import profile
+# from line_profiler import line_profiler
+# prof = line_profiler.LineProfiler()
 
 class DiagGaussianScale(DiagGaussian):
     def __init__(self, shape, trainable=True, scale=0.3):
@@ -32,31 +30,6 @@ class DiagGaussianScale(DiagGaussian):
             self.log_scale = nn.Parameter(log_scale)
         else:
             self.register_buffer("log_scale", log_scale)
-
-
-class Flow_Dataset(Dataset):
-    def __init__(self, data: torch.Tensor, theta: torch.Tensor):
-        if theta.shape[0] != data.shape[0]:
-            raise ValueError
-
-        if data.ndim == 3:
-            n, n_obs, n_d = data.shape
-            if theta.ndim == 2:
-                theta = theta.tile(n_obs, 1, 1).transpose(0, 1)
-
-        if (data.ndim == 3) and (theta.ndim == 3):
-            data = data.view(n * n_obs, n_d)
-            n_t = theta.shape[-1]
-            theta = theta.contiguous().view(n * n_obs, n_t)
-
-        self.data = data
-        self.theta = theta
-
-    def __len__(self):
-        return self.data.shape[0]
-
-    def __getitem__(self, idx):
-        return self.data[idx], self.theta[idx]
 
 
 class CircularCoupledRationalQuadraticSpline(Flow):
@@ -364,6 +337,7 @@ if __name__ == "__main__":
     from normflows import ConditionalNormalizingFlow
     from normflows.flows.neural_spline import CircularAutoregressiveRationalQuadraticSpline, AutoregressiveRationalQuadraticSpline, CircularCoupledRationalQuadraticSpline
     import pickle
+    # from normflows.utils.nn import
     #
     # dataloader = pickle.load(open(r"C:\python_projects\sbmfi\50k_dataloader.p", 'rb'))
     # chunk = next(dataloader)
