@@ -8,7 +8,7 @@ from cobra import Metabolite
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.metabolite import EMU
-from sbmfi.core.polytopia import FluxCoordinateMapper, project_polytope, LabellingPolytope
+from sbmfi.core.polytopia import FluxCoordinateMapper, project_polytope, LabellingPolytope, simplify_polytope
 from sbmfi.core.util import (
     make_multidex,
     _bigg_compartment_ids
@@ -21,7 +21,6 @@ from sbmfi.lcmsanalysis.util import (
 # from sbmfi.lcmsanalysis.zemzed import add_formulas
 from sbmfi.lcmsanalysis.formula import Formula
 from sbmfi.lcmsanalysis.adducts import emzed_adducts
-from PolyRound.api import PolyRoundApi
 
 
 class MDV_ObservationModel(object):
@@ -941,7 +940,6 @@ class BoundaryObservationModel(object):
             measured_boundary_fluxes: Iterable,
             biomass_id: str = None,  # 'bm', 'BIOMASS_Ecoli_core_w_GAM'
             check_noise_support: bool = False,
-            number_type='float',
     ):
         self._la = model._la
         self._call_kwargs = {}
@@ -963,11 +961,10 @@ class BoundaryObservationModel(object):
         if check_noise_support:
             pol = self._fcm._Fn
             settings = self._fcm._sampler._pr_settings
-            spol = PolyRoundApi.simplify_polytope(pol, settings=settings, normalize=False)
-            pol = LabellingPolytope.from_Polytope(spol, pol)
+            pol = simplify_polytope(pol, settings=settings, normalize=False)
             P = pd.DataFrame(0.0, index=self._bound_id, columns=pol.A.columns)
             P.loc[self._bound_id, self._bound_id] = np.eye(n)
-            self._boundary_pol = project_polytope(pol, P, settings=settings)
+            self._boundary_pol = project_polytope(pol, P)
             self._A = self._la.get_tensor(values=self._boundary_pol.A.values)
             self._b = self._la.get_tensor(values=self._boundary_pol.b.values)[:, None]
 
@@ -991,17 +988,16 @@ class BoundaryObservationModel(object):
 class MVN_BoundaryObservationModel(BoundaryObservationModel):
     def __init__(
             self,
-            fcm: FluxCoordinateMapper,
+            model: LabellingModel,
             measured_boundary_fluxes: Iterable,
             biomass_id: str = None,  # 'bm', 'BIOMASS_Ecoli_core_w_GAM'
             check_noise_support: bool = False,
-            number_type='float',
             sigma_o=None,
             biomass_std=0.1,
             boundary_std=0.3,
     ):
         super(MVN_BoundaryObservationModel, self).__init__(
-            fcm, measured_boundary_fluxes, biomass_id, check_noise_support, number_type
+            model, measured_boundary_fluxes, biomass_id, check_noise_support
         )
         n = len(self._bound_id)
         if sigma_o is None:
@@ -1018,6 +1014,9 @@ class MVN_BoundaryObservationModel(BoundaryObservationModel):
         n, n_b = mu_bo.shape
         mu_bo = mu_bo[:, None, :]
         if not self._check:
+            print(self._la._backwargs)
+            print(self._la.randn(shape=(n, n_obs, len(self._bound_id))).get_device())
+            print(self._sigma_o.get_device())
             noise = self._la.randn(shape=(n, n_obs, len(self._bound_id))) @ self._sigma_o
             return abs(mu_bo + noise)  # .squeeze(0)
 

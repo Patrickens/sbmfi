@@ -8,6 +8,8 @@ from sbmfi.core.util import make_multidex
 from sbmfi.inference.bayesian import _BaseBayes
 from sbmfi.priors.uniform import UniformRoundedFleXchPrior
 from sbmfi.settings import MODEL_DIR
+from sbmfi.core.polytopia import transform_polytope_keep_transform, simplify_polytope
+from PolyRound.api import PolyRoundSettings
 import os
 import cobra
 from cobra.io import read_sbml_model
@@ -1569,8 +1571,6 @@ def read_anton_substrates(which_labellings=None):
     return pd.read_csv(file, index_col=0).loc[which_labellings]
 
 
-from sbmfi.core.polytopia import transform_polytope_keep_transform
-from PolyRound.api import PolyRoundApi, PolyRoundSettings
 def _parse_anton_fluxes():
     v_map = {}
     for pway, vdct in _anton_model_kwargs.items():
@@ -1622,15 +1622,13 @@ def _parse_anton_fluxes():
     model.reactions.get_by_id('EX_glc__D_e').bounds = (-10.0, -10.0)
     model.build_model(free_reaction_id=free_id)
     fcm = FluxCoordinateMapper(model, kernel_id='rref')
-    thermo_pol = fcm._Ft
-    net_pol = fcm._Fn
+    thermo_pol = extract_labelling_polytope(model, coordinate_id='thermo')
+    net_pol = thermo_2_net_polytope(thermo_pol)
     # pickle.dump(thermo_pol, open('tp.p', 'wb'))
 
     # thermo_pol = pickle.load(open('tp.p', 'rb'))
     # net_pol = thermo_2_net_polytope(thermo_pol, verbose=True)
-    simplified_net_pol = PolyRoundApi.simplify_polytope(
-        net_pol, settings=PolyRoundSettings(verbose=False), normalize=False
-    )
+    simplified_net_pol = simplify_polytope(net_pol, settings=PolyRoundSettings(verbose=False), normalize=False)
     trans_pol, T, T_1, tau = transform_polytope_keep_transform(simplified_net_pol, kernel_id='rref')
     full_net_fluxes = T @ net_fluxes.loc[T.columns] + tau.values
 
@@ -2226,7 +2224,6 @@ def simulator_factory(
         ratios=True,
         seed=None,
         free_reaction_id=None,
-        kernel_id='svd',
 ) -> LabellingModel:
     if id_or_file_or_model is not None:
         try:

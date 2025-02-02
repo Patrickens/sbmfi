@@ -31,10 +31,10 @@ def spiro(
         v5_reversible=False,
         measured_boundary_fluxes = ('h_out', ),
         n_obs=0,
-        kernel_id='svd',
         L_12_omega = 1.0,
         clip_min=None,
         transformation='ilr',
+        device='cuda:0'
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -211,7 +211,7 @@ def spiro(
         build_simulator=build_simulator,
         seed=seed,
         free_reaction_id=measured_boundary_fluxes,
-        kernel_id=kernel_id,
+        device=device,
     )
 
     if add_biomass:
@@ -330,6 +330,7 @@ def spiro(
 
         bom = None
         if include_bom:
+            print(model._la._backwargs)
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
         up = UniformRoundedFleXchPrior(model._fcm)
@@ -765,24 +766,11 @@ if __name__ == "__main__":
     # )
     model, kwargs = spiro(
         backend='torch',
-        auto_diff=False,
-        batch_size=1,
-        add_biomass=True,
-        v2_reversible=True,
-        ratios=False,
+        # device='cuda:0',
+        device='cpu',
+        auto_diff=True,
         build_simulator=True,
-        add_cofactors=True,
         which_measurements='lcms',
-        seed=2,
-        measured_boundary_fluxes=('h_out',),
-        which_labellings=['A', 'B'],
-        include_bom=True,
-        v5_reversible=False,
-        n_obs=0,
-        kernel_id='svd',
-        L_12_omega=1.0,
-        clip_min=None,
-        transformation='ilr',
     )
 
     # reaction_kwargs = {

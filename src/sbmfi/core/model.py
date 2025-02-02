@@ -634,7 +634,7 @@ class LabellingModel(Model):
     @property
     def metabolites_in_state(self):
         metabolites_in_state = DictList()
-        polytope = extract_labelling_polytope(model=self, coordinates='thermo')
+        polytope = extract_labelling_polytope(model=self, coordinate_id='thermo')
 
         unbalanced = (polytope.S > 0.0).all(1) | (polytope.S < 0.0).all(1)
         if (unbalanced).any():
@@ -667,7 +667,7 @@ class LabellingModel(Model):
             raise ValueError('set labelling input first!')  # need to have set labelling before generating system!
 
         # TODO: why did we implement this again; I think it was because otherwise cobra and optlang dont like it
-        thermo_pol = extract_labelling_polytope(self, coordinates='thermo')
+        thermo_pol = extract_labelling_polytope(self, coordinate_id='thermo')
         net_pol = thermo_2_net_polytope(thermo_pol, verbose)
         fva_df = fast_FVA(polytope=net_pol)
         never_net = (abs(fva_df) < self.tolerance).all(axis=1)

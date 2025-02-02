@@ -3,7 +3,7 @@ import tables as pt
 import math, re
 # np.seterr(all='raise')
 from cobra.io import save_json_model
-from PolyRound.api import Polytope, PolyRoundApi
+from PolyRound.api import Polytope
 from sbmfi.core.metabolite import LabelledMetabolite
 import pandas as pd
 import functools

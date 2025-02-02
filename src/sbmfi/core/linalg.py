@@ -215,12 +215,23 @@ class NumpyBackend(object):
         return np.concatenate(As, axis=dim)
 
     @staticmethod
-    def max(A, dim=None, keepdims=False):
-        return A.max(dim, keepdims=keepdims)
+    def max(A, dim=None, keepdims=False, return_indices=False):
+        max_values = A.max(dim, keepdims=keepdims)
+        if return_indices:
+            max_indices = np.argmax(A, axis=dim, keepdims=keepdims)
+            # this would have to be flattened again, this is more effort than just doing max and argmax, even though that increases complexity
+            # max_values = np.take_along_axis(A, np.expand_dims(max_indices, dim), axis=dim)
+            return max_values, max_indices
+        return max_values
 
     @staticmethod
-    def min(A, dim=None, keepdims=False):
-        return A.min(dim, keepdims=keepdims)
+    def min(A, dim=None, keepdims=False, return_indices=False):
+        min_values = A.min(dim, keepdims=keepdims)
+        if return_indices:
+            min_indices = np.argmin(A, axis=dim, keepdims=keepdims)
+            # min_values = np.take_along_axis(A, np.expand_dims(min_indices, dim), axis=dim)
+            return min_values, min_indices
+        return min_values
 
     @staticmethod
     def view(A, shape):
@@ -349,6 +360,8 @@ class TorchBackend(object):
         torch.autograd.set_detect_anomaly(True)
 
     def get_tensor(self, shape, indices, values, squeeze, dtype, device):
+        if device is None:
+            device = self._device
         if shape is not None:
             if (values is not None) and values.size:
                 if dtype is None:
@@ -360,10 +373,6 @@ class TorchBackend(object):
 
             if not isinstance(dtype, torch.dtype):
                 dtype = _NP_TORCH_DTYPE[dtype]
-
-            if device is None:
-                device = self._device
-
             A = torch.zeros(size=shape, dtype=dtype, device=device)
             if (indices is not None) and indices.size:
                 indices, values = _merge_duplicate_indices(indices=indices, values=values)
@@ -468,15 +477,21 @@ class TorchBackend(object):
         return torch.cat(As, dim)
 
     @staticmethod
-    def max(A, dim=None, keepdims=False):
+    def max(A, dim=None, keepdims=False, return_indices=False):
         if dim is not None:
-            return A.max(dim, keepdims=keepdims).values
+            max = A.max(dim, keepdims=keepdims)
+            if return_indices:
+                return max
+            return max.values
         return A.max()
 
     @staticmethod
-    def min(A, dim=None, keepdims=False):
+    def min(A, dim=None, keepdims=False, return_indices=False):
         if dim is not None:
-            return A.min(dim, keepdims=keepdims).values
+            min = A.min(dim, keepdims=keepdims)
+            if return_indices:
+                return min
+            return min.values
         return A.min()
 
     @staticmethod
@@ -508,7 +523,7 @@ class TorchBackend(object):
             dtype = self._def_dtype
         elif not isinstance(dtype, torch.dtype):
             dtype = _NP_TORCH_DTYPE[dtype]
-        return torch.randn(shape, generator=self._rng, dtype=dtype)
+        return torch.randn(shape, generator=self._rng, dtype=dtype, device=self._device)
 
     def randu(self, shape, dtype=np.double):
         if dtype is None:
@@ -545,9 +560,11 @@ class LinAlg(object):
         # these functions have the same signature in numpy and torch, thus we can dynamically add them
         'exp', 'log10', 'log', 'atleast_2d', 'diag', 'trace', 'allclose', 'where', 'arange', 'divide',
         'prod', 'diagonal', 'tile', 'sqrt', 'isclose', 'sum', 'mean', 'amax', 'linspace', 'cov', 'split',
-        'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'eye', 'stack', 'minimum', 'maximum',
-        'cumsum', 'argmin', 'argmax', 'clip', 'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
-        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum', 'isnan', 'float_power'
+        'linalg.svd', 'linalg.norm', 'linalg.pinv', 'linalg.cholesky', 'linalg.det',
+        'minimum', 'maximum', 'cumsum', 'argmin', 'argmax', 'clip', 'eye', 'stack',
+        'special.erf', 'special.erfinv', 'special.expit', 'special.logit',
+        'argsort', 'unique', 'cov', 'split', 'arctan2', 'sin', 'cos', 'sign', 'diff', 'nansum',
+        'isnan', 'float_power', 'einsum',
     ]
 
     def __getstate__(self):
@@ -861,11 +878,11 @@ class LinAlg(object):
     def multinomial(self, n, p):
         return self._BACKEND.multinomial(n, p)
 
-    def max(self, A, dim=None, keepdims=False):
-        return self._BACKEND.max(A, dim, keepdims)
+    def max(self, A, dim=None, keepdims=False, return_indices=False):
+        return self._BACKEND.max(A, dim, keepdims, return_indices)
 
-    def min(self, A, dim=None, keepdims=False):
-        return self._BACKEND.min(A, dim, keepdims)
+    def min(self, A, dim=None, keepdims=False, return_indices=False):
+        return self._BACKEND.min(A, dim, keepdims, return_indices)
 
     def logsumexp(self, A, dim=0):
         return self._BACKEND.logsumexp(A, dim)
@@ -877,7 +894,8 @@ class LinAlg(object):
         return self._BACKEND.ones(shape, dtype)
 
     def tensormul_T(self, A, x, dim0=-2, dim1=-1):  # TODO add b argument that adds to x after multiplication?
-        return self.transax(A @ self.transax(x, dim0=dim0, dim1=dim1), dim0=dim0, dim1=dim1)
+        res = A @ self.transax(x, dim0=dim0, dim1=dim1)
+        return self.transax(res, dim0=dim0, dim1=dim1)
 
     def eval_std_normal(self, x):
         return x ** 2 - _SQRT2PI
@@ -885,18 +903,18 @@ class LinAlg(object):
     def cartesian(self, A, ):
         pass
 
-    def min_pos_max_neg(self, alpha, return_what=1, keepdims=False, return_arg=False):
+    def min_pos_max_neg(self, alpha, return_what=1, keepdims=False, return_indices=False):
         inf = float('inf')
         if return_what > -1:
             alpha_max = self.vecopy(alpha)
             alpha_max[alpha_max <= 0.0] = inf
-            alpha_max = self.min(alpha_max, -1, keepdims)
+            alpha_max = self.min(alpha_max, -1, keepdims, return_indices)
             if return_what == 1:
                 return alpha_max
         if return_what < 1:
             alpha_min = self.vecopy(alpha)
             alpha_min[alpha_min >= 0.0] = -inf
-            alpha_min = self.max(alpha_min, -1, keepdims)
+            alpha_min = self.max(alpha_min, -1, keepdims, return_indices)
             if return_what == -1:
                 return alpha_min
         return alpha_min, alpha_max
@@ -911,45 +929,16 @@ class LinAlg(object):
         return A[(None,) * n_unsqueezes + (...,)]
 
 
+
 if __name__ == "__main__":
     import pickle, timeit, cProfile, torch
-
+    #
+    a = np.random.randn(5,5)
     nl = LinAlg(backend='numpy')
-    p = nl.randu((5, ))
-    p = p / p.sum()
+    print(nl.min(a, dim=1, return_indices=True, keepdims=True))
 
-    tl = LinAlg(backend='torch')
-    tp = tl.get_tensor(values=p)
-    rands = tl.randu(59) * 6 - 3
+    nt = LinAlg(backend='torch')
+    print(nt.min(torch.as_tensor(a), dim=1, keepdims=True, return_indices=True))
 
-    print(tl.min_pos_max_neg(rands, return_what=0))
-    print(rands)
 
-    # a = torch.zeros((3,3,3))
-    # b = torch.zeros((3,3,3,5))
-    # l = LinAlg(backend='torch')
-    # l.unsqueeze_like(a, b)
-
-    # n_dim = 2
-    # dim_slicer = slice(0, n_dim) if n_dim > 1 else 0
-    # n_el = 2
-    #
-    # lo = l.get_tensor(values=np.array([
-    #     [0.0, 0.5],
-    #     [0.0, 0.5],
-    # ])[dim_slicer, :n_el])
-    # hi = l.get_tensor(values=np.array([
-    #     [1.5, 1.0],
-    #     [1.5, 1.0],
-    # ])[dim_slicer, :n_el])
-    # mu = l.get_tensor(values=np.array([
-    #     [0.2, 0.55],
-    #     [0.2, 0.55],
-    # ])[dim_slicer, :n_el])
-    # shape = (3,)
-    # std = l.get_tensor(values=np.array(0.1))
-    # which = 'unif'
-    #
-    # dang = l.sample_bounded_distribution(shape=shape, lo=lo, hi=hi, mu=mu, std=std, which=which)
-    # log_probs = l.proposal_log_probs(dang, lo, hi, std, which)
 

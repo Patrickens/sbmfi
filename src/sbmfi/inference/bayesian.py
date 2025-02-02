@@ -102,9 +102,11 @@ class _BaseBayes(_BaseSimulator):
                 raise ValueError
             theta = theta.iloc[0]
         true_theta = self._la.atleast_2d(self._la.get_tensor(values=theta.loc[self.theta_id].values))
-        within_bounds = self._prior.support.check(true_theta)
+        prior_support = self._prior.support
+        prior_support.to(true_theta.device)
+        within_bounds = prior_support.check(true_theta)
         if not within_bounds.all():
-            raise ValueError('the passed true theta is not within the ')
+            raise ValueError('the passed true theta is not within the polytope ')
         self._true_theta = true_theta
         self._true_theta_id = theta.name
 
