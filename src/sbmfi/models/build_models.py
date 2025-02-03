@@ -16,7 +16,12 @@ from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
 # from pta import ConcentrationsPrior
 import pickle
-from sbmfi.core.polytopia import FluxCoordinateMapper, extract_labelling_polytope, rref_null_space, thermo_2_net_polytope
+from sbmfi.core.polytopia import (
+    extract_labelling_polytope,
+    rref_null_space,
+    thermo_2_net_polytope
+)
+from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.lcmsanalysis.formula import Formula, isotopologues
 from sbmfi.lcmsanalysis.util import build_correction_matrix
 import cvxpy as cp
@@ -2099,7 +2104,7 @@ def _parse_tomek_model():
 
     bm = core.reactions.get_by_id(_bmid_GAM)
     akg = core.metabolites.get_by_id('akg_c')
-    glu = core.metabolites.get_by_id('glu__L_c')
+    glu = core.metabolites.get_by_id('glu__L_c')  # biomass should not produce carbon containing molecules
     bm -= core.reactions.get_by_id('GLUDy') * bm.metabolites[akg]
     bm._metabolites[glu] = round(bm.metabolites[glu], 4)
 

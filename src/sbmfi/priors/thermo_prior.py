@@ -114,7 +114,7 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
 
     if self._fcm._nx > 0:
         if self._logxch:
-            xch_fluxes = self._logit_xch(xch_fluxes)
+            xch_fluxes = self.logit_xch(xch_fluxes)
         theta = self._la.cat([net_basis_samples, xch_fluxes], dim=-1)
     else:
         theta = net_basis_samples

@@ -4,7 +4,12 @@ from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.inference.bayesian import _BaseBayes
 from sbmfi.priors.uniform import UniformRoundedFleXchPrior
-from sbmfi.core.observation import ClassicalObservationModel, LCMS_ObservationModel, MVN_BoundaryObservationModel, MDV_ObservationModel
+from sbmfi.core.observation import (
+    ClassicalObservationModel,
+    LCMS_ObservationModel,
+    MVN_BoundaryObservationModel,
+    MDV_ObservationModel
+)
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
 from sbmfi.settings import MODEL_DIR, SIM_DIR
@@ -330,7 +335,6 @@ def spiro(
 
         bom = None
         if include_bom:
-            print(model._la._backwargs)
             bom = MVN_BoundaryObservationModel(model, measured_boundary_fluxes, biomass_id)
 
         up = UniformRoundedFleXchPrior(model._fcm)
@@ -767,6 +771,7 @@ if __name__ == "__main__":
     model, kwargs = spiro(
         backend='torch',
         # device='cuda:0',
+        v2_reversible=False,
         device='cpu',
         auto_diff=True,
         build_simulator=True,

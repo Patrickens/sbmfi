@@ -8,7 +8,12 @@ from cobra import Metabolite
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.metabolite import EMU
-from sbmfi.core.polytopia import FluxCoordinateMapper, project_polytope, LabellingPolytope, simplify_polytope
+from sbmfi.core.coordinater import FluxCoordinateMapper
+from sbmfi.core.polytopia import (
+    project_polytope,
+    LabellingPolytope,
+    simplify_polytope
+)
 from sbmfi.core.util import (
     make_multidex,
     _bigg_compartment_ids
@@ -541,7 +546,7 @@ class _BlockDiagGaussian(object):
                 valid_cov = all(abs(offtri_cov) < corr_1)  # abs(correlation) <= 1
                 is_diagonal = self._la.allclose(sigma, self._la.transax(sigma), rtol=1e-10)  # sigma must be diagonal
                 if not (positive_var and valid_cov and is_diagonal):
-                    raise ValueError
+                    raise ValueError(f'positive variance: {positive_var}, diagional: {is_diagonal}, valid_cov: {valid_cov}')
 
         self._sigma = sigma
         self._chol = self._la.cholesky(self._sigma)  # NB fails if not invertible!
@@ -1014,9 +1019,6 @@ class MVN_BoundaryObservationModel(BoundaryObservationModel):
         n, n_b = mu_bo.shape
         mu_bo = mu_bo[:, None, :]
         if not self._check:
-            print(self._la._backwargs)
-            print(self._la.randn(shape=(n, n_obs, len(self._bound_id))).get_device())
-            print(self._sigma_o.get_device())
             noise = self._la.randn(shape=(n, n_obs, len(self._bound_id))) @ self._sigma_o
             return abs(mu_bo + noise)  # .squeeze(0)
 

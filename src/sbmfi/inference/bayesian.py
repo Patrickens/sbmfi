@@ -114,7 +114,7 @@ class _BaseBayes(_BaseSimulator):
         if self._true_theta is None:
             raise ValueError('set true_theta')
         tt = self._la.tile(self._true_theta.T, (self._la._batch_size, )).T
-        true_labelling_fluxes = self._fcm.map_theta_2_fluxes(tt)
+        true_labelling_fluxes = self._fcm.map_theta_2_fluxes(tt, return_thermo=False)
         true_data = self.simulate(true_labelling_fluxes, n_obs, pandalize=pandalize)
         if not pandalize:
             return true_data[[0]]
@@ -396,7 +396,7 @@ class _BaseBayes(_BaseSimulator):
             # TODO: https://link.springer.com/article/10.1007/BF02591694
             #  implement coordinate hit-and-run (might be faster??)
             # uniform samples from unit ball in batch_shape dims
-            self._sphere_samples = self._la.sample_hypersphere(shape=(*batch_shape, self._K))
+            self._sphere_samples = self._la.sample_unit_hyper_sphere_ball(shape=(*batch_shape, self._K))
             # batch compute distances to all planes
             self._A_dist = self._la.tensormul_T(self._sampler._G, self._sphere_samples)
 

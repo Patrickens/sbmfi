@@ -17,7 +17,7 @@ from sbmfi.core.observation import (
     BoundaryObservationModel,
     MDV_ObservationModel,
 )
-from sbmfi.core.polytopia import make_theta_polytope
+from sbmfi.core.coordinater import make_theta_polytope
 from sbmfi.core.util import (
     hdf_opener_and_closer,
     make_multidex,
@@ -40,10 +40,7 @@ https://bayesiancomputationbook.com/markdown/chp_08.html
 https://michael-franke.github.io/intro-data-analysis/bayesian-p-values-model-checking.html
 """
 
-# from line_profiler import line_profiler
-# import arviz as az
-# import tqdm
-# prof2 = line_profiler.LineProfiler()
+
 class _BaseSimulator(object):
     def __init__(
             self,

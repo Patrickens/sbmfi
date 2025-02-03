@@ -272,9 +272,10 @@ class LabellingReaction(Reaction):
                 if (self.model is not None) and not self._pseudo:
                     Reaction.update_variable_bounds(self)  # standard cobrapy behavior
 
-        self._model._is_built = False  # needs to rerun to update model._fcm and the like
-        # this is to make sure that all changes in rho_max and bounds are reflected in labellingreactions
-        self._model._labelling_reactions = DictList()
+        if self._model is not None:
+            self._model._is_built = False  # needs to rerun to update model._fcm and the like
+            # this is to make sure that all changes in rho_max and bounds are reflected in labellingreactions
+            self._model._labelling_reactions = DictList()
 
     @property
     def pseudo(self):
@@ -761,7 +762,7 @@ class EMU_Reaction(LabellingReaction):
     def pretty_tensors(self, weight: int):
         if self.model is None:
             raise ValueError('no model')
-        elif not self.model._is_built:
+        elif not self.model.is_built:
             raise ValueError('model not built')
         result = {}
         if weight == 0:

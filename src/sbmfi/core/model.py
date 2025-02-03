@@ -1,4 +1,3 @@
-# os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'  # this is to avoid some weird stuff
 from cobra.util.context import get_context
 from cobra import Model, Reaction, Metabolite, DictList
 import numpy as np
@@ -11,12 +10,11 @@ from sbmfi.core.util   import (
     _rev_reactions_rex,
 )
 from sbmfi.core.polytopia import (
-    FluxCoordinateMapper,
-    LabellingPolytope,
     extract_labelling_polytope,
     thermo_2_net_polytope,
     fast_FVA
 )
+from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite  import LabelledMetabolite, ConvolutedEMU, EMU, IsoCumo
 from itertools import repeat
@@ -152,6 +150,10 @@ class LabellingModel(Model):
         self._sum = self._la.get_tensor(shape=(0,))  # sums metabolites to 1
         self._dsdv = self._la.get_tensor(shape=(0,))  # ds / dvi, vector that stores sensitivity of state wrt some reaction
         self._jacobian = self._la.get_tensor(shape=(0,))  # dim(reaction x output variabless)
+
+    @property
+    def is_built(self):
+        return self._is_built
 
     @property
     def biomass_id(self):
@@ -408,33 +410,12 @@ class LabellingModel(Model):
                         met_reaction._metabolites[metabolite] = met_reaction._metabolites.pop(met_met)
         return fixed_atom_map
 
-    def add_reactions(
+    def add_reactions(  # TODO refactor this, its ugly
             self,
             reaction_list: Iterable = None,
             metabolite_kwargs: dict = None,
             reaction_kwargs: dict = None
     ):
-        """ A function that is used to instantiate a SUMod object with an existing cobra.Model
-        object. To do so, arguments such as atom-mappings need to be passed to the relevant
-        reactions and symmetry information needs to be passed to metabolites.
-        TODO: fix contexts
-        TODO: fix genes and groups, that sucks now! might still be referring to cobra Reaction
-            objects that are made obsolete by SUReaction objects
-        TODO: maybe add reaction_str for the reaction_from_string method of cobra.Reaction??
-        Parameters
-        ----------
-        reaction_list : Iterable, optional
-            ...
-        metabolite_kwargs : dict, optional
-            When instantiating SUMod with an existing Model or SUMod object, this dictionary
-            specifies which cobra.Metabolite objects are turned into SUMet objects.
-            Labelling is only computed for SUMet objects.
-        reaction_kwargs : dict, optional
-            When instantiating SUMod with an existing Model or SUMod object, this dictionary
-            specifies which cobra.Reaction objects are turned into SUReac objects.
-            Only SUReac objects influence the labelling state of the system.
-        """
-
         context = get_context(self)
         if context:
             raise NotImplementedError

@@ -1,6 +1,13 @@
 import math
 
-from sbmfi.core.polytopia import PolytopeSamplingModel, V_representation, fast_FVA, LabellingPolytope, FluxCoordinateMapper
+from sbmfi.core.polytopia import (
+    PolytopeSamplingModel,
+    V_representation,
+    fast_FVA,
+    LabellingPolytope,
+    thermo_2_net_polytope
+)
+from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.inference.arviz_monkey import *
 import pandas as pd
 import holoviews as hv
@@ -11,7 +18,6 @@ from bokeh.plotting import show
 from bokeh.io import output_file
 import matplotlib.pyplot as plt
 import colorcet
-from sbmfi.core.polytopia import thermo_2_net_polytope
 
 
 class PlotMonster(object):
@@ -339,7 +345,6 @@ class PlotMonster(object):
         else:
             raise ValueError
 
-        print(var1_id, var2_id, what_var, what_point, label, color)
         if what_point == 'max_prob':
             if what_var not in self._max_prob_point:
                 raise ValueError(f'{what_var} not in InferenceData')
@@ -427,14 +432,15 @@ class PlotMonster(object):
 
         return hv.Layout(plots).cols(cols).opts(shared_axes=False)
 
-    def grand_theta_plot(self, var1_id, var2_id, group='posterior'):
+    def grand_theta_plot(self, var1_id, var2_id, group='posterior', bandwidth=None):
         plots = [
             self._plot_polytope_area(var1_id, var2_id),
             self._data_hull(var1_id=var1_id, var2_id=var2_id, group=group),
-            self._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group),
+            self._bivariate_plot(var1_id=var1_id, var2_id=var2_id, group=group, bandwidth=bandwidth),
         ]
         if group == 'posterior':
-            plots.append(self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='true'))
+            if self._ttdf is not None:
+                plots.append(self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='true'))
             if hasattr(self, '_map'):
                 plots.append(self.point_plot(var1_id=var1_id, var2_id=var2_id, what_point='map'))
         return hv.Overlay(plots).opts(legend_position='right', show_legend=True, fontsize=self._FONTSIZES)
@@ -450,7 +456,6 @@ class MCMC_PLOT(PlotMonster):
     ):
         self._max_prob_measure = 'lp'
         super().__init__(fcm, inference_data, v_rep, hv_backend)
-
 
 
 class SMC_PLOT(PlotMonster):
@@ -633,45 +638,53 @@ if __name__ == "__main__":
     import matplotlib
     import pickle
 
-    file = "C:\python_projects\sbmfi\src\sbmfi\isspiro_5000samples_12steps_alldata.nc"
-    model, kwargs = spiro(
-        backend='torch',
-        auto_diff=False,
-        batch_size=1,
-        add_biomass=True,
-        v2_reversible=True,
-        ratios=True,
-        build_simulator=True,
-        add_cofactors=True,
-        which_measurements=None,
-        seed=2,
-        measured_boundary_fluxes=('h_out',),
-        which_labellings=['A', 'B'],
-        include_bom=True,
-        v5_reversible=False,
-        n_obs=0,
-        kernel_id='svd',
-        L_12_omega=1.0,
-        clip_min=None,
-        transformation='ilr',
-    )
-    data = az.InferenceData.from_netcdf(file)
-    fcm = model.flux_coordinate_mapper
-    smc_plot = SMC_PLOT(
-        fcm=fcm,  # this should be in the sampled basis!
-        inference_data=data,
-        v_rep=None,
-        hv_backend='bokeh',
-    )
+    file = "C:\python_projects\sbmfi\mog_polytope_50k_samples.nc"
+    data = az.from_netcdf(file)
+    fcm = pickle.load(open(r"C:\python_projects\sbmfi\fcm.p", 'rb'))
+
+    plotter = MCMC_PLOT(fcm, data)
+    plott = plotter.grand_theta_plot('R_h_out', 'R_bm')
+
+    output_file(filename="custom_filename1.html", title="plot1")
+    aaa = show(hv.render(plott), new='tab')
+
+    # model, kwargs = spiro(
+    #     backend='torch',
+    #     auto_diff=False,
+    #     batch_size=1,
+    #     add_biomass=True,
+    #     v2_reversible=True,
+    #     ratios=True,
+    #     build_simulator=True,
+    #     add_cofactors=True,
+    #     which_measurements=None,
+    #     seed=2,
+    #     measured_boundary_fluxes=('h_out',),
+    #     which_labellings=['A', 'B'],
+    #     include_bom=True,
+    #     v5_reversible=False,
+    #     n_obs=0,
+    #     kernel_id='svd',
+    #     L_12_omega=1.0,
+    #     clip_min=None,
+    #     transformation='ilr',
+    # )
+    # data = az.InferenceData.from_netcdf(file)
+    # fcm = model.flux_coordinate_mapper
+    # smc_plot = SMC_PLOT(
+    #     fcm=fcm,  # this should be in the sampled basis!
+    #     inference_data=data,
+    #     v_rep=None,
+    #     hv_backend='bokeh',
+    # )
 
 
-    plott = smc_plot.plot_evolution('R_svd0',)
+    # plott = smc_plot.plot_evolution('R_svd0',)
     # plott = smc_plot.grand_data_plot(['A: ilr_C_0', 'A: ilr_C_1', 'A: ilr_D_0', 'A: ilr_D_1', 'A: ilr_H_0',
     #    'A: ilr_L_0', 'A: ilr_L_1', 'A: ilr_L_2', 'A: ilr_L|[1,2]_0',
     #    'B: ilr_C_0', 'B: ilr_D_0', 'B: ilr_H_{M+Cl}_0', 'B: ilr_H_0',
     #    'B: ilr_L|[1,2]_0', 'BOM: h_out', 'BOM: bm'], plot_map=False)
-    output_file(filename="custom_filename2.html", title="plot1")
-    aaa = show(hv.render(plott), new='tab')
+
 
     # data_id = ['A: ilr_C_0', 'A: ilr_C_1', 'A: ilr_D_0', 'A: ilr_D_1', 'A: ilr_H_0',
     #    'A: ilr_L_0', 'A: ilr_L_1', 'A: ilr_L_2', 'A: ilr_L|[1,2]_0',

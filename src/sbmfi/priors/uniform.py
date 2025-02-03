@@ -5,13 +5,17 @@ import pandas as pd
 import torch
 import inspect
 from torch.distributions.constraints import Constraint, _Dependent, _Interval
-from PolyRound.api import PolyRoundApi
 from torch.types import _size
 
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.linalg import LinAlg
-from sbmfi.core.polytopia import LabellingPolytope, FluxCoordinateMapper, \
-    PolytopeSamplingModel, sample_polytope, compute_volume, make_theta_polytope
+from sbmfi.core.polytopia import (
+    LabellingPolytope,
+    PolytopeSamplingModel,
+    sample_polytope,
+    compute_volume,
+)
+from sbmfi.core.coordinater import FluxCoordinateMapper, make_theta_polytope
 from typing import Iterable, Union, List, Dict
 from torch.distributions import constraints
 from torch.distributions import Distribution
