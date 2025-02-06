@@ -12,6 +12,8 @@ class MixtureOfGaussians(torch.distributions.Distribution):
         :param covariances: Tensor of shape (num_components, num_dimensions, num_dimensions) representing the covariance matrices.
         :param weights: Tensor of shape (num_components,) representing the mixture weights. Should sum to 1.
         """
+        assert means.device == covariances.device == weights.device, f'not same device'
+
         self.means = means
         self.covariances = covariances
         self.weights = weights
@@ -46,7 +48,7 @@ class MixtureOfGaussians(torch.distributions.Distribution):
         component_indices = self.categorical.sample(sample_shape)
 
         # Sample from the corresponding Gaussian components
-        samples = torch.empty(num_samples, self.num_dimensions)
+        samples = torch.empty(num_samples, self.num_dimensions, device=self.means.device)
         for i in range(self.num_components):
             mask = component_indices == i
             num_samples_i = mask.sum().item()
@@ -70,17 +72,24 @@ class MixtureOfGaussians(torch.distributions.Distribution):
         # Marginalize over components
         return torch.logsumexp(log_probs, dim=-1)
 
+    def copy_to(self, device):
+        return MixtureOfGaussians(
+            self.means.to(device=device), self.covariances.to(device=device), self.weights.to(device=device)
+        )
+
+
 if __name__ == "__main__":
     # Example usage
-    means = torch.tensor([[0.0, 0.0], [5.0, 5.0]])
-    covariances = torch.stack([torch.eye(2), torch.eye(2) * 2])
-    weights = torch.tensor([0.4, 0.6])
+    device = 'cuda:0'
+    means = torch.tensor([[0.0, 0.0], [5.0, 5.0]]).to(device)
+    covariances = torch.stack([torch.eye(2), torch.eye(2) * 2]).to(device)
+    weights = torch.tensor([0.4, 0.6]).to(device)
 
     mog = MixtureOfGaussians(means, covariances, weights)
 
     # Sample from the mixture
-    samples = mog.sample((1000,))
+    samples = mog.sample(torch.Size((1000,)))
 
     # Compute log probability of a value
-    log_prob = mog.log_prob(torch.tensor([1.0, 1.0]))
+    log_prob = mog.log_prob(torch.tensor([1.0, 1.0]).to(device))
     print("Log Probability:", log_prob)

@@ -39,7 +39,7 @@ def spiro(
         L_12_omega = 1.0,
         clip_min=None,
         transformation='ilr',
-        device='cuda:0'
+        device='cpu'
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
