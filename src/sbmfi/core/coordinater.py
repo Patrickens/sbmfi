@@ -448,9 +448,13 @@ class FluxCoordinateMapper(object):
         for i in range(2, ball.shape[-1] - 1):
             sqrt_1_r2 = self._la.sqrt(1.0 - ball[..., [i]] ** 2)
             if jacobian:
-                J_ball_cylinder[..., :i, i] = ball[..., :i] * ball[..., [i]] / sqrt_1_r2
+                J_ball_cylinder[..., :i, i] = (ball[..., :i] * -ball[..., [i]]) / sqrt_1_r2
                 J_ball_cylinder[..., diags[:i], diags[:i]] *= sqrt_1_r2
             ball[..., :i] *= sqrt_1_r2
+
+        if jacobian:
+            for i in range(2, K - 1):
+                J_ball_cylinder[..., :i, i] *= J_ball_cylinder[..., i, [i]]
 
         if pandalize:
             ball = pd.DataFrame(self._la.tonp(ball), index=index, columns=self.net_theta_id(coordinate_id='ball'))
@@ -819,6 +823,8 @@ class FluxCoordinateMapper(object):
             new.__dict__[kwarg] = linalg.get_tensor(values=value)
         return new
 
+    def map_rounded_2_max_entropy(self, rounded, vertices=None, tolerance=1e-10):
+        pass
 
 
 def make_theta_polytope(fcm: FluxCoordinateMapper):

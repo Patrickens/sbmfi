@@ -1119,7 +1119,7 @@ class LinAlg:
         norm = self.norm(rnd, 2, -1, True)
         sphere_sample = rnd / norm
         if hemi:
-            sphere_sample = abs(sphere_sample)
+            sphere_sample[0] = abs(sphere_sample[0])
         if ball:
             randu = self.randu((*shape[:-1], 1)) ** (1 / shape[-1])
             return randu * sphere_sample
