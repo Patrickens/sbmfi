@@ -938,7 +938,6 @@ class LinAlg:
         if dtype not in (np.double, np.float64, np.float32, np.single):
             raise ValueError("Not a supported default float type")
 
-        self._backwargs = {"backend": backend, "seed": seed, "solver": solver, "device": device, "dtype": dtype}
         if backend == "numpy":
             self._BACKEND = NumpyBackend(seed=seed, dtype=dtype)
         elif backend == "torch":
@@ -960,6 +959,17 @@ class LinAlg:
                 if fname in kwargs:
                     kwargs[fname].update(user_kwargs)
         self._fkwargs = kwargs
+
+        self._backwargs = {
+            "backend": backend,
+            "seed": seed,
+            "solver": solver,
+            "device": device,
+            "dtype": dtype,
+            "fkwargs": self._fkwargs,
+            "auto_diff": self._auto_diff,
+            "batch_size": self._batch_size,
+        }
 
     def _fill_functions(self, backend: str) -> dict:
         """
@@ -987,6 +997,13 @@ class LinAlg:
                 continue
             functions[func_name] = getattr(package, func_name)
         return functions
+
+    def __getstate__(self):
+        return self._backwargs
+
+    def __setstate__(self, state):
+        la = LinAlg(**state)
+        self.__dict__.update(**la.__dict__)
 
     @property
     def backend(self) -> str:

@@ -5,6 +5,8 @@ import scipy
 import pandas as pd
 import contextlib
 import io
+
+import tqdm
 from cobra import Reaction
 import functools
 from sympy import nsimplify, Matrix
@@ -599,8 +601,8 @@ def svd_null_space(S: pd.DataFrame, tolerance=1e-10):
 
 def simplify_polytope(
         polytope,
-        settings,
-        normalize=True
+        settings = PolyRoundSettings(),
+        normalize = True
 ):
     simpol = PolyRoundApi.simplify_polytope(polytope, settings, normalize)
     return LabellingPolytope.from_Polytope(simpol, polytope)
@@ -987,6 +989,7 @@ def sample_polytope(
         kernel_id: str = 'svd',
         markov_transition=None,
         return_what='rounded',
+        show_progress=False,
 ):
     # TODO just use the function MCMC from sbmfi.estimate.simulator!
     r"""
@@ -1031,6 +1034,10 @@ def sample_polytope(
     n_tot = n_burn + n_per_chain * thinning_factor
     chains = model._la.get_tensor(shape=(n_per_chain, n_chains, K))  # use for PSRF computation
 
+    pbar = range(n_tot)
+    if show_progress:
+        pbar = tqdm.tqdm(pbar, ncols=100)
+
     if initial_points is None:
         x = model.get_initial_points(num_points=n_chains)
     else:
@@ -1045,7 +1052,7 @@ def sample_polytope(
             chain_log_probs = model._la.get_tensor(shape=(n_per_chain, n_chains))
 
     biatch = min(5000, n_tot)  # batching this makes it a bit faster
-    for i in range(n_tot):
+    for i in pbar:
         # given x, the next point in the chain is x+alpha*r
         #             # it also satisfies A(x+alpha*r)<=b which implies A*alpha*r<=b-Ax
         #             # so alpha<=(b-Ax)/ar for ar>0, and alpha>=(b-Ax)/ar for ar<0.
@@ -1102,6 +1109,9 @@ def sample_polytope(
                     markov_transition._axept[:] = 0  # only count after warm-up
                 if markov_transition._retlp:
                     chain_log_probs[j // thinning_factor] = log_probs
+
+    if show_progress:
+        pbar.close()
 
     if return_what != 'chains':
         chains = model._la.view(chains, (n_chains * n_per_chain, K))[:n, :]
@@ -1221,5 +1231,5 @@ if __name__ == "__main__":
     )
 
     psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn)
-    sample_polytope(psm)
+    sample_polytope(psm, n=100, show_progress=True)
 

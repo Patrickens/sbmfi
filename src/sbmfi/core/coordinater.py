@@ -159,7 +159,7 @@ class FluxCoordinateMapper(object):
                 coords[i] = product
         return coords
 
-    def map_rounded_2_ball(self, rounded, hemi: bool=False, alpha_root: float=None, pandalize=False, jacobian=False):
+    def map_rounded_2_ball(self, rounded, hemi: bool=False, alpha_root: float=None, pandalize=False, sep_radius=False, jacobian=False):
         if jacobian:
             raise NotImplementedError
         if rounded.shape[-1] < 2:
@@ -193,58 +193,17 @@ class FluxCoordinateMapper(object):
 
         alpha_frac = self._la.float_power(alpha_frac, alpha_root)
 
-        result = self._la.cat([directions, alpha_frac], dim=-1)
+        if sep_radius:
+            result = self._la.cat([directions, alpha_frac], dim=-1)
+        else:
+            result = directions * alpha_frac # this is if we want to keep dimensionality
 
         if pandalize:
             result = pd.DataFrame(self._la.tonp(result), index=index, columns=self.net_theta_id('ball', hemi))
             result.index.name = 'samples_id'
         return result
 
-    def Jacobian_rounded_ball(self, ball, hemi=False, alpha_root=None):
-        index = None
-        if len(ball.shape) > 2:
-            raise NotImplementedError(f'{ball.shape}, should be a (n_samples x n_ball) matrix, cannot handle arbitrary batch shapes for now')
-        if isinstance(ball, pd.DataFrame):
-            raise NotImplementedError
-
-        K = self.sampler.dimensionality
-        J = self._la.get_tensor(shape=(*ball.shape[:-1], K, K + 1))
-
-        directions = ball[..., :-1]
-        alpha_frac = ball[..., [-1]]
-
-        if alpha_root is None:
-            alpha_root = self._sampler.dimensionality
-        alpha_frac = self._la.float_power(alpha_frac, 1.0 / alpha_root)
-
-        diags = self._la.arange(K + 1)
-        # derivative \frac{\partial r^{\frac{1}{\alpha}}}{\partial r} = \frac{1}{\alpha} \cdot r^{\frac{1}{\alpha} - 1}
-
-        allpha = self._sampler._h.T / self._la.tensormul_T(self._sampler._G, directions)
-        alpha_max, active_constraints = self._la.min_pos_max_neg(
-            allpha, return_what=0 if hemi else 1, keepdims=True, return_indices=True
-        )
-
-        root_correction = 1 / alpha_root * alpha_frac / ball[..., [-1]]
-        J[..., :, -1] = alpha_max * ball[..., :-1] * root_correction
-        J[..., diags[:-1], diags[:-1]] = 1  # make an identity matrix without extra memory
-
-        active_G = self._sampler._G[active_constraints]
-        denom = self._la.tensormul_T(active_G, directions[..., None, :])
-        num = self._la.einsum("bi,bj->bij", directions, active_G.squeeze(-2))
-
-        if hemi:
-            raise NotImplementedError
-            # alpha_min, alpha_max = alpha_max
-            # alpha = alpha_frac * (alpha_max - alpha_min) + alpha_min  # fraction of chord
-        else:
-            alpha = alpha_frac * alpha_max  # fraction of max distance from polytope boundary
-
-        rounded = directions * alpha
-        J[..., :, :-1] = self._la.unsqueeze(alpha, -1) * (J[..., :, :-1] - num / denom)
-        return rounded, J
-
-    def map_ball_2_rounded(self, ball, hemi: bool=False, alpha_root: float=None, pandalize=False, jacobian=False):
+    def map_ball_2_rounded(self, ball, hemi: bool=False, alpha_root: float=None, pandalize=False, sep_radius=True, jacobian=False):
         index = None
         if isinstance(ball, pd.DataFrame):
             index = ball.index
@@ -260,8 +219,12 @@ class FluxCoordinateMapper(object):
             if len(ball.shape) > 2:
                 raise NotImplementedError(f'{ball.shape}, should be a (n_samples x n_ball) matrix, cannot handle arbitrary batch shapes for now')
 
-        directions = ball[..., :-1]
-        alpha_frac = ball[..., [-1]]
+        if sep_radius:
+            directions = ball[..., :-1]
+            alpha_frac = ball[..., [-1]]
+        else:
+            alpha_frac = self._la.norm(ball, 2, -1, True)
+            directions = ball / alpha_frac
 
         if alpha_root is None:
             alpha_root = self._sampler.dimensionality
@@ -330,73 +293,6 @@ class FluxCoordinateMapper(object):
             cylinder = pd.DataFrame(self._la.tonp(cylinder), index=index, columns=self.net_theta_id(coordinate_id='cylinder'))
             cylinder.index.name = 'samples_id'
         return cylinder
-
-    def Jacobian_cylinder_polar_cylinder(self, polar_cylinder, hemi=False, rescale_val=1.0):
-        index = None
-        if isinstance(polar_cylinder, pd.DataFrame):
-            raise NotImplementedError
-            # index = polar_cylinder.index
-            # columns = self.net_theta_id(coordinate_id='cylinder', hemi=hemi)
-            # polar_cylinder = self._la.get_tensor(values=polar_cylinder.loc[:, columns].values)
-
-        K = self.sampler.dimensionality
-        J = self._la.get_tensor(shape=(*polar_cylinder.shape[:-1], K + 1, K))
-
-        # correct for rescaling
-        cyl_rescale = 1
-        if (rescale_val is not None) and (rescale_val != 1):
-            # scales cylinder to [-1, 1]
-            cyl_rescale = 2 * rescale_val / 2
-            polar_cylinder = (polar_cylinder + rescale_val) / (2 * rescale_val) * 2 - 1
-
-        atan = polar_cylinder[..., [0]]
-        atan_rescale = 1
-        r_rescale = 1
-        if rescale_val is not None:
-            # y in [c, d], x in [a, b], dy/dx = (d-c)/(b-a)
-
-            # scales atan is [0, pi] if _hemi else [-pi, pi]
-            minb = 0.0 if hemi else -math.pi
-            atan = (atan + 1) / 2 * (math.pi - minb) + minb
-            atan_rescale = (math.pi - minb) / 2
-
-            # scales R back to [0, 1]
-            polar_cylinder[..., -1] = (polar_cylinder[..., -1] + 1) / 2
-            r_rescale = 1 / 2
-
-        diags = self._la.arange(K)
-        J[..., diags + 1, diags] = 1 * cyl_rescale
-        J[..., -1, -1] *= r_rescale
-        sin = self._la.sin(atan)
-        cos = self._la.cos(atan)
-        J[..., [0], 0] = cos * cyl_rescale * atan_rescale
-        J[..., [1], 0] = -sin * cyl_rescale * atan_rescale
-
-        cylinder = [sin, cos, polar_cylinder[..., 1:]]
-        cylinder = self._la.cat(cylinder, dim=-1)
-        return cylinder, J
-
-    def Jacobian_ball_cylinder(self, cylinder):
-        index = None
-        if isinstance(cylinder, pd.DataFrame):
-            raise NotImplementedError
-
-        K = self.sampler.dimensionality
-        J = self._la.get_tensor(shape=(*cylinder.shape[:-1], K + 1, K + 1))
-
-        ball = self._la.vecopy(cylinder)
-        diags = self._la.arange(K + 1)
-
-        J[..., diags, diags] = 1
-
-        for i in range(2, ball.shape[-1] - 1):
-            sqrt_1_r2 = self._la.sqrt(1.0 - ball[..., [i]] ** 2)
-            J[..., :i, i] = ball[..., :i] * ball[..., [i]] / sqrt_1_r2
-            J[..., diags[:i], diags[:i]] *= sqrt_1_r2
-            ball[..., :i] *= sqrt_1_r2
-
-        # print(self._la.norm(ball[:, :K], axis=1))
-        return ball, J
 
     def map_cylinder_2_ball(self, cylinder, hemi=False, rescale_val=1.0, pandalize=False, jacobian=False):
         index = None
@@ -824,7 +720,60 @@ class FluxCoordinateMapper(object):
         return new
 
     def map_rounded_2_max_entropy(self, rounded, vertices=None, tolerance=1e-10):
-        pass
+        """
+        Compute maximum entropy coordinates for point x in R^d.
+
+        The coordinates are defined by
+          λ_i(x) = exp(v_i·μ) / Z(μ)   with Z(μ) = Σ_j exp(v_j·μ),
+        where μ in R^d is chosen so that Σ_i λ_i(x) v_i = x.
+
+        This function solves f(μ) = Σ_i (exp(v_i·μ)/Z(μ)) v_i - x = 0 for μ.
+
+        Parameters:
+          x        : numpy array of shape (d,)
+          vertices : numpy array of shape (n, d)
+          tol      : tolerance for the root finder
+
+        Returns:
+          lambdas  : numpy array of shape (n,), the maximum entropy coordinates.
+        """
+        n, d = vertices.shape
+
+        def f(mu):
+            dot_products = vertices.dot(mu)  # shape (n,)
+            exp_dot = np.exp(dot_products)
+            Z = np.sum(exp_dot)
+            lambdas = exp_dot / Z  # shape (n,)
+            return np.dot(lambdas, vertices) - x  # shape (d,)
+
+        mu0 = np.zeros(d)
+        sol = root(f, mu0, tol=tol)
+        mu = sol.x
+        dot_products = vertices.dot(mu)
+        exp_dot = np.exp(dot_products)
+        Z = np.sum(exp_dot)
+        lambdas = exp_dot / Z
+        return lambdas
+
+    def barycentrics_from_simplex(self, x, simplex, vertices):
+        T = vertices[simplex]
+        A = (T[1:] - T[0]).T
+        b = x - T[0]
+        lambdas_simplex = np.linalg.solve(A, b)
+        lambdas_simplex = np.concatenate(([1 - np.sum(lambdas_simplex)], lambdas_simplex))
+        return lambdas_simplex, simplex
+
+    def delaunay_barycentrics(self, x, vertices):
+        tri = Delaunay(vertices)
+        simplex_index = tri.find_simplex(x)
+        if simplex_index == -1:
+            raise ValueError("x is not inside the convex hull")
+        simplex = tri.simplices[simplex_index]
+        lambdas_simplex, simplex = self.barycentrics_from_simplex(x, simplex, vertices)
+        full_lambdas = np.zeros(len(vertices))
+        for i, idx in enumerate(simplex):
+            full_lambdas[idx] = lambdas_simplex[i]
+        return full_lambdas
 
 
 def make_theta_polytope(fcm: FluxCoordinateMapper):
@@ -850,21 +799,27 @@ if __name__ == "__main__":
     from sbmfi.core.polytopia import sample_polytope
 
 
-    def log_prob_rev(self, z, context=None):
-        ball, J_bc = self._fcm.map_cylinder_2_ball(z, rescale_val=self._rescale, jacobian=True)
-        rounded, J_rb = self._fcm.map_ball_2_rounded(ball, jacobian=True)
-        J = self._la.tensormul_T(J_rb, self._la.transax(J_bc))
-        abs_dets = abs(self._la.det(J))
-
-    m,k = spiro(backend='torch')
-    fcm = FluxCoordinateMapper(m)
-    res = sample_polytope(fcm.sampler, n=50)
-    cyl_pol = fcm.map_rounded_2_net_theta(res['rounded'], coordinate_id='cylinder', pandalize=False)
-    cyl, J = fcm.Jacobian_cylinder_polar_cylinder(cyl_pol)
-    ball, J2 = fcm.Jacobian_ball_cylinder(cyl)
-    r1, J3 = fcm.Jacobian_rounded_ball(cyl)
-    ball, J = fcm.map_cylinder_2_ball(cyl_pol, jacobian=True)
-    rounded, J4 = fcm.map_ball_2_rounded(cyl, jacobian=True)
-
-    print(r1)
-    print(rounded)
+    # def log_prob_rev(self, z, context=None):
+    #     ball, J_bc = self._fcm.map_cylinder_2_ball(z, rescale_val=self._rescale, jacobian=True)
+    #     rounded, J_rb = self._fcm.map_ball_2_rounded(ball, jacobian=True)
+    #     J = self._la.tensormul_T(J_rb, self._la.transax(J_bc))
+    #     abs_dets = abs(self._la.det(J))
+    #
+    # m,k = spiro(backend='torch')
+    # fcm = FluxCoordinateMapper(m)
+    # res = sample_polytope(fcm.sampler, n=50)
+    # cyl_pol = fcm.map_rounded_2_net_theta(res['rounded'], coordinate_id='cylinder', pandalize=False)
+    # cyl, J = fcm.Jacobian_cylinder_polar_cylinder(cyl_pol)
+    # ball, J2 = fcm.Jacobian_ball_cylinder(cyl)
+    # r1, J3 = fcm.Jacobian_rounded_ball(cyl)
+    # ball, J = fcm.map_cylinder_2_ball(cyl_pol, jacobian=True)
+    # rounded, J4 = fcm.map_ball_2_rounded(cyl, jacobian=True)
+    # from torch.autograd.functional import jacobian
+    #
+    # jongehh = lambda x: fcm.map_ball_2_rounded(fcm.map_cylinder_2_ball(x)[None, :])
+    #
+    # jackie = jacobian(jongehh, flow_samples[0])
+    # jackie
+    #
+    # print(r1)
+    # print(rounded)

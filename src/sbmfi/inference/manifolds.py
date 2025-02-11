@@ -4,176 +4,172 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from flow_matching.utils.manifolds import Manifold
+import math
 
-###############################################################################
-#  Maximum-Entropy Polytope Manifold
-###############################################################################
 
-class MaxEntPolytopeManifold(Manifold):
-    """
-    A manifold representing a convex polytope via maximum entropy coordinates.
-
-    The polytope is defined as the convex hull of a set of vertices \(V \in \mathbb{R}^{m \times n}\):
-        \[
-            \mathcal{P} = \Big\{ x \in \mathbb{R}^n \;:\; x = \sum_{i=1}^m \lambda_i\, V_i,\; \lambda \in \Delta^{m-1} \Big\}.
-        \]
-
-    For a given point \(x\) (assumed to lie in the polytope), we define an approximate maximum
-    entropy coordinate mapping by
-        \[
-           \lambda_i(x) \approx \frac{\exp\Big(-\|x-V_i\|^2/\sigma\Big)}
-           {\sum_{j=1}^m \exp\Big(-\|x-V_j\|^2/\sigma\Big)}.
-        \]
-
-    The inverse mapping is given by
-        \[
-           x = \sum_{i=1}^m \lambda_i(x) \, V_i.
-        \]
-
-    In the space of maximum-entropy coordinates (which is the interior of the probability simplex),
-    a natural (Fisher–Rao) exponential map is given by mapping to the “natural parameters” via
-        \(\log\lambda\), adding a tangent update, and then mapping back via a softmax.
-
-    **Notes:**
-    - For expmap we assume that the provided tangent vector \(u\) (of shape \((B, m)\)) lies in the
-      tangent space of the simplex (i.e. it satisfies \(\sum_i u_i=0\) for each example).
-    - For simplicity, the `projx` method simply returns \(x\) (assuming that \(x\) is already in the polytope).
-    """
-
-    def __init__(self, vertices: Tensor, sigma: float = 1.0):
+class MaxEntManifold(Manifold):
+    def __init__(self, vertices: torch.Tensor, tol: float = 1e-8, max_iter: int = 100):
         """
         Args:
-            vertices (Tensor): A tensor of shape \((m, n)\) containing the vertices of the polytope.
-            sigma (float): Temperature parameter controlling the “sharpness” of the softmax.
+            vertices (Tensor): a tensor of shape (n, d) containing the vertices (e.g. for a hypercube).
+            tol (float): tolerance for the root solver.
+            max_iter (int): maximum number of iterations for LBFGS.
         """
-        super(MaxEntPolytopeManifold, self).__init__()
-        # Save the vertices; these define the polytope as conv(V).
-        self.register_buffer('V', vertices)  # shape (m, n)
-        self.sigma = sigma
+        super().__init__()
+        # Save vertices as a buffer so that they are moved to the proper device automatically.
+        self.register_buffer("vertices", vertices)
+        self.tol = tol
+        self.max_iter = max_iter
 
-    def maxent_coords(self, x: Tensor) -> Tensor:
-        """
-        Compute approximate maximum entropy coordinates for a batch of points.
+    def _solve_mu(self, x: torch.Tensor):
+        r"""Given a point (or batch of points) x, solve for the dual variable μ such that
+
+            f(μ) = \sum_i \lambda_i v_i - x = 0,
+
+        where
+            \lambda_i = exp(v_i \cdot μ) / \sum_j exp(v_j \cdot μ).
+
+        This is done by minimizing the objective
+            L(μ) = 0.5 * || (\sum_i \lambda_i v_i - x) ||^2.
 
         Args:
-            x (Tensor): Tensor of shape \((B, n)\) of points in the polytope.
+            x (Tensor): target point(s) on the manifold, shape (B,d)
 
         Returns:
-            Tensor: Tensor of shape \((B, m)\) with \(\lambda_i(x)\) approximated by
-            \(\text{softmax}_i\Big(-\|x-V_i\|^2/\sigma\Big)\).
+            mu (Tensor): the computed dual variable(s), shape (B,d)
+            lambdas (Tensor): the maximum entropy coordinates, shape (B,n)
         """
-        B, n = x.shape
-        m = self.V.shape[0]
-        # Expand dimensions to compute pairwise squared distances:
-        #   x_exp: (B, 1, n), V_exp: (1, m, n)
-        x_exp = x.unsqueeze(1)  # shape: (B, 1, n)
-        V_exp = self.V.unsqueeze(0)  # shape: (1, m, n)
-        diff = x_exp - V_exp  # shape: (B, m, n)
-        d2 = (diff ** 2).sum(dim=-1)  # shape: (B, m)
-        # Compute softmax of the negative distances (divided by sigma).
-        lambda_coords = F.softmax(-d2 / self.sigma, dim=-1)  # shape: (B, m)
-        return lambda_coords
+        B, d = x.shape
+        # Initialize μ with zeros; one per batch element.
+        mu = torch.zeros(B, d, device=x.device, dtype=x.dtype, requires_grad=True)
 
-    def inv_maxent(self, lambda_coords: Tensor) -> Tensor:
-        """
-        Map from maximum entropy coordinates back to the polytope.
+        optimizer = torch.optim.LBFGS(
+            [mu],
+            max_iter=self.max_iter,
+            tolerance_grad=self.tol,
+            tolerance_change=self.tol,
+            line_search_fn="strong_wolfe"
+        )
+
+        def closure():
+            optimizer.zero_grad()
+            # Compute dot products: (B, n)
+            dot = torch.matmul(mu, self.vertices.T)
+            exp_dot = torch.exp(dot)
+            # Compute partition function Z: (B,1)
+            Z = torch.sum(exp_dot, dim=1, keepdim=True)
+            # Compute lambdas: (B, n)
+            lambdas = exp_dot / Z
+            # Reconstruct x from lambdas: (B, d)
+            rec = torch.matmul(lambdas, self.vertices)
+            loss = 0.5 * torch.sum((rec - x) ** 2)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+
+        # with torch.no_grad():
+        dot = torch.matmul(mu, self.vertices.T)
+        exp_dot = torch.exp(dot)
+        Z = torch.sum(exp_dot, dim=1, keepdim=True)
+        lambdas = exp_dot / Z
+
+        # return mu.detach(), lambdas.detach()
+        return mu, lambdas
+
+    def max_entropy_coordinates(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Compute the maximum entropy (barycentric) coordinates for point(s) x.
 
         Args:
-            lambda_coords (Tensor): Tensor of shape \((B, m)\) with coordinates.
+            x (Tensor): target point(s) on the manifold, shape (B,d)
+
         Returns:
-            Tensor: Tensor of shape \((B, n)\) computed as \(x = \lambda\,V\).
+            Tensor: maximum entropy coordinates (lambdas), shape (B, n)
         """
-        return lambda_coords.matmul(self.V)  # (B, n)
+        _, lambdas = self._solve_mu(x)
+        return lambdas
 
-    def expmap(self, x: Tensor, u: Tensor) -> Tensor:
-        """
-        Exponential map on the manifold.
-
-        Interpreted in maximum entropy coordinates: given a base point \(x\) with
-        coordinates \(\lambda(x)\) and a tangent vector \(u\) in the natural parameter space,
-        we define
-            \[
-            \lambda_{\text{new}} = \operatorname{softmax}\big( \log \lambda(x) + u\big),
-            \]
-        and then map back by
-            \[
-            x_{\text{new}} = \sum_i [\lambda_{\text{new}}]_i\, V_i.
-            \]
+    def reconstruct(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Reconstruct the point from its maximum entropy coordinates.
 
         Args:
-            x (Tensor): Tensor of shape \((B, n)\), base point(s) in the polytope.
-            u (Tensor): Tensor of shape \((B, m)\) in the tangent space (satisfying \(\sum_i u_i = 0\)).
+            x (Tensor): target point(s) on the manifold, shape (B,d)
+
         Returns:
-            Tensor: Tensor of shape \((B, n)\), the resulting point on the manifold.
+            Tensor: reconstructed point(s), shape (B,d)
         """
-        # Convert x to maximum entropy coordinates.
-        lambda_x = self.maxent_coords(x)  # shape: (B, m)
-        # Map to natural parameter space.
-        log_lambda = torch.log(lambda_x + 1e-12)
-        # Add the tangent vector.
-        log_lambda_new = log_lambda + u
-        # Map back to the simplex.
-        lambda_new = F.softmax(log_lambda_new, dim=-1)
-        # Recover the new point.
-        x_new = self.inv_maxent(lambda_new)
-        return self.projx(x_new)
+        lambdas = self.max_entropy_coordinates(x)
+        return torch.matmul(lambdas, self.vertices)
 
-    def logmap(self, x: Tensor, y: Tensor) -> Tensor:
-        """
-        Logarithmic map on the manifold.
+    def expmap(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        r"""Computes the exponential map on the MaxEntManifold.
 
-        Computes a tangent vector \(u\) (in the natural parameter space) at \(x\) that “points toward” \(y\).
-        In our approximation, we define
-            \[
-            u = \log \lambda(y) - \log \lambda(x),
-            \]
-        and then subtract the mean so that \(u\) lies in the tangent space of the simplex.
+        The idea is to compute the dual coordinate μ corresponding to x,
+        add the tangent vector u, and then map back to the manifold.
 
         Args:
-            x (Tensor): Tensor of shape \((B, n)\), base point.
-            y (Tensor): Tensor of shape \((B, n)\), target point.
+            x (Tensor): base point(s) on the manifold, shape (B,d)
+            u (Tensor): tangent vector(s) at x, shape (B,d)
+
         Returns:
-            Tensor: Tensor of shape \((B, m)\), the tangent vector in the natural parameter space.
+            Tensor: the point(s) expₓ(u) on the manifold, shape (B,d)
         """
-        lambda_x = self.maxent_coords(x)
-        lambda_y = self.maxent_coords(y)
-        log_lambda_x = torch.log(lambda_x + 1e-12)
-        log_lambda_y = torch.log(lambda_y + 1e-12)
-        u = log_lambda_y - log_lambda_x
-        # Ensure the result lies in the tangent space (i.e. sum(u) = 0).
-        u = u - u.mean(dim=-1, keepdim=True)
-        return u
+        mu_x, _ = self._solve_mu(x)  # Get the dual coordinate for x.
+        mu_new = mu_x + u  # Move in the dual space.
+        dot = torch.matmul(mu_new, self.vertices.T)
+        exp_dot = torch.exp(dot)
+        Z = torch.sum(exp_dot, dim=1, keepdim=True)
+        lambdas = exp_dot / Z
+        x_new = torch.matmul(lambdas, self.vertices)
+        return x_new
 
-    def projx(self, x: Tensor) -> Tensor:
-        """
-        Project a point \(x\) onto the polytope.
+    def logmap(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        r"""Computes the logarithmic map on the MaxEntManifold.
 
-        Here we assume that \(x\) is already (approximately) in the convex hull of \(V\).
-        A more robust implementation might solve a quadratic program to find the closest point
-        in conv(\(V\)) to \(x\), but for simplicity we return \(x\) unchanged.
+        We define the log map as the difference of the dual coordinates:
+            logₓ(y) = μ_y - μₓ.
 
         Args:
-            x (Tensor): Tensor of shape \((B, n)\).
+            x (Tensor): base point(s) on the manifold, shape (B,d)
+            y (Tensor): target point(s) on the manifold, shape (B,d)
+
         Returns:
-            Tensor: Tensor of shape \((B, n)\).
+            Tensor: tangent vector(s) at x, shape (B,d)
         """
+        mu_x, _ = self._solve_mu(x)
+        mu_y, _ = self._solve_mu(y)
+        return mu_y - mu_x
+
+    def projx(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Projects an arbitrary point x to the manifold.
+
+        In this simple implementation we assume that x is already in the interior
+        of the convex hull defined by the vertices.
+
+        Args:
+            x (Tensor): point(s) to be projected, shape (B,d)
+
+        Returns:
+            Tensor: projected point(s), shape (B,d)
+        """
+        # For a general polytope one might solve a quadratic program.
+        # Here we assume that x is already valid.
         return x
 
-    def proju(self, x: Tensor, u: Tensor) -> Tensor:
-        """
-        Project a tangent vector \(u\) onto the tangent space at \(x\).
+    def proju(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        r"""Projects an arbitrary tangent vector u at x onto the tangent space.
 
-        In the space of maximum entropy coordinates (i.e. the interior of the probability simplex),
-        the tangent space is the hyperplane \(\{u \in \mathbb{R}^m : \sum_i u_i = 0\}\). We ensure this by
-        subtracting the mean.
+        For points in the interior of the convex hull, the tangent space is all of ℝᵈ.
 
         Args:
-            x (Tensor): Tensor of shape \((B, n)\) (unused here).
-            u (Tensor): Tensor of shape \((B, m)\), the candidate tangent vector.
+            x (Tensor): base point(s) on the manifold, shape (B,d)
+            u (Tensor): vector(s) to be projected, shape (B,d)
+
         Returns:
-            Tensor: Tensor of shape \((B, m)\), projected onto the tangent space.
+            Tensor: projected tangent vector(s), shape (B,d)
         """
-        return u - u.mean(dim=-1, keepdim=True)
+        # In the interior, the tangent space is all of ℝᵈ.
+        return u
 
 
 class BallManifold(Manifold):
@@ -243,17 +239,6 @@ class BallManifold(Manifold):
         return u
 
 
-import abc
-import math
-import torch
-import torch.nn as nn
-from torch import Tensor
-
-
-
-########################################################
-#  Poincaré Ball Manifold
-########################################################
 class PoincareBallManifold(nn.Module):
     """
     Implements operations on the n-dimensional Poincaré ball model
@@ -384,22 +369,6 @@ class PoincareBallManifold(nn.Module):
         Project points x onto the open Poincaré ball of radius 1/sqrt(c).
         By default, we ensure the norm < 1/sqrt(c).
         """
-        # Radius = 1 / sqrt(c)
-        maxnorm = 1.0 / math.sqrt(self.c)
-        norm_x = torch.norm(x, p=2, dim=-1, keepdim=True)
-        cond = norm_x > maxnorm
-        # Scale points that are outside the ball
-        safe_x = x.clone()
-        safe_x[cond] = (
-                               safe_x[cond] / norm_x[cond]
-                       ) * (maxnorm - self.eps)
-        return safe_x
-
-    def projx(self, x: Tensor) -> Tensor:
-        """
-        Project points x onto the open Poincaré ball of radius 1/sqrt(c).
-        By default, we ensure the norm < 1/sqrt(c).
-        """
         maxnorm = 1.0 / math.sqrt(self.c)
         norm_x = torch.norm(x, p=2, dim=-1, keepdim=True)
         # cond has shape [B, 1]. We want [B] for row-wise indexing in x.
@@ -424,6 +393,134 @@ class PoincareBallManifold(nn.Module):
         # you could also multiply by the conformal factor if needed for
         # certain gradient adjustments. For now, do identity.
         return u
+
+
+class ConvexPolytopeManifold(nn.Module):
+    r"""
+    A manifold defined by an arbitrary convex polytope
+
+        P = { x in R^n : A x <= b }.
+
+    Since P may not be smooth at the boundary, we define the following operations
+    using the Euclidean metric with projections:
+
+      - Exponential map:  exp_x(u) = projx(x + u)
+      - Logarithmic map:  log_x(y) = y - x
+
+    Both the point projection and tangent-vector projection are implemented via solving
+    a quadratic program in dual form using batched projected gradient descent.
+    """
+
+    def __init__(
+            self,
+            A: Tensor,
+            b: Tensor,
+            proj_iters: int = 50,
+            proju_iters: int = 10,
+            tol: float = 1e-5,
+            proj_step: float = 1e-2,
+            proju_step: float = 1e-2,
+    ):
+        """
+        Args:
+            A (Tensor): Constraint matrix of shape [m, n].
+            b (Tensor): Constraint right-hand side, shape [m].
+            proj_iters (int): Number of iterations for the point projection.
+            proju_iters (int): Number of iterations for the tangent projection.
+            tol (float): Tolerance for determining constraint activeness.
+            proj_step (float): Step size for dual updates in projx.
+            proju_step (float): Step size for dual updates in proju.
+        """
+        super().__init__()
+        # Store constraints as buffers
+        self.register_buffer("A", A)  # shape [m, n]
+        self.register_buffer("b", b)  # shape [m]
+        self.proj_iters = proj_iters
+        self.proju_iters = proju_iters
+        self.tol = tol
+        self.proj_step = proj_step
+        self.proju_step = proju_step
+        # Precompute Q = A A^T (which appears in both dual problems)
+        Q = A @ A.t()  # shape [m, m]
+        self.register_buffer("Q", Q)
+
+    def expmap(self, x: Tensor, u: Tensor) -> Tensor:
+        r"""Exponential map defined by
+            exp_x(u) = projx(x + u)
+        """
+        return self.projx(x + u)
+
+    def logmap(self, x: Tensor, y: Tensor) -> Tensor:
+        r"""Logarithmic map (using Euclidean difference):
+            log_x(y) = y - x.
+        """
+        return y - x
+
+    def projx(self, x: Tensor) -> Tensor:
+        r"""
+        Projects a batch of points x (shape [B, n]) onto the convex polytope
+
+            P = { x in R^n : A x <= b }.
+
+        This is achieved by solving the dual quadratic program
+
+            min_{λ ≥ 0}  ½ λᵀ Q λ - λᵀ (A x - b)
+        with Q = A Aᵀ. Once λ is computed (approximately), the projection is given by
+
+            projx(x) = x - Aᵀ λ.
+        """
+        B, n = x.shape
+        m = self.A.shape[0]
+        # Compute c = A x - b for each sample.
+        # x: [B, n], A: [m, n]  -->  x @ A.T: [B, m]
+        c = x @ self.A.t() - self.b.unsqueeze(0)  # shape: [B, m]
+        # Initialize dual variables λ as zeros.
+        lam = torch.zeros(B, m, device=x.device, dtype=x.dtype)
+        # Batched projected gradient descent on the dual problem.
+        for _ in range(self.proj_iters):
+            # Gradient: grad = λ @ Q - c.
+            grad = lam @ self.Q - c  # shape: [B, m]
+            lam = torch.clamp(lam - self.proj_step * grad, min=0.0)
+        # Recover the projected point: z = x - Aᵀ λ.
+        z = x - lam @ self.A  # shape: [B, n]
+        return z
+
+    def proju(self, x: Tensor, u: Tensor) -> Tensor:
+        r"""
+        Projects a tangent vector u at x onto the tangent cone of P at x.
+
+        For points on the boundary, the feasible directions v must satisfy
+            A_i v ≤ 0   for every active constraint (i.e. when A_i x ≥ b_i - tol).
+
+        We solve the following dual problem for each sample:
+
+            min_{λ ≥ 0}  ½ λᵀ Q λ - λᵀ ( (u @ Aᵀ) masked by activeness )
+
+        and then set:
+
+            proju(x, u) = u - Aᵀ λ.
+
+        The “active” constraints are determined by checking which rows of A satisfy
+            A x ≥ b - tol.
+        """
+        B, n = x.shape
+        m = self.A.shape[0]
+        # Compute A x for each sample.
+        Ax = x @ self.A.t()  # shape: [B, m]
+        # Determine activeness: active if A_i x >= b_i - tol.
+        active = (Ax >= (self.b.unsqueeze(0) - self.tol)).to(u.dtype)  # shape: [B, m]
+        # For each sample, form the masked right-hand side: (u @ A.T) elementwise multiplied by active.
+        masked = (u @ self.A.t()) * active  # shape: [B, m]
+        # Initialize dual variables for the tangent projection.
+        lam = torch.zeros(B, m, device=x.device, dtype=u.dtype)
+        for _ in range(self.proju_iters):
+            grad = lam @ self.Q - masked  # shape: [B, m]
+            lam = torch.clamp(lam - self.proju_step * grad, min=0.0)
+            # Ensure that λ remains zero for constraints that are inactive.
+            lam = lam * active
+        # Compute the projected tangent vector.
+        u_proj = u - lam @ self.A  # shape: [B, n]
+        return u_proj
 
 
 if __name__ == "__main__":

@@ -187,6 +187,58 @@ def train_vicreg(
         return vicreg, losses
 
 
+
+def train_rev_kld(
+    flow,
+    optimizer,
+    losses,
+    steps=0,
+    num_samples=1024,
+    scheduler=None,
+    schedule_stepdate=20,
+    anneal_iter = 400000,
+):
+    anneal_iter /= num_samples
+    pbar = tqdm.tqdm(total=1000, ncols=120, position=0)
+    try:
+        while True:
+            # loss = prior_flow.reverse_kld(num_samples=num_samples, beta=np.min([1., 0.001 + steps / anneal_iter]))
+            loss = prior_flow.reverse_kld(num_samples=num_samples, beta=1)
+            # loss = prior_flow.reverse_alpha_div(num_samples=num_samples, alpha=0.001, dreg=False)
+            optimizer.zero_grad()
+            if ~(torch.isnan(loss) | torch.isinf(loss)):
+                loss.backward()
+                optimizer.step()
+            else:
+                raise ValueError(f'loss: {loss}')
+            np_loss = get_val(loss)
+            losses.append(float(np_loss))
+            pbar.update()
+            pbar.set_postfix(loss=np_loss.round(4))
+            if (scheduler is not None) and (steps%schedule_stepdate == 0):
+                scheduler.step()
+            steps += 1
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        raise e
+    finally:
+        pbar.close()
+    return flow, losses, steps
+
+def print_grad_fn(fn, indent=0, visited=set(), max_depth=50):
+    # print_grad_fn(loss.grad_fn)
+    if fn in visited or indent > max_depth:
+        return
+    visited.add(fn)
+    print(" " * indent + str(fn))
+    for next_fn, _ in fn.next_functions:
+        if next_fn is not None:
+            print_grad_fn(next_fn, indent + 4, visited, max_depth)
+
+
+
+
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     import pandas as pd
