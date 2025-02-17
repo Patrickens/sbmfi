@@ -21,62 +21,6 @@ class MaxEntManifold(Manifold):
         self.tol = tol
         self.max_iter = max_iter
 
-    def _solve_mu(self, x: torch.Tensor):
-        r"""Given a point (or batch of points) x, solve for the dual variable μ such that
-
-            f(μ) = \sum_i \lambda_i v_i - x = 0,
-
-        where
-            \lambda_i = exp(v_i \cdot μ) / \sum_j exp(v_j \cdot μ).
-
-        This is done by minimizing the objective
-            L(μ) = 0.5 * || (\sum_i \lambda_i v_i - x) ||^2.
-
-        Args:
-            x (Tensor): target point(s) on the manifold, shape (B,d)
-
-        Returns:
-            mu (Tensor): the computed dual variable(s), shape (B,d)
-            lambdas (Tensor): the maximum entropy coordinates, shape (B,n)
-        """
-        B, d = x.shape
-        # Initialize μ with zeros; one per batch element.
-        mu = torch.zeros(B, d, device=x.device, dtype=x.dtype, requires_grad=True)
-
-        optimizer = torch.optim.LBFGS(
-            [mu],
-            max_iter=self.max_iter,
-            tolerance_grad=self.tol,
-            tolerance_change=self.tol,
-            line_search_fn="strong_wolfe"
-        )
-
-        def closure():
-            optimizer.zero_grad()
-            # Compute dot products: (B, n)
-            dot = torch.matmul(mu, self.vertices.T)
-            exp_dot = torch.exp(dot)
-            # Compute partition function Z: (B,1)
-            Z = torch.sum(exp_dot, dim=1, keepdim=True)
-            # Compute lambdas: (B, n)
-            lambdas = exp_dot / Z
-            # Reconstruct x from lambdas: (B, d)
-            rec = torch.matmul(lambdas, self.vertices)
-            loss = 0.5 * torch.sum((rec - x) ** 2)
-            loss.backward()
-            return loss
-
-        optimizer.step(closure)
-
-        # with torch.no_grad():
-        dot = torch.matmul(mu, self.vertices.T)
-        exp_dot = torch.exp(dot)
-        Z = torch.sum(exp_dot, dim=1, keepdim=True)
-        lambdas = exp_dot / Z
-
-        # return mu.detach(), lambdas.detach()
-        return mu, lambdas
-
     def max_entropy_coordinates(self, x: torch.Tensor) -> torch.Tensor:
         r"""Compute the maximum entropy (barycentric) coordinates for point(s) x.
 
@@ -171,6 +115,46 @@ class MaxEntManifold(Manifold):
         # In the interior, the tangent space is all of ℝᵈ.
         return u
 
+    def _solve_mu(self, x: torch.Tensor):
+        xdim = x.dim()
+        if xdim == 1:
+            x = x[None, :]
+        B, d = x.shape
+        mu = torch.zeros(B, d, device=x.device, dtype=x.dtype, requires_grad=True)
+
+        def loss_fn(mu):
+            dot = torch.matmul(mu, self.vertices.T)
+            exp_dot = torch.exp(dot)
+            Z = torch.sum(exp_dot, dim=1, keepdim=True)
+            lambdas = exp_dot / Z
+            rec = torch.matmul(lambdas, self.vertices)
+            return 0.5 * torch.sum((rec - x) ** 2)  # Sum over batch to return a scalar
+
+        grad_fn = torch.func.grad_and_value(loss_fn)
+
+        optimizer = torch.optim.LBFGS(
+            [mu],
+            max_iter=self.max_iter,
+            tolerance_grad=self.tol,
+            tolerance_change=self.tol,
+            line_search_fn="strong_wolfe"
+        )
+
+        def closure():
+            optimizer.zero_grad()
+            grad, loss = grad_fn(mu)
+            mu.grad = grad.view_as(mu)  # Ensure correct shape
+            return loss.sum()  # Loss is already a scalar
+
+        optimizer.step(closure)
+
+        dot = torch.matmul(mu, self.vertices.T)
+        exp_dot = torch.exp(dot)
+        Z = torch.sum(exp_dot, dim=1, keepdim=True)
+        lambdas = exp_dot / Z
+
+        return mu, lambdas
+
 
 class BallManifold(Manifold):
     """
@@ -239,7 +223,7 @@ class BallManifold(Manifold):
         return u
 
 
-class PoincareBallManifold(nn.Module):
+class PoincareBallManifold(Manifold):
     """
     Implements operations on the n-dimensional Poincaré ball model
     of hyperbolic space with negative curvature -c.
@@ -395,133 +379,328 @@ class PoincareBallManifold(nn.Module):
         return u
 
 
-class ConvexPolytopeManifold(nn.Module):
+class ConvexPolytopeManifold(Manifold):
     r"""
-    A manifold defined by an arbitrary convex polytope
+    A manifold defined by the convex polytope
 
-        P = { x in R^n : A x <= b }.
+        P = { x in ℝⁿ : A x ≤ b }.
 
-    Since P may not be smooth at the boundary, we define the following operations
-    using the Euclidean metric with projections:
+    The following operations are defined using Euclidean projections:
+      - Exponential map: expₓ(u) = projₓ(x + u)
+      - Logarithmic map: logₓ(y) = y - x
+      - Tangent projection: proju(x, u) projects u onto the tangent cone at x
 
-      - Exponential map:  exp_x(u) = projx(x + u)
-      - Logarithmic map:  log_x(y) = y - x
-
-    Both the point projection and tangent-vector projection are implemented via solving
-    a quadratic program in dual form using batched projected gradient descent.
+    The projections are computed by solving a dual quadratic program via
+    iterative gradient descent updates that continue until convergence.
     """
 
-    def __init__(
-            self,
-            A: Tensor,
-            b: Tensor,
-            proj_iters: int = 50,
-            proju_iters: int = 10,
-            tol: float = 1e-5,
-            proj_step: float = 1e-2,
-            proju_step: float = 1e-2,
-    ):
+    def __init__(self, A: torch.Tensor, b: torch.Tensor,
+                 proj_max_iters: int = 50, proj_step: float = 1e-2,
+                 proju_max_iters: int = 10, proju_step: float = 1e-2,
+                 tol: float = 1e-5):
         """
         Args:
             A (Tensor): Constraint matrix of shape [m, n].
             b (Tensor): Constraint right-hand side, shape [m].
-            proj_iters (int): Number of iterations for the point projection.
-            proju_iters (int): Number of iterations for the tangent projection.
-            tol (float): Tolerance for determining constraint activeness.
-            proj_step (float): Step size for dual updates in projx.
-            proju_step (float): Step size for dual updates in proju.
+            proj_max_iters (int): Maximum iterations for point projection.
+            proj_step (float): Step size for point projection dual updates.
+            proju_max_iters (int): Maximum iterations for tangent projection.
+            proju_step (float): Step size for tangent projection dual updates.
+            tol (float): Convergence tolerance for the dual updates.
         """
         super().__init__()
-        # Store constraints as buffers
-        self.register_buffer("A", A)  # shape [m, n]
-        self.register_buffer("b", b)  # shape [m]
-        self.proj_iters = proj_iters
-        self.proju_iters = proju_iters
-        self.tol = tol
+        self.register_buffer("A", A)  # [m, n]
+        self.register_buffer("b", b)  # [m]
+        self.proj_max_iters = proj_max_iters
         self.proj_step = proj_step
+        self.proju_max_iters = proju_max_iters
         self.proju_step = proju_step
-        # Precompute Q = A A^T (which appears in both dual problems)
-        Q = A @ A.t()  # shape [m, m]
+        self.tol = tol
+        # Precompute Q = A Aᵀ (used in both dual problems).
+        Q = A @ A.t()  # [m, m]
         self.register_buffer("Q", Q)
 
-    def expmap(self, x: Tensor, u: Tensor) -> Tensor:
-        r"""Exponential map defined by
-            exp_x(u) = projx(x + u)
-        """
-        return self.projx(x + u)
-
-    def logmap(self, x: Tensor, y: Tensor) -> Tensor:
-        r"""Logarithmic map (using Euclidean difference):
-            log_x(y) = y - x.
-        """
-        return y - x
-
-    def projx(self, x: Tensor) -> Tensor:
+    def projx(self, x: torch.Tensor) -> torch.Tensor:
         r"""
         Projects a batch of points x (shape [B, n]) onto the convex polytope
 
-            P = { x in R^n : A x <= b }.
+            P = { x in ℝⁿ : A x ≤ b }.
 
         This is achieved by solving the dual quadratic program
 
-            min_{λ ≥ 0}  ½ λᵀ Q λ - λᵀ (A x - b)
-        with Q = A Aᵀ. Once λ is computed (approximately), the projection is given by
+            min_{λ ≥ 0} ½ λᵀ Q λ - λᵀ (A x - b)
 
-            projx(x) = x - Aᵀ λ.
+        via iterative gradient descent on the dual variable λ. The iteration stops
+        when the maximum change in λ falls below tol or when proj_max_iters is reached.
+        The projection is then recovered by
+
+            projₓ(x) = x - Aᵀ λ.
         """
         B, n = x.shape
         m = self.A.shape[0]
         # Compute c = A x - b for each sample.
-        # x: [B, n], A: [m, n]  -->  x @ A.T: [B, m]
-        c = x @ self.A.t() - self.b.unsqueeze(0)  # shape: [B, m]
-        # Initialize dual variables λ as zeros.
+        c = x @ self.A.t() - self.b.unsqueeze(0)  # [B, m]
         lam = torch.zeros(B, m, device=x.device, dtype=x.dtype)
-        # Batched projected gradient descent on the dual problem.
-        for _ in range(self.proj_iters):
-            # Gradient: grad = λ @ Q - c.
-            grad = lam @ self.Q - c  # shape: [B, m]
-            lam = torch.clamp(lam - self.proj_step * grad, min=0.0)
-        # Recover the projected point: z = x - Aᵀ λ.
-        z = x - lam @ self.A  # shape: [B, n]
-        return z
+        iteration = 0
+        while True:
+            grad = lam @ self.Q - c  # [B, m]
+            lam_new = torch.clamp(lam - self.proj_step * grad, min=0.0)
+            # Check convergence: if maximum change is below tol.
+            if torch.max(torch.abs(lam_new - lam)) < self.tol:
+                lam = lam_new
+                break
+            lam = lam_new
+            iteration += 1
+            if iteration >= self.proj_max_iters:
+                break
+        x_proj = x - lam @ self.A
+        return x_proj
 
-    def proju(self, x: Tensor, u: Tensor) -> Tensor:
+    def proju(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
         r"""
         Projects a tangent vector u at x onto the tangent cone of P at x.
 
-        For points on the boundary, the feasible directions v must satisfy
-            A_i v ≤ 0   for every active constraint (i.e. when A_i x ≥ b_i - tol).
+        For x on the boundary (i.e. where A x is nearly b), define the active
+        constraints as those for which
 
-        We solve the following dual problem for each sample:
+            A_i x ≥ b_i - tol.
 
-            min_{λ ≥ 0}  ½ λᵀ Q λ - λᵀ ( (u @ Aᵀ) masked by activeness )
+        For each sample, we solve the dual problem
 
-        and then set:
+            min_{λ ≥ 0} ½ λᵀ Q λ - λᵀ ( (u @ Aᵀ) ⊙ active )
+
+        and then recover the projected tangent vector by
 
             proju(x, u) = u - Aᵀ λ.
-
-        The “active” constraints are determined by checking which rows of A satisfy
-            A x ≥ b - tol.
+        The iterative updates stop when the maximum change in λ is below tol or when
+        proju_max_iters is reached.
         """
         B, n = x.shape
         m = self.A.shape[0]
-        # Compute A x for each sample.
-        Ax = x @ self.A.t()  # shape: [B, m]
-        # Determine activeness: active if A_i x >= b_i - tol.
-        active = (Ax >= (self.b.unsqueeze(0) - self.tol)).to(u.dtype)  # shape: [B, m]
-        # For each sample, form the masked right-hand side: (u @ A.T) elementwise multiplied by active.
-        masked = (u @ self.A.t()) * active  # shape: [B, m]
-        # Initialize dual variables for the tangent projection.
+        Ax = x @ self.A.t()  # [B, m]
+        active = (Ax >= (self.b.unsqueeze(0) - self.tol)).to(u.dtype)  # [B, m]
+        masked = (u @ self.A.t()) * active  # [B, m]
         lam = torch.zeros(B, m, device=x.device, dtype=u.dtype)
-        for _ in range(self.proju_iters):
-            grad = lam @ self.Q - masked  # shape: [B, m]
-            lam = torch.clamp(lam - self.proju_step * grad, min=0.0)
-            # Ensure that λ remains zero for constraints that are inactive.
-            lam = lam * active
-        # Compute the projected tangent vector.
-        u_proj = u - lam @ self.A  # shape: [B, n]
+        iteration = 0
+        while True:
+            grad = lam @ self.Q - masked  # [B, m]
+            lam_new = torch.clamp(lam - self.proju_step * grad, min=0.0)
+            lam_new = lam_new * active  # ensure λ=0 for inactive constraints
+            if torch.max(torch.abs(lam_new - lam)) < self.tol:
+                lam = lam_new
+                break
+            lam = lam_new
+            iteration += 1
+            if iteration >= self.proju_max_iters:
+                break
+        u_proj = u - lam @ self.A
         return u_proj
+
+    def expmap(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        r"""
+        Exponential map defined by:
+
+            expₓ(u) = projₓ(x + u)
+        """
+        return self.projx(x + u)
+
+    def logmap(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        r"""
+        Logarithmic map defined by:
+
+            logₓ(y) = y - x.
+        """
+        return y - x
+
+
+def helmert_matrix(n: int) -> torch.Tensor:
+    """
+    Computes a (n-1) x n Helmert submatrix whose rows form an orthonormal basis
+    for the subspace of R^n orthogonal to the vector of ones.
+    """
+    H = torch.zeros(n - 1, n)
+    for i in range(1, n):
+        H[i - 1, :i] = 1.0 / i
+        H[i - 1, i] = -1.0
+    # Normalize each row so that they become unit vectors.
+    H = H / H.norm(dim=1, keepdim=True)
+    return H
+
+
+class Simplex(Manifold):
+    r"""
+    A manifold representing the interior of the probability simplex endowed with Aitchison geometry.
+
+    In Aitchison geometry, points are compositions (strictly positive vectors summing to one)
+    and the natural geometry is induced via the isometric log-ratio (ilr) transform.
+
+    Given an orthonormal basis \(V\) (of shape \((n-1)\times n\))—here constructed via the Helmert
+    submatrix—the ilr transform and its inverse are given by:
+
+    .. math::
+
+        \operatorname{ilr}(x) &= \log(x)\,V^T, \\
+        \operatorname{ilr}^{-1}(z) &= \operatorname{C}\Big(\exp\big(V\,z\big)\Big),
+
+    where \(\operatorname{C}(\cdot)\) denotes closure (normalization to sum 1).
+
+    The tangent space at \(x\) is isometrically identified with \(\mathbb{R}^{n-1}\) via the differential
+    of the ilr transform:
+
+    .. math::
+
+        d\,\operatorname{ilr}_x(u) = V^T\Big(\frac{u}{x}\Big).
+
+    Its inverse is given by:
+
+    .. math::
+
+        u = x\odot \Big(V\,v\Big), \quad\text{if } v \text{ is the ilr-coordinate of } u.
+    """
+
+    def __init__(self, dim: int):
+        """
+        Args:
+            dim (int): Number of parts of the composition (ambient dimension of the simplex).
+        """
+        super().__init__()
+        self.dim = dim
+        # Compute and register the Helmert submatrix as the orthonormal basis V.
+        # V has shape (dim-1, dim).
+        self.register_buffer('V', helmert_matrix(dim))
+
+    def closure(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Applies the closure operator to ensure the vector is a composition:
+        all entries are strictly positive and sum to 1.
+        """
+        x = torch.clamp(x, min=1e-6)  # avoid zeros
+        return x / x.sum(dim=-1, keepdim=True)
+
+    def ilr(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the isometric log-ratio transform of a composition.
+
+        Args:
+            x (Tensor): Composition (strictly positive, summing to one) of shape (..., dim)
+        Returns:
+            Tensor: ilr coordinates of shape (..., dim-1)
+        """
+        return torch.matmul(torch.log(x), self.V.t())
+
+    def ilr_inv(self, z: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the inverse isometric log-ratio transform.
+
+        Args:
+            z (Tensor): ilr coordinates of shape (..., dim-1)
+        Returns:
+            Tensor: Composition in the simplex (shape (..., dim))
+        """
+        x = torch.exp(torch.matmul(z, self.V))
+        return self.closure(x)
+
+    def projx(self, x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Projects an arbitrary vector onto the simplex.
+
+        Here we use the closure operator to map any (nonnegative) vector
+        to a valid composition.
+
+        Args:
+            x (Tensor): input tensor of shape (..., dim)
+        Returns:
+            Tensor: composition (strictly positive entries summing to 1)
+        """
+        return self.closure(x)
+
+    def proju(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        r"""
+        Projects an arbitrary ambient vector u onto the tangent space at x in Aitchison geometry.
+
+        The projection is performed via the differential of the ilr transform. That is,
+        we first compute the ilr representation of u:
+
+        .. math::
+
+            v = V^T\Big(\frac{u}{x}\Big),
+
+        and then map it back to obtain the tangent vector in the original space:
+
+        .. math::
+
+            u_{\text{proj}} = x \odot \Big(V\,v\Big).
+
+        Args:
+            x (Tensor): Base point in the simplex (composition), shape (..., dim)
+            u (Tensor): Ambient vector, shape (..., dim)
+        Returns:
+            Tensor: Tangent vector at x (in the original space), shape (..., dim)
+        """
+        # Convert u into ilr coordinates.
+        v = torch.matmul(u / x, self.V.t())
+        # Map back into the tangent space at x.
+        u_proj = x * torch.matmul(v, self.V)
+        return u_proj
+
+    def expmap(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        r"""
+        Exponential map in Aitchison geometry.
+
+        Given a base point x and a tangent vector u (both in the original space),
+        we compute their ilr representations, perform Euclidean addition in the ilr space,
+        and then map back via the inverse ilr transform.
+
+        In formulas:
+
+        .. math::
+
+            z &= \operatorname{ilr}(x) = \log(x)\,V^T, \\
+            v &= V^T\Big(\frac{u}{x}\Big), \\
+            z_{\text{new}} &= z + v, \\
+            x_{\text{new}} &= \operatorname{ilr}^{-1}(z_{\text{new}}) = \operatorname{C}\Big(\exp\big(V\,z_{\text{new}}\big)\Big).
+
+        Args:
+            x (Tensor): Base point in the simplex, shape (..., dim)
+            u (Tensor): Tangent vector at x, shape (..., dim)
+        Returns:
+            Tensor: New point on the simplex.
+        """
+        z = self.ilr(x)
+        v = torch.matmul(u / x, self.V.t())
+        z_new = z + v
+        return self.ilr_inv(z_new)
+
+    def logmap(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        r"""
+        Logarithmic map in Aitchison geometry.
+
+        Computes the tangent vector at x that “points toward” y. In ilr coordinates,
+        this corresponds to the difference:
+
+        .. math::
+
+            v = \operatorname{ilr}(y) - \operatorname{ilr}(x),
+
+        which is then mapped back to the original space via the inverse differential:
+
+        .. math::
+
+            u = x \odot \Big(V\,v\Big).
+
+        Args:
+            x (Tensor): Base point in the simplex, shape (..., dim)
+            y (Tensor): Target point in the simplex, shape (..., dim)
+        Returns:
+            Tensor: Tangent vector at x, shape (..., dim)
+        """
+        z_x = self.ilr(x)
+        z_y = self.ilr(y)
+        v = z_y - z_x
+        u = x * torch.matmul(v, self.V)
+        return u
 
 
 if __name__ == "__main__":
-    pass
+    from flow_matching.path import GeodesicProbPath,  CondOTProbPath
+    from flow_matching.solver import ODESolver

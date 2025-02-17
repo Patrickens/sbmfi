@@ -48,7 +48,9 @@ def plot_dataframes(
         samples_fill_color='#e02450',
         figsize=(10, 8),
         show_legend=True,
-        legend_loc='best'
+        legend_loc='best',
+        s_points=25,
+        points_color='#C41E3A',
 ):
     """
     Plots:
@@ -144,7 +146,7 @@ def plot_dataframes(
     if points is not None:
         extra_points = points[[x_col, y_col]].dropna().values
         ax.scatter(extra_points[:, 0], extra_points[:, 1],
-                   color='green', s=40, marker='o', label=label4)
+                   color=points_color, s=s_points, marker='o', label=label4)
 
     # Finalize the plot: set axes labels, tick parameters, and grid.
     ax.set_xlabel(x_label, fontsize=font_dict.get('xlabel', 14))

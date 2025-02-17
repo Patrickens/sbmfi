@@ -14,6 +14,7 @@ from sbmfi.core.polytopia import (
     PolytopeSamplingModel,
     sample_polytope,
     compute_volume,
+    get_rounded_polytope,
 )
 from sbmfi.core.coordinater import FluxCoordinateMapper, make_theta_polytope
 from typing import Iterable, Union, List, Dict
@@ -237,18 +238,18 @@ class BaseRoundedPrior(_BasePrior):
     # NB event_dim=1 means that the right-most dimension defines an event!
     @constraints.dependent_property(is_discrete=False, event_dim=1)
     def support(self):
-        supp = _CannonicalPolytopeSupport(polytope=self._fcm._sampler._F_round)
+        supp = _CannonicalPolytopeSupport(polytope=get_rounded_polytope(self._fcm.sampler))
         # supp.to(dtype=torch.float32)  # TODO maybe pass dtype as a kwarg or maybe always enforce float32
         return supp
 
-    def rsample(self, sample_shape: _size = torch.Size(), density: torch.distributions.Distribution=None, n_cdf: int = 5) -> torch.Tensor:
+    def rsample(self, sample_shape: _size = torch.Size()) -> torch.Tensor:
         if not isinstance(sample_shape, torch.Size):
             sample_shape = torch.Size(sample_shape)
         n = sample_shape.numel()
         n_burn = 500 if self._initial_points is None else 0  # dont need burnin if we already sampled
         results = sample_polytope(
             model=self._fcm._sampler, initial_points=self._initial_points, n=n, n_burn=n_burn, new_initial_points=True,
-            thinning_factor=3, n_chains=6, return_what='rounded', target_density=density, n_cdf=n_cdf,
+            thinning_factor=3, n_chains=6, return_what='rounded'
         )
         self._initial_points = results['new_initial_points']
         return results['rounded']

@@ -341,7 +341,7 @@ def spiro(
 
         basebayes = _BaseBayes(model, substrate_df, obsmods, up, bom)
 
-        true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, rescale_val=None, is_thermo=False, pandalize=True)
+        true_theta = model._fcm.map_fluxes_2_theta(fluxes.to_frame().T, is_thermo=False, pandalize=True)
         basebayes.set_true_theta(true_theta.iloc[0])
         if which_measurements == 'lcms':
             _correct_base_bayes_lcms(basebayes, total_intensities=total_intensities, clip_min=clip_min)

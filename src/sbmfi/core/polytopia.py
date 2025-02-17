@@ -3,8 +3,6 @@ from typing import Union, List
 import math
 import scipy
 import pandas as pd
-import contextlib
-import io
 
 import tqdm
 from cobra import Reaction
@@ -17,7 +15,6 @@ import cdd.gmp
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
     _rev_reactions_rex, _xch_reactions_rex
 from sbmfi.core.linalg import LinAlg
-from sbmfi.core.reaction import LabellingReaction
 import copy
 from PolyRound.api import PolyRoundApi, Polytope, PolyRoundSettings
 from PolyRound.static_classes.lp_utils import ChebyshevFinder
@@ -111,21 +108,6 @@ class LabellingPolytope(Polytope):
             cvx_result['solution'] = pd.Series(v_cp.value, index=self.A.columns, name=f'optimum', dtype=np.float64)
             cvx_result['optimum'] = problem.value
         return cvx_result
-
-    @staticmethod
-    def from_Polytope(polytope:Polytope, labellingpolytope: 'LabellingPolytope' = None):
-        kwargs = {}
-        if labellingpolytope is not None:
-            kwargs = {
-                'mapper': labellingpolytope.mapper,
-                'objective': labellingpolytope.objective,
-                'non_labelling_reactions': labellingpolytope.non_labelling_reactions,
-            }
-
-        pol = LabellingPolytope(polytope.A, polytope.b, polytope.S, polytope.h, **kwargs)
-        pol.transformation = polytope.transformation
-        pol.shift = polytope.shift
-        return pol
 
 
 def fast_FVA(polytope: LabellingPolytope, full=False):
@@ -335,7 +317,7 @@ def H_representation(vertices: List[np.array], number_type='float', halfspace_to
 
 
 def project_polytope(
-        polytope,
+        polytope: Polytope,
         P: pd.DataFrame,
         p: pd.Series = None,
         return_vertices=False,
@@ -600,19 +582,18 @@ def svd_null_space(S: pd.DataFrame, tolerance=1e-10):
 
 
 def simplify_polytope(
-        polytope,
+        polytope: Polytope,
         settings = PolyRoundSettings(),
         normalize = True
 ):
-    simpol = PolyRoundApi.simplify_polytope(polytope, settings, normalize)
-    return LabellingPolytope.from_Polytope(simpol, polytope)
+    return PolyRoundApi.simplify_polytope(polytope, settings, normalize)
 
 
 def transform_polytope_keep_transform(
     polytope: Polytope,
     settings: PolyRoundSettings = PolyRoundSettings(),
     kernel_id ='svd',
-) -> Polytope:
+) -> (Polytope, pd.DataFrame, pd.DataFrame, pd.Series):
     # PolyRoundApi.transform_polytope()
     if polytope.inequality_only:
         raise ValueError("Polytope already transformed (only contains inequality constraints)")
@@ -669,13 +650,16 @@ def transform_polytope_keep_transform(
         trans_x = polytope.back_transform(u)
         x_rec_diff = np.max(trans_x - np.squeeze(tau.values))
         print("the deviation of the back transform is: " + str(x_rec_diff))
-    if isinstance(polytope, LabellingPolytope):
-        polytope._mapper = {}
-        polytope._objective = {}
+    # if isinstance(polytope, LabellingPolytope):
+    #     polytope._mapper = {}
+    #     polytope._objective = {}
     return polytope, T, T_1, tau
 
 
-def round_polytope_keep_ellipsoid(polytope: Polytope, settings: PolyRoundSettings = PolyRoundSettings()):
+def round_polytope_keep_ellipsoid(
+        polytope: Polytope,
+        settings: PolyRoundSettings = PolyRoundSettings()
+) -> (Polytope, pd.DataFrame, pd.DataFrame, pd.Series):
     polytope = polytope.copy()
     cols = polytope.A.columns
     bool = False
@@ -711,6 +695,46 @@ def round_polytope_keep_ellipsoid(polytope: Polytope, settings: PolyRoundSetting
     return polytope, E, E_1, epsilon
 
 
+def project_batch_onto_polytope(A, b, X):
+    """
+    Projects each point in a batch onto a polytope defined by A x <= b.
+
+    Parameters
+    ----------
+    A : np.ndarray, shape (m, d)
+        Matrix of inequality coefficients.
+    b : np.ndarray, shape (m,)
+        Right-hand side vector for the inequalities.
+    X : np.ndarray, shape (n, d)
+        Batch of points (each row is a point) to be projected.
+
+    Returns
+    -------
+    projections : np.ndarray, shape (n, d)
+        The closest point in the polytope for each input point.
+    distances : np.ndarray, shape (n,)
+        The Euclidean distance from each input point to its projection.
+    """
+    n, d = X.shape
+    projections = []
+    distances = []
+
+    # For each point in the batch, solve a QP to compute its projection.
+    for i in range(n):
+        x = X[i]
+        z = cp.Variable(d)
+        objective = cp.Minimize(cp.sum_squares(z - x))
+        constraints = [A @ z <= b]
+        problem = cp.Problem(objective, constraints)
+        problem.solve()
+
+        proj = z.value
+        projections.append(proj)
+        distances.append(np.linalg.norm(x - proj))
+
+    return np.array(projections), np.array(distances)
+
+
 class PolytopeSamplingModel(object):
     # combine stuff from labelling polytope and mapping things
     # this one is meant to be used by
@@ -739,9 +763,6 @@ class PolytopeSamplingModel(object):
 
         normalize = kernel_id != 'rref'
 
-        if not isinstance(polytope, LabellingPolytope):
-            polytope = LabellingPolytope.from_Polytope(polytope)
-
         F_simp = polytope
         if F_simp.S is not None:
             F_simp = simplify_polytope(polytope, settings=self._pr_settings, normalize=normalize)
@@ -754,21 +775,21 @@ class PolytopeSamplingModel(object):
             self._T_1 = self._T.copy()
             self._tau = np.zeros(F_simp.A.shape[1])
 
-        # self._Ft = LabellingPolytope.from_Polytope(F_trans, polytope)
-
         F_round, self._E, self._E_1, self._epsilon = round_polytope_keep_ellipsoid(F_trans, self._pr_settings)
-        self._F_round = LabellingPolytope.from_Polytope(F_round)
         self._log_det_E = np.log(np.linalg.eig(self._E)[0]).sum()
 
         self._rounded_id = self._E_1.index
         self._transformed_id = self._T_1.index
-
-        self._reaction_ids = polytope.A.columns.tolist()
+        self._reaction_id = polytope.A.columns.tolist()
 
         if linalg == None:
             linalg = LinAlg(backend='numpy')
 
         self._la = linalg
+        self._G = F_round.A.values
+        self._h = F_round.b.values[:, np.newaxis]
+        self._Q = F_round.transformation.values
+        self._q = F_round.shift.values[:, np.newaxis]
         new = self.to_linalg(linalg)
         self.__dict__.update(new.__dict__)
 
@@ -788,7 +809,7 @@ class PolytopeSamplingModel(object):
         index = None
         if isinstance(net_fluxes, pd.DataFrame):
             index = net_fluxes.index
-            net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self.reaction_ids].values)
+            net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self._rounded_id].values)
 
         transformed = self._la.tensormul_T(self._T_1, net_fluxes - self._tau.T)
         rounded = self._la.tensormul_T(self._E_1, transformed - self._epsilon.T)
@@ -807,11 +828,10 @@ class PolytopeSamplingModel(object):
         # transformed = self._la.tensormul_T(self._E, rounded) + self._epsilon
         # fluxes = self._la.tensormul_T(self._T, transformed) + self._tau.T
 
-        A, b = self._to_fluxes_transform
-        fluxes = self._la.tensormul_T(A, rounded) + b.T
+        fluxes = self._la.tensormul_T(self._Q, rounded) + self._q.T
 
         if pandalize:
-            fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_ids)
+            fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_id)
             fluxes.index.name = 'samples_id'
         return fluxes
 
@@ -823,9 +843,9 @@ class PolytopeSamplingModel(object):
         return samples * radius
 
     @property
-    def reaction_ids(self):
+    def reaction_id(self):
         """Gets the IDs of the reactions in the model."""
-        return self._reaction_ids
+        return self._reaction_id
 
     @property
     def rounded_id(self):
@@ -834,18 +854,18 @@ class PolytopeSamplingModel(object):
     def to_linalg(self, linalg: LinAlg):
         new = copy.copy(self)
         new._la = linalg
-        new._G = linalg.get_tensor(values=new._F_round.A.values)
-        new._h = linalg.get_tensor(values=new._F_round.b.values[:, np.newaxis])
-        new._to_fluxes_transform = (
-            linalg.get_tensor(values=new._F_round.transformation.values),
-            linalg.get_tensor(values=new._F_round.shift.values[:, np.newaxis]),
-        )
-        for kwarg in ['_T', '_T_1', '_tau', '_E', '_E_1', '_epsilon']:
+        for kwarg in ['_T', '_T_1', '_tau', '_E', '_E_1', '_epsilon', '_G', '_h', '_Q', '_q']:
             value = new.__dict__[kwarg]
             if isinstance(value, pd.DataFrame) or isinstance(value, pd.Series):
                 value = value.values
             new.__dict__[kwarg] = linalg.get_tensor(values=value)
         return new
+
+
+def get_rounded_polytope(psm: PolytopeSamplingModel):
+    A = pd.DataFrame(psm._la.tonp(psm._G), columns=psm.rounded_id)
+    b = pd.Series(psm._la.tonp(psm._h)[:, 0], name='ub')
+    return Polytope(A=A, b=b)
 
 
 class MarkovTransition():
@@ -1154,7 +1174,7 @@ def compute_volume(
     if isinstance(model, LabellingPolytope):
         model = PolytopeSamplingModel(model, kernel_id=kernel_id)
 
-    if any([_xch_reactions_rex.search(rid) is not None for rid in model.reaction_ids]):
+    if any([_xch_reactions_rex.search(rid) is not None for rid in model.reaction_id]):
         raise ValueError('This is a thermodynamic model that includes xch fluxes which lie in a hyper-rectangle, '
                          'it is much faster to compute the volume of the net polytope and the huper-rectangle separately!')
 
@@ -1230,6 +1250,6 @@ if __name__ == "__main__":
         which_measurements='lcms',
     )
 
-    psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn)
-    sample_polytope(psm, n=100, show_progress=True)
+    psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn, linalg=model._la)
+    res = sample_polytope(psm, n=100, show_progress=True)
 

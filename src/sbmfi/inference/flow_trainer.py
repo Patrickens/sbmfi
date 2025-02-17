@@ -2,6 +2,8 @@ import torch
 from pyknos.nflows.transforms import PointwiseAffineTransform
 from torch import nn
 from typing import Optional
+import warnings
+
 from normflows.distributions.base import Uniform, UniformGaussian
 from normflows.flows import (
     Permute,
@@ -34,22 +36,14 @@ from sbmfi.priors.uniform import _BasePrior
 import numpy as np
 import tqdm
 from typing import Dict
-import os
-from sbmfi.settings import SIM_DIR
-import shutil
-from pathlib import Path
-import ray
-from ray import tune
-from ray.tune.stopper import TrialPlateauStopper
 from torch.utils.data import (
     Dataset,
     DataLoader,
     random_split
 )
-from normflows.flows.neural_spline.autoregressive import MaskedPiecewiseRationalQuadraticAutoregressive
-from normflows.nets.made import MADE
 import inspect
 import types
+
 
 class DiagGaussianScale(DiagGaussian):
     def __init__(self, shape, trainable=True, scale=0.3):
@@ -122,8 +116,6 @@ class Flow_Dataset(Dataset):
 def flow_constructor(
         fcm: FluxCoordinateMapper,
         coordinate_id,
-        log_xch,
-        rescale_val,
         embedding_net=None,
         num_context_channels=None,
         autoregressive=True,
@@ -141,33 +133,25 @@ def flow_constructor(
     # prior_flow just makes a normalizing flow that matches samples from a prior
     #   thus not needing to fuck around with context = conditioning on data
 
-    n_theta = len(fcm.theta_id(coordinate_id, log_xch))
+    n_theta = len(fcm.theta_id(coordinate_id))
 
     if not torch.cuda.is_available():
         device = 'cpu'
 
     if coordinate_id not in ['cylinder', 'rounded']:
-        raise ValueError(f'flow training only coordinate_id sho')
+        raise ValueError(f'can only flow for cylinder and rounded')
     elif coordinate_id == 'rounded':
-        if log_xch:
-            raise NotImplementedError
         ind = list(range(n_theta - fcm._nx, n_theta))
         scale = torch.ones(n_theta)
-        scale[-fcm._nx:] *= rescale_val * 2  # need to pass the width!
+        scale[-fcm._nx:] *= 2  # need to pass the width!
         base = UniformGaussian(ndim=n_theta, ind=ind, scale=scale)
         base.scale.to(device)
+        warnings.warn('Watch out! Base distribution for xch fluxes is U[-1,1]. '
+                      'You need to manually scale the exchange fluxes, the currently have fcm._rho_bounds')
     elif coordinate_id == 'cylinder':
-        if rescale_val is None:
-            raise ValueError(f'flow only works when all values are rescaleval')
-        if (fcm._nx > 0) and log_xch:
-            ind = list(range(n_theta - fcm._nx))
-            scale = torch.ones(n_theta)
-            scale[:-fcm._nx] *= rescale_val * 2  # need to pass the width!
-            base = UniformGaussian(ndim=n_theta, ind=ind, scale=scale)
-        else:
-            base = Uniform(shape=n_theta, low=-rescale_val, high=rescale_val)
-            base.low = base.low.to(device)
-            base.high = base.high.to(device)
+        base = Uniform(shape=n_theta, low=-1.0, high=1.0)
+        base.low = base.low.to(device)
+        base.high = base.high.to(device)
 
     transforms = []
     for i in range(num_transforms):
@@ -177,12 +161,13 @@ def flow_constructor(
             num_hidden_channels=num_hidden_channels,
             num_context_channels=num_context_channels,
             num_bins=num_bins,
-            tail_bound=rescale_val,
+            tail_bound=1.0,
             activation=nn.ReLU,
             dropout_probability=dropout_probability,
             init_identity=init_identity,
         )
         if coordinate_id == 'cylinder':
+            # this is the index of \theta, the coordinate that we model with a circular flow
             common_kwargs['ind_circ'] = [0]
         if (coordinate_id == 'cylinder') and autoregressive:
             transform = CircularAutoregressiveRationalQuadraticSpline(
@@ -218,7 +203,6 @@ def flow_constructor(
     if mixing_id is not None:
         transforms = transforms[:-1]
 
-    # flow = EmbeddingConditionalNormalizingFlow(q0=base, flows=transforms, embedding_net=embedding_net, p=p)
     flow = ConditionalNormalizingFlow(q0=base, flows=transforms, p=p)
     flow.to(device=device)
     return flow

@@ -61,7 +61,7 @@ class _BaseBayes(_BaseSimulator):
 
     @property
     def theta_id(self):  # any basebayes subclass has the following theta_id
-        return self._fcm.theta_id(coordinate_id='rounded', hemi=False, log_xch=False)
+        return self._fcm.theta_id(coordinate_id='rounded')
 
     @property
     def measurements(self):
@@ -139,7 +139,7 @@ class _BaseBayes(_BaseSimulator):
         vape = theta.shape
         if len(vape) > 2:
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
-        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta, rescale_val=None)
+        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta)
         mu_o = self.simulate(labelling_fluxes, n_obs=0)
 
         n_f = self._model._fluxes.shape[0]
@@ -236,7 +236,7 @@ class _BaseBayes(_BaseSimulator):
         vape = theta.shape
         if len(vape) > 2:
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
-        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta, rescale_val=None)
+        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta)
         data = self.__call__(labelling_fluxes, n_obs=n_obs, **kwargs)
 
         time = None
@@ -524,7 +524,7 @@ class Exact(_BasePotential):
         vape = theta.shape
         if len(vape) > 2:
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
-        labelling_fluxes = self._m._fcm.map_theta_2_fluxes(theta, rescale_val=None)
+        labelling_fluxes = self._m._fcm.map_theta_2_fluxes(theta)
         mu_o = self._m.simulate(labelling_fluxes, n_obs=0)
 
         n_f = self._m._model._fluxes.shape[0]
@@ -615,7 +615,7 @@ class DistanceKernel(_BasePotential):
         vape = theta.shape
         if len(vape) > 2:
             theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
-        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta, rescale_val=None)
+        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta)
         data = self.__call__(labelling_fluxes, n_obs=n_obs, **kwargs)
 
         time = None

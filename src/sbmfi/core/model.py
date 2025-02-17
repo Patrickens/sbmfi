@@ -23,6 +23,7 @@ from abc import abstractmethod
 from copy import deepcopy
 import pickle
 
+
 class LabellingModel(Model):
     """Model that allows for sampling of the flux-space defined by the null-space
     of the stoichiometric matrix defined in the model, upper/lower bounds on reactions
@@ -241,7 +242,7 @@ class LabellingModel(Model):
             raise ValueError('build the model first!')
         return self._fcm
 
-    def set_fluxes(self, labelling_fluxes: Union[pd.DataFrame, np.array], samples_id=None, trim=True):
+    def set_fluxes(self, labelling_fluxes: Union[pd.DataFrame, np.array, 'torch.Tensor'], samples_id=None, trim=True):
         if not self._is_built:
             raise ValueError('MUST BUILD')
         labelling_fluxes = self._fcm.frame_fluxes(labelling_fluxes, samples_id, trim)
@@ -1230,6 +1231,8 @@ class EMU_Model(LabellingModel):
 
 # NB this class is needed to make pickling attribute lookup work!
 class RatioEMU_Model(EMU_Model, RatioMixin): pass
+
+
 
 
 if __name__ == "__main__":

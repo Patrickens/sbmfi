@@ -79,7 +79,7 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
         net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self._Fn.A.columns].values)
     if isinstance(net_basis_samples, pd.DataFrame):
         index = net_basis_samples.index
-        net_basis_samples = self._la.get_tensor(values=net_basis_samples.loc[:, self.net_theta_id].values)
+        net_basis_samples = self._la.get_tensor(values=net_basis_samples.loc[:, self.make_net_theta_id].values)
 
     if net_fluxes is None:
         n = net_basis_samples.shape[0]

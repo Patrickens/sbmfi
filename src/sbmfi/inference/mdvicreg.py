@@ -236,7 +236,66 @@ def print_grad_fn(fn, indent=0, visited=set(), max_depth=50):
         if next_fn is not None:
             print_grad_fn(next_fn, indent + 4, visited, max_depth)
 
+from sbmfi.core.linalg import LinAlg
 
+class Rev_KLD():
+    def __init__(
+        self,
+        fcm: FluxCoordinateMapper,
+        density: torch.distributions.Distribution,
+        rescale_val=1.0,
+    ):
+        self._rescale = rescale_val
+        samples = density.sample(torch.Size((2,)))
+        self._la = device_linalg = LinAlg(backend='torch', device=str(samples.device))
+        self._fcm = fcm.to_linalg(device_linalg)
+        self._density = density
+        self._n_train = 0
+
+    def log_prob(self, z, context=None):
+        # with torch.no_grad():
+        self._n_train += z.shape[:-1].numel()
+        ball = self._fcm.map_cylinder_2_ball(z, rescale_val=self._rescale)
+        rounded = self._fcm.map_ball_2_rounded(ball)
+        return self._density.log_prob(rounded)
+
+class RandomPairDataset(Dataset):
+    def __init__(self, data1: torch.Tensor, data2: torch.Tensor):
+        """
+        Args:
+            data1 (torch.Tensor): First tensor (e.g., features).
+            data2 (torch.Tensor): Second tensor (e.g., labels or another modality).
+                                    Both tensors must have the same number of samples and be on the same device.
+        """
+        assert data1.size(0) == data2.size(0), "Both tensors must have the same number of samples"
+        assert data1.device == data2.device, "Both tensors must be on the same device"
+
+        self.data1 = data1
+        self.data2 = data2
+        self.num_samples = data1.size(0)
+        self.device = data1.device  # Use the device of the input tensors
+        self._shuffle_indices()  # Initial shuffling
+
+    def _shuffle_indices(self):
+        # Generate two independent random orderings of indices on the same device as the data.
+        self.idx1 = torch.randperm(self.num_samples, device=self.device)
+        self.idx2 = torch.randperm(self.num_samples, device=self.device)
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, index):
+        # Retrieve the sample indices using the pre-shuffled index tensors.
+        # .item() converts the 0-dim tensor to a Python integer.
+        i1 = self.idx1[index].item()
+        i2 = self.idx2[index].item()
+        sample1 = self.data1[i1]
+        sample2 = self.data2[i2]
+        return sample1, sample2
+
+    def on_epoch_end(self):
+        # Re-shuffle the indices to yield a new pairing for the next epoch.
+        self._shuffle_indices()
 
 
 if __name__ == "__main__":
