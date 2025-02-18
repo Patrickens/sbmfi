@@ -63,7 +63,7 @@ class LabellingReaction(Reaction):
             rid = self.id
             if rid is None:
                 rid = ''
-            reaction = Reaction(id=rid + '_rev', lower_bound=0.0, upper_bound=0.0)
+            reaction = Reaction(id=rid + '_rev', lower_bound=0.0, upper_bound=1.0)
             reaction._metabolites = {k: -v for k, v in self._metabolites.items()}  # add_metabolites also changes bounds
             reaction._model = self._model
             self._rev_reaction = type(self)(reaction=reaction, pseudo=True)

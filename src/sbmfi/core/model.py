@@ -407,6 +407,23 @@ class LabellingModel(Model):
         self, rebuild_index: bool = True, rebuild_relationships: bool = True
     ) -> None:
         super(LabellingModel, self).repair(rebuild_index, rebuild_relationships)
+        if rebuild_relationships:
+            for metabolite in self.pseudo_metabolites:
+                metabolite._reaction.clear()
+                metabolite._model = self
+
+            for reaction in self.pseudo_reactions:
+                reaction._model = self
+                for metabolite in reaction._metabolites:
+                    metabolite._reaction.add(reaction)
+
+            for reaction in self.reactions:
+                if isinstance(reaction, LabellingReaction) and (reaction.rho_max > 0.0):
+                    rev_reaction = reaction._rev_reaction
+                    rev_reaction._model = self
+                    for metabolite in rev_reaction._metabolites:
+                        metabolite._reaction.add(rev_reaction)
+
 
     def add_labelling_kwargs(self, reaction_kwargs, metabolite_kwargs):
         self._labelling_reactions = DictList()  # dynamically recomputed
@@ -460,6 +477,9 @@ class LabellingModel(Model):
                     products = reaction.products
                     cons_vars = [reaction.forward_variable, reaction.reverse_variable]
                     for metabolite in products:
+                        if metabolite in self.pseudo_metabolites:
+                            raise ValueError('more than 1 pseudo_reaction producing this metabolite'
+                                             'by definition impossible')
                         cons_vars.append(self.solver.constraints[metabolite.id])
                         self.pseudo_metabolites.append(metabolite)
                         self.metabolites.remove(metabolite.id)
@@ -468,8 +488,11 @@ class LabellingModel(Model):
                     self.pseudo_reactions.append(reaction)
                 else:
                     self.reactions._replace_on_id(new_object=reaction)
+
         self.solver.update()  # due to the cons_vars
         self.repair()
+
+
 
     def add_reactions(self, reaction_list: Iterable[Reaction]) -> None:
         for reaction in reaction_list:
@@ -1015,7 +1038,6 @@ class EMU_Model(LabellingModel):
 
         for reaction in self.labelling_reactions + self.pseudo_reactions:
             reaction._model = self  # NOTE: this is to ensure that reverse_reactions recognize this model
-            print(reaction)
             reaction.build_tensors()
 
         # necessary if we change i.e. batch_size; will be rebuilt when set_labelling is called
@@ -1054,13 +1076,6 @@ class EMU_Model(LabellingModel):
         self._A_tot[weight] += A
 
         B = reaction.B_tensors.get(weight)
-        # if reaction.id == 'v5_rev':
-        print(reaction)
-        print(reaction.A_elements)
-        print(reaction.B_elements)
-        print(reaction.A_tensors)
-        print(reaction.B_tensors)
-        print()
         if B is None:
             return
         B = B[None, :]
@@ -1128,11 +1143,6 @@ class EMU_Model(LabellingModel):
             Y = self._build_Y(weight=weight)
             LU = self._la.LU(A=A)
             self._LUA[weight] = LU  # NOTE: store for computation of Jacobian
-            print(weight)
-            print(A)
-            print(B)
-            print(X)
-            print(Y)
             A_B = self._la.solve(LU=LU, b=B)
             X = A_B @ Y
             self._X[weight] += X
@@ -1309,7 +1319,7 @@ if __name__ == "__main__":
     import pickle
 
     v5_reversible = True
-    v2_reversible = True
+    v2_reversible = False
     add_biomass = True
     add_cofactor = True
     which_labellings = ['A','B']
@@ -1542,7 +1552,7 @@ if __name__ == "__main__":
 
     fluxes = pd.Series(fluxes, name='v')
     model.set_fluxes(labelling_fluxes=fluxes)
-    model.cascade()
+    res = model.cascade(pandalize=True)
     # fcm = model.flux_coordinate_mapper
     # thermo = fcm.map_fluxes_2_thermo(fluxes.to_frame().T, pandalize=True)
     # print(fcm._F.A @ fluxes <= fcm._F.b)
