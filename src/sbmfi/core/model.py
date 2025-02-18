@@ -295,8 +295,6 @@ class LabellingModel(Model):
         labelling_fluxes = self._fcm.frame_fluxes(labelling_fluxes, samples_id, trim)
         if len(labelling_fluxes.shape) > 2:
             raise ValueError('can only deal with 2D stratified fluxes!')
-        if self._la._auto_diff:
-            labelling_fluxes.requires_grad_(True)
         if labelling_fluxes.shape[0] != self._la._batch_size:
             raise ValueError(f'batch_size = {self._la._batch_size}; fluxes.shape[0] = {labelling_fluxes.shape[0]}')
         self._fluxes = labelling_fluxes
@@ -405,59 +403,6 @@ class LabellingModel(Model):
         self._free_reaction_id = user_chosen.list_attr('id')
         self._labelling_reactions = fwd + boundary + bm + user_chosen + zero_facet + rev
 
-    def _fix_metabolite_reference_mess(self, reaction, atom_map):
-        if not isinstance(reaction, LabellingReaction):
-            raise ValueError('only meant for LabellingReaction')
-
-        fixed_atom_map = {}
-        for metabolite, (stoich, atoms) in atom_map.items():
-            if not isinstance(metabolite, LabelledMetabolite):
-                raise ValueError('atom_map should only contain LabelledMetabolite')
-
-            if metabolite in self.metabolites:
-                model_metabolite = self.metabolites.get_by_id(metabolite.id)
-                if type(model_metabolite) == Metabolite:
-                    # creates a lot of difficulties; I dont know how else to fix this...
-                    # takes over full __dict__ of model_metabolite with annotation and correct formula and such
-                    metabolite = self._TYPE_REACTION._TYPE_METABOLITE(
-                        idm=model_metabolite, symmetric=metabolite.symmetric, formula=metabolite.formula
-                    )
-                elif isinstance(model_metabolite, LabelledMetabolite):
-                    metabolite = model_metabolite
-                else:
-                    raise NotImplementedError
-
-                if reaction.pseudo and (stoich > 0):
-                    self.metabolites.remove(metabolite.id)
-                    self.remove_cons_vars([self.solver.constraints[metabolite.id]])
-                    self.pseudo_metabolites.append(metabolite)    # throws error if already present!
-                    # raise ValueError(f'{metabolite.id} is pseudo and has more than one reaction producing')
-                elif model_metabolite is not metabolite:
-                    # happens if we created a LabelledMetablolite above!
-                    self.metabolites._replace_on_id(new_object=metabolite)
-            elif metabolite in self.pseudo_metabolites:
-                metabolite = self.pseudo_metabolites.get_by_id(metabolite.id)
-            elif reaction.pseudo and (stoich > 0):
-                self.pseudo_metabolites.append(metabolite)  # throws error if already present!
-                metabolite._model = self
-            else:
-                self.add_metabolites(metabolite_list=[metabolite])
-
-            fixed_atom_map[metabolite] = (stoich, atoms)
-
-            n_pseudo = 0
-            is_pseudo = metabolite in self.pseudo_metabolites
-            for met_reaction in list(metabolite._reaction):
-                for met_met, met_stoich in list(met_reaction._metabolites.items()):
-                    if met_stoich > 0 and is_pseudo:
-                        n_pseudo += 1
-                        if n_pseudo > 1:
-                            raise ValueError('multiple pseudo-reactions producing a single pseudo_metabolite!')
-                    if (met_met.id == metabolite.id) and (met_met is not metabolite):
-                        # harmonize objects in atom_map and metabolites
-                        met_reaction._metabolites[metabolite] = met_reaction._metabolites.pop(met_met)
-        return fixed_atom_map
-
     def repair(
         self, rebuild_index: bool = True, rebuild_relationships: bool = True
     ) -> None:
@@ -525,13 +470,6 @@ class LabellingModel(Model):
                     self.reactions._replace_on_id(new_object=reaction)
         self.solver.update()  # due to the cons_vars
         self.repair()
-
-        # import gc
-        # print(sys.getrefcount(metabolite))
-        # referrers = gc.get_referrers(metabolite)
-        # print("Objects referring to a:")
-        # for ref in referrers:
-        #     print(ref)
 
     def add_reactions(self, reaction_list: Iterable[Reaction]) -> None:
         for reaction in reaction_list:
@@ -1077,6 +1015,7 @@ class EMU_Model(LabellingModel):
 
         for reaction in self.labelling_reactions + self.pseudo_reactions:
             reaction._model = self  # NOTE: this is to ensure that reverse_reactions recognize this model
+            print(reaction)
             reaction.build_tensors()
 
         # necessary if we change i.e. batch_size; will be rebuilt when set_labelling is called
@@ -1115,6 +1054,13 @@ class EMU_Model(LabellingModel):
         self._A_tot[weight] += A
 
         B = reaction.B_tensors.get(weight)
+        # if reaction.id == 'v5_rev':
+        print(reaction)
+        print(reaction.A_elements)
+        print(reaction.B_elements)
+        print(reaction.A_tensors)
+        print(reaction.B_tensors)
+        print()
         if B is None:
             return
         B = B[None, :]
@@ -1182,6 +1128,11 @@ class EMU_Model(LabellingModel):
             Y = self._build_Y(weight=weight)
             LU = self._la.LU(A=A)
             self._LUA[weight] = LU  # NOTE: store for computation of Jacobian
+            print(weight)
+            print(A)
+            print(B)
+            print(X)
+            print(Y)
             A_B = self._la.solve(LU=LU, b=B)
             X = A_B @ Y
             self._X[weight] += X
@@ -1260,11 +1211,11 @@ import operator
 def model_builder_from_dict(
         reaction_kwargs: dict,
         metabolite_kwargs: dict,
-        id_or_model='crack',
+        model_id='model',
         name=None,
 ) -> Model:
     reaction_kwargs = reaction_kwargs.copy()
-    model = Model(id_or_model=id_or_model, name=name)
+    model = Model(id_or_model=model_id, name=name)
     biomass_kwargs = reaction_kwargs.pop('biomass', None)
     metabolite_kwargs = create_full_metabolite_kwargs(reaction_kwargs, metabolite_kwargs, add_cofactors=True)
     # now metabolite_kwargs contains all metabolites that should be tranformed into labelling metabolites
@@ -1357,6 +1308,21 @@ if __name__ == "__main__":
 
     import pickle
 
+    v5_reversible = True
+    v2_reversible = True
+    add_biomass = True
+    add_cofactor = True
+    which_labellings = ['A','B']
+    L_12_omega = 1.0
+    measured_boundary_fluxes = ('h_out', )
+    ratios=False
+    build_simulator=True
+
+    if v5_reversible:
+        v5_atom_map_str = 'F/a + D/bcd  <== C/abcd'
+    else:
+        v5_atom_map_str = 'F/a + D/bcd  <-- C/abcd'
+
     reaction_kwargs = {
         'biomass': {
             'reaction_str': '0.3H + 0.6B + 0.5E + 0.1C --> ∅',
@@ -1366,10 +1332,6 @@ if __name__ == "__main__":
             'lower_bound': 10.0, 'upper_bound': 10.0,
             'atom_map_str': '∅ --> A/ab'
         },
-        # 'a_in': {
-        #     'lower_bound': -10.0, 'upper_bound': -10.0,
-        #     'atom_map_str': 'A/ab --> ∅'
-        # },
         'd_out': {
             'upper_bound': 100.0,
             'atom_map_str': 'D/abc --> ∅'
@@ -1382,35 +1344,30 @@ if __name__ == "__main__":
             'upper_bound': 100.0,
             'atom_map_str': 'H/ab --> ∅'
         },
+        'cof_out': {
+            'upper_bound': 100.0,
+            'reaction_str': 'cof --> ∅'
+        },
         'v1': {
             'upper_bound': 100.0,
             'atom_map_str': 'A/ab --> B/ab'
         },
         'v2': {
             'lower_bound': 0.0, 'upper_bound': 100.0,
-            # 'rho_min': 0.1, 'rho_max': 0.8,
-            'atom_map_str': 'B/ab --> E/ab'
+            'rho_min': 0.1, 'rho_max': 0.8,
+            'atom_map_str': 'B/ab ==> E/ab'
         },
         'v3': {
             'upper_bound': 100.0,
-            'atom_map_str': 'B/ab + E/cd --> C/abcd + cof'
-        },
-        'cof_out': {
-            'upper_bound': 100.0,
-            'reaction_str': 'cof --> ∅'
+            'atom_map_str': 'B/ab + E/cd --> C/abcd'
         },
         'v4': {
             'upper_bound': 100.0,  # 'lower_bound': -10.0,
             'atom_map_str': 'E/ab --> H/ab'
         },
-        # 'v5': {
-        #     'upper_bound': 100.0,
-        #     'atom_map_str': 'C/abcd --> F/a + D/bcd'
-        # },
         'v5': {  # NB this is an always reverse reaction!
-            'lower_bound': -100.0,  'upper_bound': 0.0,
-            'atom_map_str': 'F/a + D/bcd  <-- C/abcd',  # <--  ==>
-            # 'atom_map_str': 'F/a + D/bcd  <=> C/abcd',  # <--  ==>
+            'lower_bound': -100.0, 'upper_bound': 0.0,
+            'atom_map_str': v5_atom_map_str,  # <--  ==>
         },
         'v6': {
             'upper_bound': 100.0,
@@ -1421,7 +1378,7 @@ if __name__ == "__main__":
             'atom_map_str': 'F/a + F/b --> H/ab'
         },
         'vp': {
-            'lower_bound': 0.0,  # 'upper_bound': 100.0,
+            'lower_bound': 0.0,
             'pseudo': True,
             'atom_map_str': 'C/abcd + D/efg + H/hi --> L/abgih'
         },
@@ -1432,28 +1389,40 @@ if __name__ == "__main__":
         'C': {'formula': 'C4H6N4OS'},
         'D': {'formula': 'C3H2'},
         'E': {'formula': 'C2H4O5'},
-        # 'F': {'formula': 'CH2'},
-        'G': {'formula': 'CH2'},  # not used
+        'F': {'formula': 'CH2'},
+        'G': {'formula': 'CH2'},  # unused metabolite
         'H': {'formula': 'C2H2'},
         'L': {'formula': 'C5KNaSH'},  # pseudo-metabolite
         'L|[1,2]': {'formula': 'C2H2O7'},  # pseudo-metabolite
-        'P': {'formula': 'C2H'},
     }
-    linalg = LinAlg(backend='torch', batch_size=1, device='cpu',)
-    import re
-    pattern = re.compile(r'([+-]?\d+(?:\.\d+)?)\s*([A-Za-z_]\w*)')
-    matches = pattern.findall('0.3H + 0.6B + 0.5E + 0.1C --> ∅')
+    ratio_repo = {
+        'E|v2': {
+            'numerator': {'v2': 1},
+            'denominator': {'v2': 1, 'v6': 1}
+        },
+        'H|v4': {
+            'numerator': {'v4': 1},
+            'denominator': {'v7': 1, 'v4': 1}
+        },
+        # 'denominator': {'v6': 1, 'v4': 1}},  # make ratios correlated
+    }
 
-    from_file = False
-    if from_file:
-        from cobra.io import read_sbml_model
-        import os
-        from sbmfi.settings import MODEL_DIR
-        file = os.path.join(MODEL_DIR, 'sbml', 'spiro.xml')
-        model = read_sbml_model(file)
-        model = EMU_Model(linalg, model)
-    else:
-        model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+    if not add_biomass:
+        reaction_kwargs.pop('biomass')
+
+    if not v2_reversible:
+        reaction_kwargs['v2'] = {
+            'lower_bound': 0.0, 'upper_bound': 100.0,
+            'atom_map_str': 'B/ab --> E/ab'
+        }
+        ratio_repo['E|v2'] = {
+            'numerator': {'v2': 1},
+            'denominator': {'v2': 1, 'v6': 1},
+        }
+    if add_cofactor:
+        reaction_kwargs['v3']['atom_map_str'] = 'B/ab + E/cd --> C/abcd + cof'
+        reaction_kwargs['cof_out'] = {'reaction_str': 'cof --> ∅', 'upper_bound': 100.0}
+
     substrate_df = pd.DataFrame([
         [0.2, 0.0, 0.0, 0.8],
         [0.0, 1.0, 0.0, 0.0],
@@ -1462,42 +1431,124 @@ if __name__ == "__main__":
         [0.0, 0.0, 0.8, 0.2],
     ], columns=['A/00', 'A/01', 'A/10', 'A/11'], index=list('ABCDE'))
 
-    model = EMU_Model(linalg, model)
-    model.add_labelling_kwargs(reaction_kwargs, metabolite_kwargs)
-    model.set_substrate_labelling(input_labelling=substrate_df.loc['A'])
-    model.set_measurements(measurement_list=['L|[1,2]', 'C', 'L'])
-    model.build_model(('h_out', ))
-    print(model._is_built)
-    model.reactions.get_by_id('v3').lower_bound = -10
-    model.objective = {model.reactions.get_by_id('h_out'):1}
-    model.optimize()
-    from sbmfi.core.polytopia import fast_FVA
-    aa = fast_FVA(model._fcm._Fn)
-    print(model._fcm._Fn.S)
-    print(model._is_built)
-    print(aa)
-    pickle.dump(model, open('test.p', 'wb'))
-    pickle.load(open('test.p', 'rb'))
-    # from sbmfi.models.build_models import _anton_model_kwargs, _metabolite_kwargs
-    # atom_mappings = {}
-    # for pway, vdct in _anton_model_kwargs.items():
-    #     if pway == 'MODEL_SOURCE':
-    #         continue
-    #     for v_num, v_kwargs in vdct.items():
-    #         bigg_kwargs = v_kwargs.get('bigg_kwargs')
-    #         for bigg_id, reaction_kwargs in bigg_kwargs.items():
-    #             atom_mappings[bigg_id] = reaction_kwargs
-    # model_builder_from_dict(model, atom_mappings, _metabolite_kwargs)
+    if which_labellings is not None:
+        substrate_df = substrate_df.loc[which_labellings]
 
-    # model.add_reactions(
-    #     reaction_kwargs=reaction_kwargs,
-    #     metabolite_kwargs=metabolite_kwargs
-    # )
-    # labelling = pd.Series([0.0, 1.0, 0.0, 0.0], index=['A/00', 'A/01', 'A/10', 'A/11'])
-    # model.set_input_labelling(labelling)
+    annotation_df = pd.DataFrame([
+        ('H', 1, 'M-H', 3.0, 1.0, 0.01, None, 3e3),
+        ('H', 0, 'M-H', 2.0, 1.0, 0.01, None, 3e3),
+
+        ('H', 1, 'M+F', 5.0, 1.0, 0.03, None, 3e3),
+        ('H', 1, 'M+Cl', 88.0, 1.0, 0.03, None, 2e3),
+        ('H', 0, 'M+F', 4.0, 1.0, 0.03, None, 3e3),  # to indicate that da_df is not yet in any order!
+        ('H', 0, 'M+Cl', 89.0, 1.0, 0.03, None, 2e3),
+
+        ('Q', 1, 'M-H', 3.7, 3.0, 0.02, None, 2e3),  # an annotated metabolite that is not in the model
+        ('Q', 2, 'M-H', 4.7, 3.0, 0.02, None, 2e3),
+        ('Q', 3, 'M-H', 5.7, 3.0, 0.02, None, 2e3),
+
+        ('C', 0, 'M-H', 1.5, 4.0, 0.02, None, 7e5),
+        ('C', 3, 'M-H', 4.5, 4.0, 0.02, None, 7e5),
+        ('C', 4, 'M-H', 5.5, 4.0, 0.02, None, 7e5),
+
+        ('D', 2, 'M-H', 12.0, 5.0, 0.01, None, 1e5),
+        ('D', 0, 'M-H', 9.0, 5.0, 0.01, None, 1e5),
+        ('D', 3, 'M-H', 13.0, 5.0, 0.01, None, 1e5),
+
+        ('L|[1,2]', 0, 'M-H', 14.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
+        ('L|[1,2]', 1, 'M-H', 15.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),
+
+        ('L', 0, 'M-H', 14.0, 6.0, 0.01, None, 4e5),
+        ('L', 1, 'M-H', 15.0, 6.0, 0.01, None, 4e5),
+        ('L', 2, 'M-H', 16.0, 6.0, 0.01, None, 4e5),
+        ('L', 5, 'M-H', 19.0, 6.0, 0.01, None, 4e5),
+    ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'rt', 'sigma', 'omega', 'total_I'])
+    formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
+    annotation_df['formula'] = annotation_df['met_id'].map(formap)
+
+    biomass_id = 'biomass' if add_biomass else None
+    if add_biomass:
+        measured_boundary_fluxes = list(measured_boundary_fluxes)
+        measured_boundary_fluxes.append(biomass_id)
+
+    model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs, model_id='spiro', name='spiralus')
+    linalg = LinAlg(
+        backend='torch', batch_size=1, solver='lu_solve', device='cpu',
+        fkwargs=None, seed=2
+    )
+    if ratios:
+        model_type = RatioEMU_Model
+    else:
+        model_type = EMU_Model
+
+    model = model_type(linalg=linalg, model=model)
+    model.add_labelling_kwargs(
+        reaction_kwargs=reaction_kwargs,
+        metabolite_kwargs=metabolite_kwargs
+    )
+    if (ratio_repo is not None) and ratios:
+        model.set_ratio_repo(ratio_repo=ratio_repo)
+
+    model.set_substrate_labelling(input_labelling=substrate_df.iloc[0])
+    model.set_measurements(measurement_list=annotation_df['met_id'].unique())
+    if build_simulator:
+        model.build_model(free_reaction_id=measured_boundary_fluxes)
+
+    if add_biomass:
+        fluxes = {
+            'a_in': 10.00,
+            'd_out': 0.00,
+            'f_out': 0.00,
+            'h_out': 7.60,
+            'v1': 10.00,
+            'v2': 1.80,
+            'v2_rev': 0.90,
+            'v3': 8.20,
+            'v4': 0.00,
+            'v5': 0.05,
+            'v5_rev': 8.10,
+            'v6': 8.05,
+            'v7': 8.05,
+            'biomass': 1.50,
+        }
+        bm = model.reactions.get_by_id('biomass')
+        model.objective = {bm: 1}
+    else:
+        fluxes = {
+            'a_in': 10.0,
+            'd_out': 1.0,
+            'f_out': 1.0,
+            'h_out': 8.0,
+            'v1': 10.0,
+            'v2': 7.0,
+            'v2_rev': 3.5,
+            'v3': 7.0,
+            'v4': 2.0,
+            'v5': 3.0,
+            'v5_rev': 10.0,
+            'v6': 6.0,
+            'v7': 6.0,
+        }
+        model.objective = {model.reactions.get_by_id('h_out'): 1}
+
+    if not v2_reversible:
+        fluxes['v2'] = fluxes['v2'] - fluxes.pop('v2_rev')
+
+    if not v5_reversible:
+        fluxes['v5_rev'] = fluxes['v5_rev'] - fluxes.pop('v5')
+
+    if add_cofactor:
+        fluxes['cof_out'] = fluxes['v3']
+
+    fluxes = pd.Series(fluxes, name='v')
+    model.set_fluxes(labelling_fluxes=fluxes)
+    model.cascade()
+    # fcm = model.flux_coordinate_mapper
+    # thermo = fcm.map_fluxes_2_thermo(fluxes.to_frame().T, pandalize=True)
+    # print(fcm._F.A @ fluxes <= fcm._F.b)
+    # print(thermo)
+    # a = model.pretty_cascade(2)
+    # print(a)
+    # print(model._fluxes)
     #
-    #
-    # model.set_measurements(['H', 'C', 'D'])
-    # # model.build_model(['d_out', 'v4'])
-
-
+    # ding = model.cascade(pandalize=True)

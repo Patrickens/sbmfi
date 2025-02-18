@@ -1429,7 +1429,7 @@ if __name__ == "__main__":
         v2_reversible=True,
         ratios=True,
         build_simulator=True,
-        add_cofactors=True,
+        add_cofactor=True,
         which_measurements='com',
         seed=1,
         measured_boundary_fluxes=('h_out',),

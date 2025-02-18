@@ -513,22 +513,16 @@ class LabellingReaction(Reaction):
         return atom_map, is_biomass
 
     def add_metabolites(self, metabolites_to_add, combine=True, reversibly=True):
-        Reaction.add_metabolites(self, metabolites_to_add, combine=combine, reversibly=reversibly)
-        if not self._pseudo:
-            self._rev_reaction.add_metabolites(
-                metabolites_to_add={m: -s for m, s in metabolites_to_add.items()},
-                combine=combine, reversibly=reversibly
-            )
+        raise NotImplementedError('Please finish all cobra Reaction objects in terms of metabolites and genes'
+                                  'before turning them into LabellingReaction objects; '
+                                  'LabellingReactions are equipped with atom_maps, which would also have to be '
+                                  'redefined, which we chose to handle in one fell swoop at instantiation.')
 
     def subtract_metabolites(self, metabolites: dict, combine: bool = True, reversibly: bool = True):
-        # NB we need this for pta.tfs I believe, since remove_reactions is called a bunch of times
-        Reaction.subtract_metabolites(self, metabolites=metabolites, combine=combine, reversibly=reversibly)
-        self._atom_map = {}
-        if not self._pseudo:
-            self._rev_reaction._atom_map = {}
-            self._rev_reaction.subtract_metabolites(
-                metabolites={m: -s for m, s in metabolites.items()}, combine=combine, reversibly=reversibly
-            )
+        raise NotImplementedError('Please finish all cobra Reaction objects in terms of metabolites and genes'
+                                  'before turning them into LabellingReaction objects; '
+                                  'LabellingReactions are equipped with atom_maps, which would also have to be '
+                                  'redefined, which we chose to handle in one fell swoop at instantiation.')
 
     def copy(self):
         model = self._model

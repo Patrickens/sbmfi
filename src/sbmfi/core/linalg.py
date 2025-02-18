@@ -117,7 +117,6 @@ class NumpyBackend:
         'LU': {'overwrite_a': True, 'check_finite': False},
         'solve': {'trans': 0, 'overwrite_b': True, 'check_finite': False},
     }
-    _AUTO_DIFF = False
     _BATCH_PROCESSING = True
 
     def __init__(self, seed: Optional[int] = None, dtype: type = np.double, **kwargs: Any):
@@ -483,7 +482,6 @@ class TorchBackend:
         'LU': {},
         'solve': {},
     }
-    _AUTO_DIFF = True
     _BATCH_PROCESSING = True
 
     def __init__(
@@ -862,7 +860,6 @@ class LinAlg:
         solver: str = "lu_solve_ex",
         device: str = "cpu",
         fkwargs: Optional[Dict[str, Any]] = None,
-        auto_diff: bool = False,
         seed: Optional[int] = None,
         dtype: type = np.double,
     ):
@@ -875,7 +872,6 @@ class LinAlg:
             solver (str): Solver option for linear systems.
             device (str): Device for PyTorch ('cpu' or 'cuda').
             fkwargs (Optional[Dict[str, Any]]): Additional kwargs for factorization routines.
-            auto_diff (bool): Whether to enable automatic differentiation (if supported).
             seed (Optional[int]): Random seed.
             dtype (type): Default floating point type.
         """
@@ -896,7 +892,6 @@ class LinAlg:
         functions = self._fill_functions(backend)
         self.__dict__.update(functions)
 
-        self._auto_diff = self._BACKEND._AUTO_DIFF and auto_diff
         self._batch_size = int(batch_size) if self._BACKEND._BATCH_PROCESSING and batch_size > 1 else 1
 
         # Merge user and default kwargs.
@@ -914,7 +909,6 @@ class LinAlg:
             "device": device,
             "dtype": dtype,
             "fkwargs": self._fkwargs,
-            "auto_diff": self._auto_diff,
             "batch_size": self._batch_size,
         }
 

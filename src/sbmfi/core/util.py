@@ -1,5 +1,6 @@
 import numpy as np
 import tables as pt
+import sys, gc
 import math, re
 # np.seterr(all='raise')
 from cobra.io import save_json_model
@@ -29,6 +30,14 @@ _xch_reactions_rex      = re.compile('_xch$')
 _rho_constraints_rex    = re.compile('(?:_rho)(?:|_min|_max)(?:|\|lb|\|ub)$')
 _biomass_coeff_rex      = re.compile(r'([+-]?\d+(?:\.\d+)?)\s*([A-Za-z_]\w*)')
 _get_dictlist_idxs = np.vectorize(lambda dctlst, item: dctlst.index(id=item.id), excluded=[0], otypes=[np.int64])
+
+
+def ref_counter(objct):
+    print(sys.getrefcount(objct))
+    referrers = gc.get_referrers(objct)
+    print("Objects referring to a:")
+    for ref in referrers:
+        print(id(ref), ref)
 
 
 def make_multidex(index_dict: Dict[str, pd.Index], name0='labelling_id', name1=None):

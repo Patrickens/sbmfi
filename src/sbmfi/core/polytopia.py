@@ -64,29 +64,37 @@ class LabellingPolytope(Polytope):
                 raise ValueError(f'{k} not in the polytope columns')
         self._objective = val
 
-    def generate_cvxpy_LP(self, solve=False):
+    @staticmethod
+    def generate_cvxpy_LP(polytope, objective:dict=None, solve=False):
         # objective_reactions = cobra.util.solver.linear_reaction_coefficients(model)
         # polytope = polytope.copy()
-        n = self.A.shape[1]
+        n = polytope.A.shape[1]
 
         objective = np.zeros(n)
-        for rid, coef in self._objective.items():
-            objective[self.A.columns.get_loc(rid)] = coef
+        obj_dct = None
+        if objective is not None:
+            obj_dct = objective
+        elif hasattr(polytope, '_objective'):
+            obj_dct = polytope._objective
+
+        if obj_dct is not None:
+            for rid, coef in polytope._objective.items():
+                objective[polytope.A.columns.get_loc(rid)] = coef
 
         objective = cp.Parameter(shape=objective.shape, value=objective)
 
-        n_ineq = self.A.shape[0]
+        n_ineq = polytope.A.shape[0]
 
         v_cp = cp.Variable(n, name='fluxes')
-        A_cp = cp.Parameter(self.A.shape, name='A', value=self.A.values)
-        b_cp = cp.Parameter(n_ineq, name='b', value=self.b.values)
+        A_cp = cp.Parameter(polytope.A.shape, name='A', value=polytope.A.values)
+        b_cp = cp.Parameter(n_ineq, name='b', value=polytope.b.values)
         constraints = [A_cp @ v_cp <= b_cp]
 
         cvx_result = {}
-        if self.S is not None:
-            n_met = self.S.shape[0]
-            S_cp = cp.Parameter(self.S.shape, name='S', value=self.S.values)
-            h_cp = cp.Parameter(n_met, name='h', value=self.h.values)
+        if polytope.S is not None:
+            n_met = polytope.S.shape[0]
+            S_cp = cp.Parameter(polytope.S.shape, name='S', value=polytope.S.values)
+            h_cp = cp.Parameter(n_met, name='h', value=polytope.h.values)
             constraints.append(S_cp @ v_cp == h_cp)
             cvx_result['S'] = S_cp
             cvx_result['h'] = h_cp
@@ -100,18 +108,18 @@ class LabellingPolytope(Polytope):
             'constraints': constraints,
             'problem': problem,
             'objective': objective,
-            'polytope': self,
+            'polytope': polytope,
         })
 
-        if solve and len(self._objective) > 0:
+        if solve and len(polytope._objective) > 0:
             problem.solve(solver=cp.GUROBI, verbose=False)
-            cvx_result['solution'] = pd.Series(v_cp.value, index=self.A.columns, name=f'optimum', dtype=np.float64)
+            cvx_result['solution'] = pd.Series(v_cp.value, index=polytope.A.columns, name=f'optimum', dtype=np.float64)
             cvx_result['optimum'] = problem.value
         return cvx_result
 
 
-def fast_FVA(polytope: LabellingPolytope, full=False):
-    cvx_result = polytope.generate_cvxpy_LP()
+def fast_FVA(polytope: Polytope, full=False):
+    cvx_result = LabellingPolytope.generate_cvxpy_LP(polytope)
     problem = cvx_result['problem']
     objective = cvx_result['objective']
     polytope = cvx_result['polytope']
@@ -349,7 +357,7 @@ def project_polytope(
     A, b = H_representation(vertices)  # NOTE could also be done with scipy ConvHull
     A[abs(A) < vertices_tol] = 0.0
     # TODO make A have the right columns and come up with some index names
-    return LabellingPolytope(A=pd.DataFrame(A, columns=P.index), b=pd.Series(b), mapper=None)
+    return Polytope(A=pd.DataFrame(A, columns=P.index), b=pd.Series(b), mapper=None)
 
 
 def thermo_2_net_polytope(polytope: LabellingPolytope, verbose=False):
@@ -457,13 +465,19 @@ def extract_labelling_polytope(
     A_index = bvar.index
 
     wherrev = A_index.str.contains(_rev_reactions_rex)
+
+    if hasattr(model, '_only_rev'):
+        only_rev = model._only_rev
+    else:
+        raise NotImplementedError('this is useful for pure cobra models')
+
     if coordinate_id == 'thermo':
         xchid = A_index[wherrev].str.replace(_rev_reactions_rex, '_xch', regex=True)
         mapper = dict([(k, v) for k, v in zip(A_index[wherrev], xchid)])
         A_index = A_index.map(lambda x: mapper[x] if x in mapper else x)
     else:
         fwdid = A_index[wherrev].str.replace(_rev_reactions_rex, '', regex=True)
-        mapper = dict([(k, v) for v, k in zip(A_index[wherrev], fwdid) if v not in model._only_rev])
+        mapper = dict([(k, v) for v, k in zip(A_index[wherrev], fwdid) if v not in only_rev])
 
     Avar = pd.DataFrame(np.eye(n, n), index=A_index, columns=bvar.index)
     Avar_1 = Avar * -1
@@ -493,7 +507,7 @@ def extract_labelling_polytope(
 
     fluxes_id = model.labelling_fluxes_id
     if coordinate_id == 'thermo':
-        fluxes_id = fluxes_id.map(lambda x: model._only_rev[x] if x in model._only_rev else x)
+        fluxes_id = fluxes_id.map(lambda x: only_rev[x] if x in only_rev else x)
 
     exclude = slice(None)
     fluxes_id = non_labelling_reactions.append(fluxes_id)
@@ -741,7 +755,7 @@ class PolytopeSamplingModel(object):
     # TODO: it is better to refactor this into a class for the sampling model and a class for the ball and cylinder
     def __init__(
             self,
-            polytope: LabellingPolytope,
+            polytope: Polytope,
             pr_verbose = False,
             kernel_id ='svd',
             linalg: LinAlg = None,
@@ -996,7 +1010,7 @@ class MarkovTransition():
 
 
 def sample_polytope(
-        model: Union[PolytopeSamplingModel, LabellingPolytope],
+        model: Union[PolytopeSamplingModel, Polytope],
         n: int = 2000,
         n_burn: int = 100,
         initial_points = None,
@@ -1036,7 +1050,7 @@ def sample_polytope(
         raise ValueError(f'return_what: {return_what} not in [all, fluxes, rounded, chains]')
 
     result = {}
-    if isinstance(model, LabellingPolytope):
+    if isinstance(model, Polytope):
         model = PolytopeSamplingModel(model, kernel_id=kernel_id, linalg=linalg)
         if return_psm:
             result['psm'] = model
@@ -1154,7 +1168,7 @@ def sample_polytope(
     return result
 
 def compute_volume(
-        model: Union[PolytopeSamplingModel, LabellingPolytope],
+        model: Union[PolytopeSamplingModel, Polytope],
         n: int = -1,
         n0_multiplier: int = 5,
         thinning_factor: int = 1,
@@ -1171,7 +1185,7 @@ def compute_volume(
     """
     # raise NotImplementedError('refactored stuff, look at this')
     # raise NotImplementedError
-    if isinstance(model, LabellingPolytope):
+    if isinstance(model, Polytope):
         model = PolytopeSamplingModel(model, kernel_id=kernel_id)
 
     if any([_xch_reactions_rex.search(rid) is not None for rid in model.reaction_id]):
