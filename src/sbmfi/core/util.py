@@ -27,8 +27,8 @@ _optlang_reverse_id_rex = re.compile('(_reverse_.{5})$')
 _rev_reactions_rex      = re.compile('_rev$')
 _xch_reactions_rex      = re.compile('_xch$')
 _rho_constraints_rex    = re.compile('(?:_rho)(?:|_min|_max)(?:|\|lb|\|ub)$')
+_biomass_coeff_rex      = re.compile(r'([+-]?\d+(?:\.\d+)?)\s*([A-Za-z_]\w*)')
 _get_dictlist_idxs = np.vectorize(lambda dctlst, item: dctlst.index(id=item.id), excluded=[0], otypes=[np.int64])
-
 
 
 def make_multidex(index_dict: Dict[str, pd.Index], name0='labelling_id', name1=None):

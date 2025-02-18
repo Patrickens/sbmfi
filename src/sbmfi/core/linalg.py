@@ -104,52 +104,6 @@ def _merge_duplicate_indices(
     return uniq_indices, new_values
 
 
-def torch_auto_jacobian(
-    inputs, outputs, create_graph: bool = False, squeeze: bool = False
-):
-    """
-    Computes the Jacobian of `outputs` with respect to `inputs` using PyTorch autograd.
-
-    Note:
-        For higher performance and flexibility, consider using torch.autograd.functional.jacobian.
-
-    Args:
-        inputs (torch.Tensor): Input tensor (1D or 2D).
-        outputs (torch.Tensor): Output tensor.
-        create_graph (bool, optional): Whether to create the computational graph for the Jacobian.
-        squeeze (bool, optional): Whether to squeeze the batch dimension if it is 1.
-
-    Returns:
-        torch.Tensor: A tensor containing the Jacobian.
-    """
-    # Determine batch size and number of input features.
-    if inputs.ndim == 1:
-        nbatch, nin = 1, inputs.shape[0]
-    elif inputs.ndim == 2:
-        nbatch, nin = inputs.shape
-    else:
-        raise NotImplementedError("Only 1D and 2D input tensors are supported.")
-
-    nout = outputs.shape[-1]
-    jac = torch.zeros((nbatch, nin, nout), dtype=torch.double)
-
-    # Compute gradients for each output element.
-    for i, out in enumerate(outputs.view(-1)):
-        grad_out = torch.autograd.grad(
-            out, inputs, retain_graph=True, create_graph=create_graph, allow_unused=True
-        )[0]
-        if grad_out is None:
-            continue  # If output does not depend on inputs, leave gradient as 0.
-        if inputs.ndim == 1:
-            jac[i // nout, :, i % nout] = grad_out
-        else:
-            jac[i // nout, :, i % nout] = grad_out[i // nout, :]
-
-    if create_graph:
-        jac.requires_grad_()
-    return jac.squeeze(0) if squeeze else jac
-
-
 # =============================================================================
 # NumPy Backend
 # =============================================================================
@@ -746,13 +700,6 @@ class TorchBackend:
     def view(A: torch.Tensor, shape: Tuple[int, ...]) -> torch.Tensor:
         """Reshape tensor A to the given shape."""
         return A.view(shape)
-
-    @staticmethod
-    def diff(inputs: torch.Tensor, outputs: torch.Tensor) -> torch.Tensor:
-        """
-        Compute the Jacobian (non-differentiable) using torch_auto_jacobian.
-        """
-        return torch_auto_jacobian(inputs=inputs, outputs=outputs, create_graph=False).detach()
 
     @staticmethod
     def permutax(A: torch.Tensor, *args: int) -> torch.Tensor:

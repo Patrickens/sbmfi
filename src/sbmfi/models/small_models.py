@@ -665,7 +665,7 @@ def polytope_volume(algorithm='emu', backend='numpy', auto_diff=False, return_ty
         batch_size=batch_size,
         build_simulator=False,
     )
-    model.set_input_labelling(input_labelling=input_labelling)
+    model.set_substrate_labelling(input_labelling=input_labelling)
     model.objective = {model.reactions[4]: 1}
     return model
 
@@ -753,7 +753,7 @@ def thermodynamic(algorithm='emu', backend='numpy', auto_diff=False, return_type
         measurements=measurements,
         batch_size=batch_size,
     )
-    M.set_input_labelling(input_labelling=input_labelling)
+    M.set_substrate_labelling(input_labelling=input_labelling)
     return M
 
 

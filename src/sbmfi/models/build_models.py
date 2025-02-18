@@ -2263,7 +2263,7 @@ def simulator_factory(
         model.set_ratio_repo(ratio_repo=ratio_repo)
 
     if input_labelling is not None:
-        model.set_input_labelling(input_labelling=input_labelling)
+        model.set_substrate_labelling(input_labelling=input_labelling)
     if measurements is not None:
         model.set_measurements(measurement_list=measurements)
     if build_simulator:

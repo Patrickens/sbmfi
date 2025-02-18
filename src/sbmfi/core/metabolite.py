@@ -28,25 +28,18 @@ class LabelledMetabolite(Metabolite):
     """
     def __init__(
             self,
-            idm = None,
+            metabolite: Metabolite,
             symmetric: bool = False,
             formula: str = '',
-            name: str = '',
-            charge: int = 0,
-            compartment: str = None,
             total_intensity = None,  # either a number or a distribution from which total intensities are sampled
     ):
-        if isinstance(idm, LabelledMetabolite):
+        if isinstance(metabolite, LabelledMetabolite):
             raise NotImplementedError
-        elif isinstance(idm, Metabolite):  # only if metabolite
-            self.__dict__.update(idm.__dict__)
+        elif isinstance(metabolite, Metabolite):  # only if metabolite
+            self.__dict__.update(metabolite.__dict__)
             self.formula = formula if formula else self.__dict__.pop('formula')
-        elif isinstance(idm, str) or (idm is None):  # None for consistent copying behavior
-            Metabolite.__init__(
-                self, id=idm, name=name, formula=formula, charge=charge, compartment=compartment
-            )
         else:
-            raise ValueError
+            raise ValueError(f'need to instantiate with a cobra Metabolite object, got {type(metabolite)}')
         self.symmetric = symmetric
 
     def __getstate__(self):
@@ -216,4 +209,4 @@ class ConvolutedEMU(Object):
 
 
 if __name__ == "__main__":
-    water = EMU_Metabolite(idm='water', formula='H2O', charge=1)
+    water = EMU_Metabolite(metabolite='water', formula='H2O', charge=1)

@@ -2,12 +2,14 @@ from cobra.util.context import get_context
 from cobra import Model, Reaction, Metabolite, DictList
 import numpy as np
 import math
+import sys
 import pandas as pd
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util   import (
     _read_atom_map_str_rex,
     _find_biomass_rex,
     _rev_reactions_rex,
+    _biomass_coeff_rex,
 )
 from sbmfi.core.polytopia import (
     extract_labelling_polytope,
@@ -18,10 +20,49 @@ from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite  import LabelledMetabolite, ConvolutedEMU, EMU, IsoCumo
 from itertools import repeat
-from typing import Iterable, Union
+from typing import Iterable, Union, Optional
 from abc import abstractmethod
 from copy import deepcopy
 import pickle
+
+
+def create_full_metabolite_kwargs(
+        reaction_kwargs: dict,
+        metabolite_kwargs: dict,
+        infer_formula=True,
+        add_cofactors=False,
+):
+    metabolite_kwargs = metabolite_kwargs.copy()
+    for reac_id, kwargs in reaction_kwargs.items():
+        reaction_string = kwargs.get('atom_map_str', None)
+        if reaction_string is None:
+            reaction_string = kwargs.get('reaction_str', None)
+
+        if reaction_string is not None:
+            rects, arrow, prods = _read_atom_map_str_rex.findall(string=reaction_string)[0]
+            all_mets = [inter.strip().split('/') for inter in (rects + '+' + prods).split('+')]
+            for met_atom in all_mets:
+                if len(met_atom) == 1:
+                    met_id = met_atom[0]
+                    if met_id in ['∅', 'biomass']:
+                        continue
+                    if add_cofactors:
+                        metabolite_kwargs[met_id] = metabolite_kwargs.get(met_id, {})
+                    continue
+                met_id, atoms = met_atom
+                if met_id in metabolite_kwargs:
+                    met_kwargs = metabolite_kwargs.get(met_id)
+                    if 'formula' in met_kwargs:
+                        met_formula = Formula(met_kwargs.get('formula'))
+                        if met_formula['C'] != len(atoms):
+                            raise ValueError
+                    elif infer_formula:
+                        met_kwargs['formula'] = f'C{len(atoms)}'
+                else:
+                    metabolite_kwargs[met_id] = {}
+                    if infer_formula:
+                        metabolite_kwargs[met_id]['formula'] = f'C{len(atoms)}'
+    return metabolite_kwargs
 
 
 class LabellingModel(Model):
@@ -58,12 +99,13 @@ class LabellingModel(Model):
     def __init__(
             self,
             linalg: LinAlg,
-            id_or_model = None,
-            name: str = None,
+            model: Model,
     ):
-        if isinstance(id_or_model, LabellingModel):
+        if isinstance(model, LabellingModel):
             raise NotImplementedError
-        super(LabellingModel, self).__init__(id_or_model, name)
+        elif not isinstance(model, Model):
+            raise ValueError('Need to instantiate with an existing cobra model')
+        super(LabellingModel, self).__init__(id_or_model=model)
         self._la = linalg
 
         # flags
@@ -78,13 +120,13 @@ class LabellingModel(Model):
         self.tolerance = 1e-9  # needed to have decent flux sampling results; default tol=1e-6
 
         # input labelling variables
-        self._input_labelling = {}
+        self._substrate_labelling = {}
         self._labelling_id: str = None
         self._labelling_repo: dict = {}  # repository of all labellings that we encountered
 
         # collections of metabolites
         self._measurements = DictList()  # these are the metabolites/ EMUs that we simulate labelling for since they are measured
-        self._pseudo_metabolites = DictList()  # all the products of pseudo reactions e.g. all amino acids
+        self.pseudo_metabolites = DictList()  # all the products of pseudo reactions e.g. all amino acids
 
         # collections of reactions of various sorts
         self._biomass_id: str = None
@@ -111,9 +153,15 @@ class LabellingModel(Model):
         if pseudo_reactions is not None:
             for r in pseudo_reactions:
                 r._model = self
+
+        pseudo_metabolites = state.get('pseudo_metabolites')
+        if pseudo_metabolites is not None:
+            for m in pseudo_metabolites:
+                m._model = self
+
         input_labelling = state.get('_input_labelling')
         if input_labelling is not None:
-            self.set_input_labelling(input_labelling=input_labelling)
+            self.set_substrate_labelling(input_labelling=input_labelling)
         measurements = state.get('_measurements')
         if measurements is not None:
             self._measurements = DictList()
@@ -141,7 +189,6 @@ class LabellingModel(Model):
         odict['_measurements'] = self._measurements.list_attr('id')
         odict['_metabolites_in_state'] = None
 
-        odict['_pseudo_metabolites'] = DictList()
         odict['_labelling_reactions'] = DictList()
         return odict
 
@@ -199,12 +246,12 @@ class LabellingModel(Model):
     @property
     def input_labelling(self):
         """entity can be IsoCumo or EMU"""
-        return pd.Series(dict((isocumo.id, frac) for isocumo, frac in self._input_labelling.items()),
+        return pd.Series(dict((isocumo.id, frac) for isocumo, frac in self._substrate_labelling.items()),
                          name=self._labelling_id, dtype=np.float64).round(4)
 
     @property
     def input_metabolites(self):
-        return DictList(set([entity.metabolite for entity in self._input_labelling.keys()]))
+        return DictList(set([entity.metabolite for entity in self._substrate_labelling.keys()]))
 
     @property
     def measurements(self):
@@ -254,8 +301,8 @@ class LabellingModel(Model):
             raise ValueError(f'batch_size = {self._la._batch_size}; fluxes.shape[0] = {labelling_fluxes.shape[0]}')
         self._fluxes = labelling_fluxes
 
-    def set_input_labelling(self, input_labelling: pd.Series):
-        self._input_labelling = {}
+    def set_substrate_labelling(self, input_labelling: pd.Series):
+        self._substrate_labelling = {}
         self._labelling_id = input_labelling.name
         for isotopomer_str, frac in input_labelling.items():
             if frac == 0.0:
@@ -266,20 +313,20 @@ class LabellingModel(Model):
                 isotopomer = metabolite.isotopomers.get_by_id(isotopomer_str)
             else:
                 isotopomer = IsoCumo(metabolite=self.metabolites.get_by_id(id=met_id), label=label)
-            self._input_labelling[isotopomer] = frac
+            self._substrate_labelling[isotopomer] = frac
 
-        fractions = np.fromiter(self._input_labelling.values(), dtype=np.double)
+        fractions = np.fromiter(self._substrate_labelling.values(), dtype=np.double)
         if any(fractions < 0.0) or any(fractions > 1.0):
             raise ValueError('Negative or over 1 value in input labelling')
 
-        isotopomers = np.array(list(self._input_labelling.keys()))
+        isotopomers = np.array(list(self._substrate_labelling.keys()))
         input_metabolites = np.array([ic.metabolite for ic in isotopomers])
         for metabolite in set(input_metabolites):
             sum_met = fractions[input_metabolites == metabolite].sum()
             if not math.isclose(a=sum_met, b=1.0, abs_tol=1e-4):
                 raise ValueError(f'Input labeling fractions of metabolite {metabolite.id} do not sum up to 1.0')
             fractions[input_metabolites == metabolite] /= sum_met  # makes sum closer to 1
-        self._input_labelling = dict((key, frac) for key, frac in zip(isotopomers, fractions))
+        self._substrate_labelling = dict((key, frac) for key, frac in zip(isotopomers, fractions))
 
         input_reactions = DictList()
         for metabolite in set(self.input_metabolites):
@@ -297,7 +344,7 @@ class LabellingModel(Model):
             if not any([reaction in input_reactions for reaction in metabolite.reactions]):
                 raise ValueError(f'metabolite {metabolite.id} has no input reactions')
 
-        self._labelling_repo[input_labelling.name] = dict(_input_labelling=self._input_labelling)
+        self._labelling_repo[input_labelling.name] = dict(_input_labelling=self._substrate_labelling)
 
     def _parse_measurement(self, all_metabolites:DictList, measurement_id:str):
         if measurement_id in all_metabolites:
@@ -342,13 +389,13 @@ class LabellingModel(Model):
             revr = reaction._rev_reaction
             if reaction.pseudo and (reaction.id not in self._only_rev):
                 rev.append(reaction)
-            elif (abs(reaction.upper_bound - reaction.lower_bound) < self._tolerance) or \
-                    (reaction.id in self._only_rev and (abs(revr.upper_bound - revr.lower_bound) < self._tolerance)):
+            elif (abs(reaction.upper_bound - reaction.lower_bound) < self._tolerance) and (reaction.id not in self._only_rev):
+                zero_facet.append(reaction)
+            elif (reaction.id in self._only_rev and (abs(revr.upper_bound - revr.lower_bound) < self._tolerance)):
                 zero_facet.append(reaction)
             elif (reaction.id in free_reaction_id) or (self._only_rev.get(reaction.id) in free_reaction_id):
                 user_chosen.append(reaction)
             elif reaction.boundary:
-                # TODO make input reactions work!
                 boundary.append(reaction)
             else:
                 fwd.append(reaction)
@@ -383,15 +430,15 @@ class LabellingModel(Model):
                 if reaction.pseudo and (stoich > 0):
                     self.metabolites.remove(metabolite.id)
                     self.remove_cons_vars([self.solver.constraints[metabolite.id]])
-                    self._pseudo_metabolites.append(metabolite)    # throws error if already present!
+                    self.pseudo_metabolites.append(metabolite)    # throws error if already present!
                     # raise ValueError(f'{metabolite.id} is pseudo and has more than one reaction producing')
                 elif model_metabolite is not metabolite:
                     # happens if we created a LabelledMetablolite above!
                     self.metabolites._replace_on_id(new_object=metabolite)
-            elif metabolite in self._pseudo_metabolites:
-                metabolite = self._pseudo_metabolites.get_by_id(metabolite.id)
+            elif metabolite in self.pseudo_metabolites:
+                metabolite = self.pseudo_metabolites.get_by_id(metabolite.id)
             elif reaction.pseudo and (stoich > 0):
-                self._pseudo_metabolites.append(metabolite)  # throws error if already present!
+                self.pseudo_metabolites.append(metabolite)  # throws error if already present!
                 metabolite._model = self
             else:
                 self.add_metabolites(metabolite_list=[metabolite])
@@ -399,7 +446,7 @@ class LabellingModel(Model):
             fixed_atom_map[metabolite] = (stoich, atoms)
 
             n_pseudo = 0
-            is_pseudo = metabolite in self._pseudo_metabolites
+            is_pseudo = metabolite in self.pseudo_metabolites
             for met_reaction in list(metabolite._reaction):
                 for met_met, met_stoich in list(met_reaction._metabolites.items()):
                     if met_stoich > 0 and is_pseudo:
@@ -411,99 +458,86 @@ class LabellingModel(Model):
                         met_reaction._metabolites[metabolite] = met_reaction._metabolites.pop(met_met)
         return fixed_atom_map
 
-    def add_reactions(  # TODO refactor this, its ugly
-            self,
-            reaction_list: Iterable = None,
-            metabolite_kwargs: dict = None,
-            reaction_kwargs: dict = None
-    ):
-        context = get_context(self)
-        if context:
-            raise NotImplementedError
+    def repair(
+        self, rebuild_index: bool = True, rebuild_relationships: bool = True
+    ) -> None:
+        super(LabellingModel, self).repair(rebuild_index, rebuild_relationships)
 
-        reaction_kwargs = {} if reaction_kwargs is None else reaction_kwargs
-        # maybe make sure that the reactions in reaction_list are not in self.reactions...
-        reaction_list = DictList() if reaction_list is None else DictList(reaction_list)
-        reac_kwargs = dict(zip(reaction_list.list_attr('id'), repeat({})))
-        reac_kwargs.update(reaction_kwargs)
-
-        # these properties will be recalculated accordingly when they are called!
-        self._labelling_reactions = DictList()
-
-        for reac_id, kwargs in reac_kwargs.items():
-            if reac_id in self.reactions:
-                reaction = self.reactions.get_by_id(id=reac_id)
-                self.reactions.remove(reac_id)
-            elif reac_id in reaction_list:
-                reaction = reaction_list.get_by_id(reac_id)
-                reaction_list.remove(reac_id)
-            elif reac_id in self.pseudo_reactions:
-                reaction = self.pseudo_reactions.get_by_id(id=reac_id)
-            else:
-                reaction = Reaction(id=reac_id, lower_bound=0.0, upper_bound=0.0)
-
-            # this is to make sure that upper_bound is set before lower_bound
-            # TODO: also set arbitrary kwargs (not in list below)!
-            for kwarg in ['name', 'bounds', 'upper_bound', 'lower_bound', 'subsystem', 'gene_reaction_rule']:
-                val = kwargs.get(kwarg)
-                if (kwarg == 'upper_bound') and (val is not None) and (val < reaction.lower_bound):
-                    lval = kwargs.get('lower_bound')
-                    if lval is not None:
-                        reaction.lower_bound = lval
-                if val is not None:
-                    setattr(reaction, kwarg, val)
-
-            if (type(reaction) == Reaction) and ('atom_map_str' in kwargs):
-                reaction = self._TYPE_REACTION(idr=reaction)
-                for metabolite in reaction._metabolites:
-                    for met_reaction in metabolite._reaction:
-                        if (met_reaction.id == reaction.id) and (met_reaction is not reaction):
-                            metabolite._reaction.remove(met_reaction)
-                            metabolite._reaction.add(reaction)
-
-            if isinstance(reaction, LabellingReaction):
-                for kwarg in ['tau', 'dgibbsr', 'rho_max', 'rho_min', 'pseudo', '_sigma_dgibbsr',]:
-                    val = kwargs.get(kwarg)
-                    if val is not None:
-                        setattr(reaction, kwarg, val)
-                if reaction.pseudo and (reaction not in self.pseudo_reactions):
-                    reaction._model = self
-                    if reaction in self.reactions:
-                        raise NotImplementedError
-                    self.pseudo_reactions.append(reaction)
-                elif reaction not in reaction_list:
-                    reaction_list.append(reaction)
-            elif isinstance(reaction, Reaction):
-                reaction_list.append(reaction)
-        Model.add_reactions(self, reaction_list=reaction_list)
-
-        for reac_id, kwargs in reac_kwargs.items():
-            atom_map_str = kwargs.get('atom_map_str')
-            if atom_map_str is None:
-                continue
-            reactants = _read_atom_map_str_rex.findall(string=atom_map_str)[0][0]
-            is_biomass = _find_biomass_rex.search(reactants) is not None
-            if is_biomass:
-                if (self._biomass_id is not None) and (self._biomass_id != reac_id):
-                    raise ValueError(f'watch out, more than one biomass reaction in reac_kwargs! '
-                                     f'self._biomass_id = {self._biomass_id}, reac_id = {reac_id}')
-                self._biomass_id = reac_id
-                continue
-            if reac_id in self.pseudo_reactions:
-                reaction = self.pseudo_reactions.get_by_id(reac_id)
-            else:
-                reaction = self.reactions.get_by_id(id=reac_id)
-            atom_map = reaction.build_atom_map_from_string(atom_map_str=atom_map_str, metabolite_kwargs=metabolite_kwargs)
-            fixed_atom_map = self._fix_metabolite_reference_mess(reaction=reaction, atom_map=atom_map)
-            reaction.set_atom_map(atom_map=fixed_atom_map)
-
-        if self._biomass_id is not None:
-            reaction = self.reactions.get_by_id(self._biomass_id)
-            atom_map = reaction.build_atom_map_from_string(atom_map_str='biomass --> ∅', metabolite_kwargs=metabolite_kwargs)
-            # TODO where did fixed_atom_map go?
-            fixed_atom_map = self._fix_metabolite_reference_mess(reaction=reaction, atom_map=atom_map)
-            reaction.set_atom_map(atom_map=fixed_atom_map)
+    def add_labelling_kwargs(self, reaction_kwargs, metabolite_kwargs):
+        self._labelling_reactions = DictList()  # dynamically recomputed
         self._is_built = False
+
+        # In a first step we convert all cobra metabolites to LabellingMetabolite objecte
+        metabolite_kwargs = create_full_metabolite_kwargs(
+            reaction_kwargs, metabolite_kwargs, infer_formula=True, add_cofactors=False
+        )
+        for met_id, kwargs in metabolite_kwargs.items():
+            if met_id not in self.metabolites:
+                raise ValueError(f'All metabolites should be in the model before processing labelling info {met_id}')
+            # we allow for formula to be changed for instance for CoA which has 28 carbons, but 1 participating in
+            #   labelling reactions; the rest of the attributes we assume to have been set in the model at instantiation
+            #   of this model
+            metabolite = self.metabolites.get_by_id(met_id)
+            self.metabolites._replace_on_id(new_object=self._TYPE_REACTION._TYPE_METABOLITE(
+                metabolite=metabolite, symmetric=kwargs.get('symmetric', False), formula=kwargs.get('formula', None)
+            ))
+
+        # Next, we convert cobra Reactions to LabellingReactions and do all the atom mapping and split of pseudo reactions
+        for reac_id, kwargs in reaction_kwargs.items():
+            if reac_id not in self.reactions:
+                raise ValueError(f'All reactions should be in the model before processing labelling info: {reac_id}')
+            reaction = self.reactions.get_by_id(reac_id)
+            if 'upper_bound' in kwargs:
+                ub = kwargs['upper_bound']
+                if ub != reaction.upper_bound:
+                    reaction.upper_bound = ub
+            if 'lower_bound' in kwargs:
+                lb = kwargs['lower_bound']
+                if lb != reaction.lower_bound:
+                    reaction.lower_bound = lb
+
+            new_metabolites = {}
+            for metabolite, stoich in reaction.metabolites.items():
+                new_metabolites[self.metabolites.get_by_id(metabolite.id)] = stoich
+            reaction._metabolites = new_metabolites
+            if 'atom_map_str' in kwargs:
+                reaction = self._TYPE_REACTION(
+                    reaction, rho_min=kwargs.get('rho_min', None),
+                    rho_max=kwargs.get('rho_max', None), pseudo=kwargs.get('pseudo', False)
+                )
+                atom_map, is_biomass = reaction.build_atom_map_from_string(kwargs['atom_map_str'])
+                if is_biomass:
+                    if self._biomass_id is not None:
+                        raise ValueError('more than 1 biomass in the atom_mapt_str of reaction_kwargs')
+                    self._biomass_id = reac_id
+                reaction.set_atom_map(atom_map)
+                if reaction.pseudo:
+                    products = reaction.products
+                    cons_vars = [reaction.forward_variable, reaction.reverse_variable]
+                    for metabolite in products:
+                        cons_vars.append(self.solver.constraints[metabolite.id])
+                        self.pseudo_metabolites.append(metabolite)
+                        self.metabolites.remove(metabolite.id)
+                    self.remove_cons_vars(cons_vars)
+                    self.reactions.remove(reac_id)
+                    self.pseudo_reactions.append(reaction)
+                else:
+                    self.reactions._replace_on_id(new_object=reaction)
+        self.solver.update()  # due to the cons_vars
+        self.repair()
+
+        # import gc
+        # print(sys.getrefcount(metabolite))
+        # referrers = gc.get_referrers(metabolite)
+        # print("Objects referring to a:")
+        # for ref in referrers:
+        #     print(ref)
+
+    def add_reactions(self, reaction_list: Iterable[Reaction]) -> None:
+        for reaction in reaction_list:
+            if hasattr(reaction, '_pseudo') and reaction.pseudo:
+                raise ValueError('This is a pseudo reaction')
+        super(LabellingModel, self).add_reactions(reaction_list)
 
     def make_sbml_writable(self):
         # we need to do this since there are a bunch of things that writing to sbml does not like if I remember correctly
@@ -542,7 +576,7 @@ class LabellingModel(Model):
                 self._measurements.remove(metabolite)
             if metabolite in self.input_metabolites:
                 print('removing input metabolite for which labelling is set!')
-                self._input_labelling = {}
+                self._substrate_labelling = {}
             if not destructive:
                 # NB this is necessary for condensed reactions where a
                 #   metabolite appears in the atom_map but not in metabolites
@@ -556,9 +590,20 @@ class LabellingModel(Model):
         for measurement in remove_measurements:
             self._measurements.remove(measurement)
 
-        Model.remove_metabolites(self, metabolite_list=metabolite_list, destructive=destructive)
-        self._pseudo_metabolites = DictList()  # need to recompute this
+        super(LabellingModel, self).remove_metabolites(metabolite_list=metabolite_list, destructive=destructive)
         self._is_built = False
+
+    def merge(
+        self,
+        right: "Model",
+        prefix_existing: Optional[str] = None,
+        inplace: bool = True,
+        objective: str = "left",
+    ) -> "Model":
+        raise NotImplementedError
+
+    def __enter__(self):
+        raise NotImplementedError
 
     def add_groups(self, group_list):
         raise NotImplementedError
@@ -577,23 +622,12 @@ class LabellingModel(Model):
 
     def dsdv(self, reaction_i: LabellingReaction):
         self._dsdv[:] = 0.0
-
         if self._fluxes is None:
             raise ValueError('no fluxes')
-
-        if self._la._auto_diff:
-            # very circumspect, but I see no other (readable) way at the moment
-            reaction_idx = self.labelling_reactions.index(reaction_i)
-            jacobian = self._la.diff(inputs=self._fluxes, outputs=self._format_return(s=self._s))
-            return jacobian[:, reaction_idx, :]
 
     def compute_jacobian(self, dept_reactions_idx: np.array = None):
         if self._fluxes is None:
             raise ValueError('no fluxes')
-
-        if self._la._auto_diff:
-            self._jacobian = self._la.diff(inputs=self._fluxes, outputs=self._format_return(s=self._s))
-            return self._jacobian
 
         if dept_reactions_idx is None:
             dept_reactions_idx = range(len(self._labelling_reactions))
@@ -629,23 +663,8 @@ class LabellingModel(Model):
                     metabolites_in_state.append(metabolite)
         return metabolites_in_state
 
-    @property
-    def pseudo_metabolites(self):
-        if self._pseudo_metabolites:
-            return self._pseudo_metabolites
-        metabolites_in_state = self.metabolites_in_state
-        self._pseudo_metabolites = DictList()
-        for pseudo_reaction in self.pseudo_reactions:
-            for metabolite, coeff in pseudo_reaction._metabolites.items():
-                if coeff > 0:
-                    self._pseudo_metabolites.append(metabolite)
-                else:
-                    if metabolite not in metabolites_in_state:
-                        raise ValueError(f'Cannot simulate {pseudo_reaction.id} since {metabolite.id} not in state')
-        return self._pseudo_metabolites
-
     def prepare_polytopes(self, free_reaction_id=None, verbose=False):
-        if len(self._input_labelling) == 0:
+        if len(self._substrate_labelling) == 0:
             raise ValueError('set labelling input first!')  # need to have set labelling before generating system!
 
         # TODO: why did we implement this again; I think it was because otherwise cobra and optlang dont like it
@@ -660,7 +679,6 @@ class LabellingModel(Model):
         # TODO change the bounds for the other fluxes to the fva ones, this basically finds 0-facets that we need to deal with!
 
         self._labelling_reactions = DictList()  # since we reset a bunch of reactions to 0 bounds
-        self._pseudo_metabolites  = DictList()  # this way we make sure it is recomputed with updated metabolites_in_state
 
         if never_net.any() and verbose:
             string = ", ".join([f'{i}' for i in never_net_rids])
@@ -929,16 +947,16 @@ class EMU_Model(LabellingModel):
             self._dYdv[weight][:]  = 0.0
             # NB Y is modified in-place and does not need reinitialization
 
-    def set_input_labelling(self, input_labelling: pd.Series):
+    def set_substrate_labelling(self, input_labelling: pd.Series):
         labelling_id = input_labelling.name
         settings = self._labelling_repo.get(labelling_id, None)
         if settings is None:
-            super().set_input_labelling(input_labelling=input_labelling)
+            super().set_substrate_labelling(input_labelling=input_labelling)
             if len(self._yemus) > 0:
                 self._initialize_Y()
         else:
             self._labelling_id = labelling_id
-            self._input_labelling = settings['_input_labelling']
+            self._substrate_labelling = settings['_input_labelling']
             Y = settings.get('_Y', None)
             if Y is None:
                 # this occurs if we rebuild with different batch_size
@@ -1002,7 +1020,7 @@ class EMU_Model(LabellingModel):
             for i, yemu in enumerate(yemus):
                 if type(yemu) == ConvolutedEMU:
                     continue
-                for isocumo, fraction in self._input_labelling.items():
+                for isocumo, fraction in self._substrate_labelling.items():
                     if isocumo.metabolite == yemu.metabolite:
                         emu_label = isocumo._label[yemu.positions]
                         M_plus = emu_label.sum()
@@ -1233,6 +1251,101 @@ class EMU_Model(LabellingModel):
 class RatioEMU_Model(EMU_Model, RatioMixin): pass
 
 
+from sbmfi.lcmsanalysis.formula import Formula
+
+
+
+from collections import defaultdict
+import operator
+def model_builder_from_dict(
+        reaction_kwargs: dict,
+        metabolite_kwargs: dict,
+        id_or_model='crack',
+        name=None,
+) -> Model:
+    reaction_kwargs = reaction_kwargs.copy()
+    model = Model(id_or_model=id_or_model, name=name)
+    biomass_kwargs = reaction_kwargs.pop('biomass', None)
+    metabolite_kwargs = create_full_metabolite_kwargs(reaction_kwargs, metabolite_kwargs, add_cofactors=True)
+    # now metabolite_kwargs contains all metabolites that should be tranformed into labelling metabolites
+    metabolite_list = DictList()
+    for met_id, kwargs in metabolite_kwargs.items():
+        metabolite_list.append(
+            Metabolite(
+                met_id, formula=kwargs.get('formula'), name=kwargs.get('name', None),
+                charge=kwargs.get('charge', None), compartment=kwargs.get('compartment', 'c'),
+            )
+        )
+    model.add_metabolites(metabolite_list=metabolite_list)
+
+    def count_items(dct, lst, add=True):
+        oprat = operator.add if add else operator.sub
+        for item in lst:
+            if item in ['∅', 'biomass']:
+                continue
+            item = metabolite_list.get_by_id(item)
+            dct[item] = oprat(dct.get(item, 0), 1)
+        return dct
+
+    reaction_list = DictList()
+    for reac_id, kwargs in reaction_kwargs.items():
+        reaction_string = kwargs.get('atom_map_str', None)
+        if reaction_string is None:
+            reaction_string = kwargs.get('reaction_str', None)
+        rects, arrow, prods = _read_atom_map_str_rex.findall(string=reaction_string)[0]
+        rects = [rect.split('/')[0].strip() for rect in rects.split('+')]
+        prods = [prod.split('/')[0].strip() for prod in prods.split('+')]
+        metabolites = {}
+        count_items(metabolites, rects, False)
+        count_items(metabolites, prods)
+        reac = Reaction(
+            reac_id, name=kwargs.get('name', None), subsystem=kwargs.get('name', None),
+            lower_bound=kwargs.get('lower_bound', 0.0), upper_bound=kwargs.get('upper_bound', 1000.0),
+        )
+        reac.add_metabolites(metabolites_to_add=metabolites)
+        reaction_list.append(reac)
+
+    if biomass_kwargs is not None:
+        biomass_coeff = _biomass_coeff_rex.findall(biomass_kwargs['reaction_str'])
+        biomass_coeff = {model.metabolites.get_by_id(k): -float(v) for v, k in biomass_coeff}
+        bm_reac = Reaction(
+            'biomass', name=biomass_kwargs.get('name', None), subsystem=biomass_kwargs.get('name', None),
+            lower_bound=biomass_kwargs.get('lower_bound', 0.0), upper_bound=biomass_kwargs.get('upper_bound', 1000.0),
+        )
+        bm_reac.add_metabolites(metabolites_to_add=biomass_coeff)
+        reaction_list.append(bm_reac)
+
+    model.add_reactions(reaction_list=reaction_list)
+    return model
+
+    # comparmented_kwargs = metabolite_kwargs.get(met_id, {})
+    # compartment = _strip_bigg_rex.search(met_id)
+    # if compartment is not None:
+    #     compartment = compartment.group()[1:]
+    # compartment = comparmented_kwargs.get('compartment', compartment)
+    #
+    # no_compartment = _strip_bigg_rex.sub('', met_id)
+    # compartmentless_kwargs = metabolite_kwargs.get(no_compartment, {})
+    # formula = compartmentless_kwargs.get('formula', 'C' + str(len(atoms_arr)))
+    # all_kwargs = {**compartmentless_kwargs, **comparmented_kwargs}
+    # if not isinstance(metabolite, LabelledMetabolite):
+    #     # this means that met._reaction is also copied, thus not breaking references
+    #     metabolite = self._TYPE_METABOLITE(idm=metabolite)
+    #     created_mets.append(metabolite)
+    #
+    # for kwarg, value in all_kwargs.items():
+    #     if not hasattr(metabolite, kwarg):
+    #         raise ValueError(f'Faulty metabolite kwargs {met_id}: {kwarg}')
+    #     setattr(metabolite, kwarg, value)
+    #
+    # if metabolite not in atom_map:
+    #     atom_map[metabolite] = (0, [])
+    #
+    # for met_id, kwargs  in metabolite_kwargs.items():
+    #     model_met = model.metabolites._get(met_id, None)
+    #     if model_met is None:
+    #
+
 
 
 if __name__ == "__main__":
@@ -1243,7 +1356,12 @@ if __name__ == "__main__":
     # from sbmfi.models.small_models import spiro
 
     import pickle
+
     reaction_kwargs = {
+        'biomass': {
+            'reaction_str': '0.3H + 0.6B + 0.5E + 0.1C --> ∅',
+            'atom_map_str': 'biomass --> ∅',
+        },
         'a_in': {
             'lower_bound': 10.0, 'upper_bound': 10.0,
             'atom_map_str': '∅ --> A/ab'
@@ -1275,7 +1393,11 @@ if __name__ == "__main__":
         },
         'v3': {
             'upper_bound': 100.0,
-            'atom_map_str': 'B/ab + E/cd --> C/abcd'
+            'atom_map_str': 'B/ab + E/cd --> C/abcd + cof'
+        },
+        'cof_out': {
+            'upper_bound': 100.0,
+            'reaction_str': 'cof --> ∅'
         },
         'v4': {
             'upper_bound': 100.0,  # 'lower_bound': -10.0,
@@ -1286,7 +1408,7 @@ if __name__ == "__main__":
         #     'atom_map_str': 'C/abcd --> F/a + D/bcd'
         # },
         'v5': {  # NB this is an always reverse reaction!
-            'lower_bound': -100.0,  # 'upper_bound': 100.0
+            'lower_bound': -100.0,  'upper_bound': 0.0,
             'atom_map_str': 'F/a + D/bcd  <-- C/abcd',  # <--  ==>
             # 'atom_map_str': 'F/a + D/bcd  <=> C/abcd',  # <--  ==>
         },
@@ -1310,7 +1432,7 @@ if __name__ == "__main__":
         'C': {'formula': 'C4H6N4OS'},
         'D': {'formula': 'C3H2'},
         'E': {'formula': 'C2H4O5'},
-        'F': {'formula': 'CH2'},
+        # 'F': {'formula': 'CH2'},
         'G': {'formula': 'CH2'},  # not used
         'H': {'formula': 'C2H2'},
         'L': {'formula': 'C5KNaSH'},  # pseudo-metabolite
@@ -1318,77 +1440,64 @@ if __name__ == "__main__":
         'P': {'formula': 'C2H'},
     }
     linalg = LinAlg(backend='torch', batch_size=1, device='cpu',)
-    model = RatioEMU_Model(linalg=linalg, name='niks')
-    model.add_reactions(
-        reaction_kwargs=reaction_kwargs,
-        metabolite_kwargs=metabolite_kwargs
-    )
-    labelling = pd.Series([0.0, 1.0, 0.0, 0.0], index=['A/00', 'A/01', 'A/10', 'A/11'])
-    model.set_input_labelling(labelling)
+    import re
+    pattern = re.compile(r'([+-]?\d+(?:\.\d+)?)\s*([A-Za-z_]\w*)')
+    matches = pattern.findall('0.3H + 0.6B + 0.5E + 0.1C --> ∅')
+
+    from_file = False
+    if from_file:
+        from cobra.io import read_sbml_model
+        import os
+        from sbmfi.settings import MODEL_DIR
+        file = os.path.join(MODEL_DIR, 'sbml', 'spiro.xml')
+        model = read_sbml_model(file)
+        model = EMU_Model(linalg, model)
+    else:
+        model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+    substrate_df = pd.DataFrame([
+        [0.2, 0.0, 0.0, 0.8],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.8, 0.0, 0.2],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.8, 0.2],
+    ], columns=['A/00', 'A/01', 'A/10', 'A/11'], index=list('ABCDE'))
+
+    model = EMU_Model(linalg, model)
+    model.add_labelling_kwargs(reaction_kwargs, metabolite_kwargs)
+    model.set_substrate_labelling(input_labelling=substrate_df.loc['A'])
+    model.set_measurements(measurement_list=['L|[1,2]', 'C', 'L'])
+    model.build_model(('h_out', ))
+    print(model._is_built)
+    model.reactions.get_by_id('v3').lower_bound = -10
+    model.objective = {model.reactions.get_by_id('h_out'):1}
+    model.optimize()
+    from sbmfi.core.polytopia import fast_FVA
+    aa = fast_FVA(model._fcm._Fn)
+    print(model._fcm._Fn.S)
+    print(model._is_built)
+    print(aa)
+    pickle.dump(model, open('test.p', 'wb'))
+    pickle.load(open('test.p', 'rb'))
+    # from sbmfi.models.build_models import _anton_model_kwargs, _metabolite_kwargs
+    # atom_mappings = {}
+    # for pway, vdct in _anton_model_kwargs.items():
+    #     if pway == 'MODEL_SOURCE':
+    #         continue
+    #     for v_num, v_kwargs in vdct.items():
+    #         bigg_kwargs = v_kwargs.get('bigg_kwargs')
+    #         for bigg_id, reaction_kwargs in bigg_kwargs.items():
+    #             atom_mappings[bigg_id] = reaction_kwargs
+    # model_builder_from_dict(model, atom_mappings, _metabolite_kwargs)
+
+    # model.add_reactions(
+    #     reaction_kwargs=reaction_kwargs,
+    #     metabolite_kwargs=metabolite_kwargs
+    # )
+    # labelling = pd.Series([0.0, 1.0, 0.0, 0.0], index=['A/00', 'A/01', 'A/10', 'A/11'])
+    # model.set_input_labelling(labelling)
+    #
+    #
+    # model.set_measurements(['H', 'C', 'D'])
+    # # model.build_model(['d_out', 'v4'])
 
 
-    model.set_measurements(['H', 'C', 'D'])
-    # model.build_model(['d_out', 'v4'])
-
-
-    # fcm = FluxCoordinateMapper(model=m)
-    # up = UniFluxPrior(fcm)
-    # t, f = up.sample_dataframes(n=n)
-    # pickle.dump((t,f), open('tf.p', 'wb'))
-    #
-    # t,f = pickle.load(open('tf.p', 'rb'))
-    # weight = 3
-    # t = t.iloc[:n]
-    # f = f.iloc[:n]
-    #
-    # m.set_fluxes(f)
-    # m.cascade()
-    # pp1 = m.pretty_cascade(weight)
-    # s1 = m.state
-    #
-    # torch_fcm = FluxCoordinateMapper(model=m, linalg=LinAlg(backend='torch', auto_diff=True))
-    # theta = torch.from_numpy(t.values).requires_grad_(True)
-    # ft = torch_fcm.map_theta_2_fluxes(theta, return_thermo=True)
-    #
-    # m.compute_jacobian()
-    # jacuito = torch_fcm.free_jacobian(jacobian=m._jacobian, thermo_fluxes=ft)
-    # jacuito = m._la.tonp(jacuito)
-    # framed_jacs = [pd.DataFrame(sub_jac, index=m._fcm.theta_id, columns=m.state_id) for sub_jac in jacuito]
-    # jacuito = pd.concat(framed_jacs, keys=m._fcm._samples_id)
-    #
-    # ftt = pd.DataFrame(ft.detach().numpy(), columns=m._fcm.thermo_fluxes_id)
-    # f3 = torch_fcm.map_thermo_2_fluxes(ft)
-    #
-    # t_ft = m._la.diff(inputs=theta, outputs=ft)
-    # # t_ft = m._la.tonp(t_ft)
-    # # framed_jacs = [pd.DataFrame(sub_jac, index=m._fcm.theta_id, columns=m._fcm.thermo_fluxes_id) for sub_jac in t_ft]
-    # # t_ft = pd.concat(framed_jacs, keys=m._fcm._samples_id)
-    #
-    # ft = torch.from_numpy(ftt.values).requires_grad_(True)
-    # f3 = m._fcm.map_thermo_2_fluxes(ft)
-    # ft_f = m._la.diff(inputs=ft, outputs=f3)
-    # # ft_f = m._la.tonp(ft_f)
-    # # framed_jacs = [pd.DataFrame(sub_jac, index=m._fcm.thermo_fluxes_id, columns=m._fcm.fluxes_id) for sub_jac in ft_f]
-    # # ft_f = pd.concat(framed_jacs, keys=m._fcm._samples_id)
-    #
-    #
-    # m.set_fluxes(f3)
-    # m.cascade()
-    # # pp3 = m._pretty_cascade_at_weight(weight)
-    # # s3 = m.state
-    #
-    # jac = m._la.diff(inputs=f3, outputs=m._format_return(s=m._s))
-    # # jac = m._la.tonp(jac)
-    # # framed_jacs = [pd.DataFrame(sub_jac, index=m._fcm.fluxes_id, columns=m.state_id) for sub_jac in jac]
-    # # jac = pd.concat(framed_jacs, keys=m._fcm._samples_id)
-    #
-    # jac = t_ft @ ft_f @ jac
-    # jac = m._la.tonp(jac)
-    # framed_jacs = [pd.DataFrame(sub_jac, index=m._fcm.theta_id, columns=m.state_id) for sub_jac in jac]
-    # jac = pd.concat(framed_jacs, keys=m._fcm._samples_id)
-    #
-    #
-    # jac2 = m._la.diff(inputs=theta, outputs=m._format_return(s=m._s))
-    # jac2 = m._la.tonp(jac2)
-    # framed_jacs = [pd.DataFrame(sub_jac, index=m._fcm.theta_id, columns=m.state_id) for sub_jac in jac2]
-    # jac2 = pd.concat(framed_jacs, keys=m._fcm._samples_id)

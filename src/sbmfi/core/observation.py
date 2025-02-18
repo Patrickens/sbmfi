@@ -673,19 +673,11 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         mdv = self._la.atleast_2d(mdv)
         num = mdv[..., self._numi]
         denom = self._denom_sum @ num.T
-        if self._la._auto_diff:
-            return self._la.diff(inputs=mdv, outputs=num / denom[self._denomi])
         jac_num = self._num_sum @ num.T
         self._J_xs[:, self._mdv, self._col] = (jac_num / (denom ** 2)[self._denom]).T
         return self._J_xs
 
-    def J_xv(self, mdv, J_sv=None, fluxes=None):
-        if self._la._auto_diff:
-            if fluxes is None:
-                raise ValueError('fluxes are the ones that are used to generate the passed mdv')
-            observation = self.compute_observations(s=mdv, select=True)
-            # this assumes that mdv has been generated with the _fluxes currently set
-            return self._la.diff(inputs=fluxes, outputs=observation)
+    def J_xv(self, mdv, J_sv=None):
         J_xs = self.J_xs(mdv=mdv)
         return J_sv @ J_xs
 
@@ -1104,7 +1096,7 @@ if __name__ == "__main__":
     annotation_df = kwargs['annotation_df']
     fluxes = kwargs['fluxes']
     substrate_df = kwargs['substrate_df']
-    model.set_input_labelling(input_labelling=substrate_df.iloc[1])
+    model.set_substrate_labelling(input_labelling=substrate_df.iloc[1])
 
     # observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
     # com = ClassicalObservationModel(model, kwargs['annotation_df'])

@@ -60,7 +60,7 @@ class _BaseSimulator(object):
         has_log_prob = []
         i, j = 0, 0
         for k, (labelling_id, obmod) in enumerate(mdv_observation_models.items()):
-            model.set_input_labelling(substrate_df.loc[labelling_id])  # NB check whether valid susbtrate_df
+            model.set_substrate_labelling(substrate_df.loc[labelling_id])  # NB check whether valid susbtrate_df
             if not model.state_id.equals(obmod.state_id):
                 raise ValueError
             if not model._la == obmod._la:
@@ -169,7 +169,7 @@ class _BaseSimulator(object):
             if mdvs is not None:
                 mdv = mdvs[:, i, :]
             else:
-                self._model.set_input_labelling(input_labelling=self._substrate_df.loc[labelling_id])
+                self._model.set_substrate_labelling(input_labelling=self._substrate_df.loc[labelling_id])
                 mdv = self._model.cascade()
             if return_mdvs:
                 result[:, i, :] = mdv

@@ -35,7 +35,7 @@ def simulator_worker(task: dict, model=None) -> dict:
     la = MODEL._la
 
     if MODEL.labelling_id != input_labelling.name:
-        MODEL.set_input_labelling(input_labelling=input_labelling)
+        MODEL.set_substrate_labelling(input_labelling=input_labelling)
 
     mdv_chunk = la.get_tensor(  # by making this a tensor with -np.inf values, we can filter failed simulations
         values=np.full(shape=(fluxes_chunk.shape[0], n_state), fill_value=-np.inf, dtype=np.double)

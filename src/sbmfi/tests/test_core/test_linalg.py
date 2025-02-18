@@ -242,19 +242,3 @@ def test_probability_functions(linalg):
     np.testing.assert_allclose(inv_cdf, x, rtol=1e-5)
     # Check that the log PDF equals log(pdf).
     np.testing.assert_allclose(log_pdf, np.log(pdf), rtol=1e-5)
-
-
-# -------------------------------------------------------------------
-# Test automatic differentiation (only for Torch)
-# -------------------------------------------------------------------
-@pytest.mark.skipif(torch is None or torch.__version__ is None, reason="Torch not available")
-def test_diff():
-    # Only run for Torch with auto diff enabled.
-    linalg_torch = LinAlg(backend="torch", auto_diff=True)
-    x = torch.tensor([1.0, 2.0], requires_grad=True)
-    y = x ** 2
-    jac = linalg_torch.diff(x, y)
-    # The Jacobian of [x^2] with respect to x is 2*x.
-    expected = 2 * x
-    np.testing.assert_allclose(jac.cpu().detach().numpy(),
-                               expected.cpu().detach().numpy(), rtol=1e-5)
