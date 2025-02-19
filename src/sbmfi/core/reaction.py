@@ -579,7 +579,7 @@ class EMU_Reaction(LabellingReaction):
         state['B_tensors'] = {}
         return state
 
-    def _find_reactant_emus(self, product_emu: EMU, input_metabolites: Iterable, n_eq_EMU=1, eq_EMU=None) -> list:
+    def _find_reactant_emus(self, product_emu: EMU, substrate_metabolites: Iterable, n_eq_EMU=1, eq_EMU=None) -> list:
         if not product_emu.metabolite in self.gettants(reactant=False):
             raise ValueError('pjurre kenss')
         prod_stoich, all_prod_atoms = self._atom_map[product_emu.metabolite]
@@ -597,7 +597,7 @@ class EMU_Reaction(LabellingReaction):
                     positions = np.where(emu_atoms[:, None] == rect_atoms[None, :])[1]
                     if positions.size:
                         reactant_emu = metabolite.get_emu(positions=positions)
-                        if (reactant_emu.weight < product_emu.weight) or (metabolite in input_metabolites):
+                        if (reactant_emu.weight < product_emu.weight) or (metabolite in substrate_metabolites):
                             convolvers.append(reactant_emu)
                             tot_weight += reactant_emu.weight
                             if tot_weight < product_emu.weight:
@@ -630,9 +630,9 @@ class EMU_Reaction(LabellingReaction):
                         allements.append(element)
         return allements
 
-    def map_reactants_products(self, product_emu: EMU, input_metabolites: Iterable):
+    def map_reactants_products(self, product_emu: EMU, substrate_metabolites: Iterable):
         if not product_emu.metabolite.symmetric:
-            self._find_reactant_emus(product_emu=product_emu, input_metabolites=input_metabolites)
+            self._find_reactant_emus(product_emu=product_emu, substrate_metabolites=substrate_metabolites)
             return self._product_elements(product_emu=product_emu)
 
         product_metabolite = product_emu.metabolite
@@ -641,14 +641,14 @@ class EMU_Reaction(LabellingReaction):
         sym_emu_positions.sort()
 
         if all(sym_emu_positions == product_emu.positions):
-            self._find_reactant_emus(product_emu=product_emu, input_metabolites=input_metabolites)
+            self._find_reactant_emus(product_emu=product_emu, substrate_metabolites=substrate_metabolites)
             return self._product_elements(product_emu=product_emu)
 
         sym_product_emu = product_metabolite.get_emu(positions=sym_emu_positions)
-        self._find_reactant_emus(product_emu=product_emu, input_metabolites=input_metabolites, n_eq_EMU=2)
+        self._find_reactant_emus(product_emu=product_emu, substrate_metabolites=substrate_metabolites, n_eq_EMU=2)
         elements = self._product_elements(product_emu=product_emu)
         self._find_reactant_emus(
-            product_emu=product_emu, input_metabolites=input_metabolites, n_eq_EMU=2, eq_EMU=sym_product_emu
+            product_emu=product_emu, substrate_metabolites=substrate_metabolites, n_eq_EMU=2, eq_EMU=sym_product_emu
         )
         return elements + self._product_elements(product_emu=sym_product_emu)
 

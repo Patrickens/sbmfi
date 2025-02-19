@@ -412,7 +412,7 @@ def extract_labelling_polytope(
 
         coefs = {
             variables_id[key.name]: val for key, val in
-                constraint.get_linear_coefficients(constraint.variables).items()
+            constraint.get_linear_coefficients(constraint.variables).items()
         }
         if equality:
             S_rows[constraint.name] = coefs
@@ -511,7 +511,6 @@ def extract_labelling_polytope(
 
     exclude = slice(None)
     fluxes_id = non_labelling_reactions.append(fluxes_id)
-
     A = A.loc[:, fluxes_id]
     S = S.loc[exclude, fluxes_id]
     h = h.loc[exclude]

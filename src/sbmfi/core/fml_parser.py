@@ -254,7 +254,7 @@ def pysumo_to_fml(
 
         # input labelling
         if input_labelling is None:
-            input_labelling = model.input_labelling
+            input_labelling = model.substrate_labelling
 
         for isocumo, frac in input_labelling.iteritems():
             met_id, label = isocumo.split('/')

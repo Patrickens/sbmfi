@@ -169,7 +169,7 @@ class _BaseSimulator(object):
             if mdvs is not None:
                 mdv = mdvs[:, i, :]
             else:
-                self._model.set_substrate_labelling(input_labelling=self._substrate_df.loc[labelling_id])
+                self._model.set_substrate_labelling(substrate_labelling=self._substrate_df.loc[labelling_id])
                 mdv = self._model.cascade()
             if return_mdvs:
                 result[:, i, :] = mdv

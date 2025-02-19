@@ -1096,7 +1096,7 @@ if __name__ == "__main__":
     annotation_df = kwargs['annotation_df']
     fluxes = kwargs['fluxes']
     substrate_df = kwargs['substrate_df']
-    model.set_substrate_labelling(input_labelling=substrate_df.iloc[1])
+    model.set_substrate_labelling(substrate_labelling=substrate_df.iloc[1])
 
     # observation_df = LCMS_ObservationModel.generate_observation_df(model, annotation_df)
     # com = ClassicalObservationModel(model, kwargs['annotation_df'])

@@ -221,7 +221,7 @@ def spiro(
     if (ratio_repo is not None) and ratios:
         model.set_ratio_repo(ratio_repo=ratio_repo)
 
-    model.set_substrate_labelling(input_labelling=substrate_df.iloc[0])
+    model.set_substrate_labelling(substrate_labelling=substrate_df.iloc[0])
     model.set_measurements(measurement_list=annotation_df['met_id'].unique())
     if build_simulator:
         model.build_model(free_reaction_id=measured_boundary_fluxes)
@@ -529,7 +529,7 @@ def multi_modal(
         kernel_id=kernel_id,
         build_simulator=True
     )
-    substrate_df = model.input_labelling.to_frame().T
+    substrate_df = model.substrate_labelling.to_frame().T
 
     observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
     annotation_df['mz'] = 0.0
@@ -661,7 +661,7 @@ def polytope_volume(algorithm='emu', backend='numpy', auto_diff=False, return_ty
         batch_size=batch_size,
         build_simulator=False,
     )
-    model.set_substrate_labelling(input_labelling=input_labelling)
+    model.set_substrate_labelling(substrate_labelling=input_labelling)
     model.objective = {model.reactions[4]: 1}
     return model
 
