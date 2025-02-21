@@ -21,10 +21,9 @@ from sbmfi.lcmsanalysis.formula import Formula
 
 def spiro(
         backend='numpy',
-        auto_diff=False,
         batch_size=1,
         add_biomass=True,
-        add_cofactor=True,
+        add_cofactor=False,
         v2_reversible=False,
         v5_reversible=False,
         ratios=True,
@@ -50,13 +49,9 @@ def spiro(
     if (which_measurements is not None) and not build_simulator:
         raise ValueError
 
-    if v5_reversible:
-        v5_atom_map_str = 'F/a + D/bcd  <== C/abcd'
-    else:
-        v5_atom_map_str = 'F/a + D/bcd  <-- C/abcd'
-
     reaction_kwargs = {
         'biomass': {
+            'lower_bound': 0.05, 'upper_bound': 1.5,
             'reaction_str': '0.3H + 0.6B + 0.5E + 0.1C --> ∅',
             'atom_map_str': 'biomass --> ∅',
         },
@@ -91,7 +86,7 @@ def spiro(
         },
         'v3': {
             'upper_bound': 100.0,
-            'atom_map_str': 'B/ab + E/cd --> C/abcd'
+            'atom_map_str': 'B/ab + E/cd --> C/abcd + cof'
         },
         'v4': {
             'upper_bound': 100.0, # 'lower_bound': -10.0,
@@ -99,7 +94,7 @@ def spiro(
         },
         'v5': {  # NB this is an always reverse reaction!
             'lower_bound': -100.0, 'upper_bound': 0.0,
-            'atom_map_str': v5_atom_map_str,  # <--  ==>
+            'atom_map_str': 'F/a + D/bcd  <== C/abcd',  # <--  ==>
         },
         'v6': {
             'upper_bound': 100.0,
@@ -139,6 +134,9 @@ def spiro(
         # 'denominator': {'v6': 1, 'v4': 1}},  # make ratios correlated
     }
 
+    if not v5_reversible:
+        reaction_kwargs['v5']['atom_map_str'] = 'F/a + D/bcd  <-- C/abcd'
+
     if not add_biomass:
         reaction_kwargs.pop('biomass')
 
@@ -151,9 +149,9 @@ def spiro(
             'numerator': {'v2': 1},
             'denominator': {'v2': 1, 'v6': 1},
         }
-    if add_cofactor:
-        reaction_kwargs['v3']['atom_map_str'] = 'B/ab + E/cd --> C/abcd + cof'
-        reaction_kwargs['cof_out'] = {'reaction_str': 'cof --> ∅', 'upper_bound': 100.0}
+    if not add_cofactor:
+        reaction_kwargs['v3']['atom_map_str'] = 'B/ab + E/cd --> C/abcd'
+        reaction_kwargs.pop('cof_out')
 
     substrate_df = pd.DataFrame([
         [0.2, 0.0, 0.0, 0.8],
@@ -206,7 +204,7 @@ def spiro(
     model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs, model_id='spiro', name='spiralus')
     linalg = LinAlg(
         backend=backend, batch_size=batch_size, solver='lu_solve', device=device,
-        fkwargs=None, auto_diff=auto_diff, seed=seed
+        fkwargs=None, seed=seed
     )
     if ratios:
         model_type = RatioEMU_Model
@@ -282,10 +280,6 @@ def spiro(
     fluxes = pd.Series(fluxes, name='v')
     if (batch_size == 1) and build_simulator:
         model.set_fluxes(labelling_fluxes=fluxes)
-    print(model._fluxes)
-    for r in model.labelling_reactions:
-        print(r, r.bounds)
-    ding = model.cascade(pandalize=True)
 
     observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
     annotation_df['mz'] = 0.0
@@ -359,81 +353,8 @@ def spiro(
 
     return model, kwargs
 
-
-def heteroskedastic(
-        backend='numpy', auto_diff=False, return_type='mdv', batch_size=1, build_simulator=True
-):
-    reaction_kwargs = {
-        'a_in': {
-            'upper_bound': 10.0, 'lower_bound' : 10.0,
-            'atom_map_str': '∅ --> A/abc'
-        },
-        'co2_out': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'co2/a --> ∅'
-        },
-        'e_out': {
-            'upper_bound': 10.0,
-            'atom_map_str': 'E/ab --> ∅'
-        },
-        'v1': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/abc --> B/ab + co2/c'
-        },
-        'v2': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/abc --> C/bc + co2/a'
-        },
-        'v3': { # TODO: maybe make this one reversible to display thermodynamic effects
-            'upper_bound': 100.0,'lower_bound': 4.0, # 'rho_min':0.0, 'rho_max':0.95,
-            'atom_map_str': 'B/ab --> D/ab'
-        },
-        'v4': {
-            'upper_bound': 100.0,'lower_bound': 2.0,
-            'atom_map_str': 'C/ab --> D/ab'
-        },
-        'v5': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'D/ab --> E/ab',
-        },
-        'v6': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'C/ab --> E/ab'
-        },
-    }
-    input_labelling = {
-        'A/110': 1.0,
-    }
-    ratio_repo = {
-        'θ1': {
-            'numerator': {'v3': 1},
-            'denominator': {'v3': 1, 'v4': 1}
-        },
-        'θ2': {
-            'numerator': {'v5': 1},
-            'denominator': {'v5': 1, 'v6': 1},
-        },
-    }
-    measurements = ['E'] # , 'D'
-    model = simulator_factory(
-        id_or_file_or_model='heteroskedastic',
-        backend=backend,
-        auto_diff=auto_diff,
-        reaction_kwargs=reaction_kwargs,
-        input_labelling=input_labelling,
-        ratio_repo=ratio_repo,
-        measurements=measurements,
-        batch_size=batch_size,
-        build_simulator=build_simulator,
-    )
-    e_out = model.reactions.get_by_id('e_out')
-    model.objective = {e_out: 1}
-    return model
-
-
 def multi_modal(
         backend='numpy',
-        auto_diff=False,
         batch_size=1,
         ratios=False,
         which_measurements='com',
@@ -514,21 +435,6 @@ def multi_modal(
     if not include_D:
         annotation_df = annotation_df.iloc[:3]
 
-    model = simulator_factory(
-        id_or_file_or_model='multi_modal',
-        backend=backend,
-        auto_diff=auto_diff,
-        reaction_kwargs=reaction_kwargs,
-        metabolite_kwargs=metabolite_kwargs,
-        input_labelling=input_labelling,
-        ratio_repo=ratio_repo,
-        free_reaction_id=free_reaction_id,
-        measurements=annotation_df['met_id'].unique(),
-        batch_size=batch_size,
-        ratios=ratios,
-        kernel_id=kernel_id,
-        build_simulator=True
-    )
     substrate_df = model.substrate_labelling.to_frame().T
 
     observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
@@ -610,7 +516,7 @@ def multi_modal(
     }
     return model, kwargs
 
-def polytope_volume(algorithm='emu', backend='numpy', auto_diff=False, return_type='mdv', batch_size=1):
+def polytope_volume(algorithm='emu', backend='numpy', return_type='mdv', batch_size=1):
     reaction_kwargs = {
         'a_in': {
             'upper_bound': 10.0,
@@ -650,17 +556,7 @@ def polytope_volume(algorithm='emu', backend='numpy', auto_diff=False, return_ty
     }
 
     measurements=['E']
-    model = simulator_factory(
-        id_or_file_or_model='polytope_volume',
-        backend=backend,
-        auto_diff=auto_diff,
-        reaction_kwargs=reaction_kwargs,
-        input_labelling=input_labelling,
-        ratio_repo=ratio_repo,
-        measurements=measurements,
-        batch_size=batch_size,
-        build_simulator=False,
-    )
+    raise NotImplementedError
     model.set_substrate_labelling(substrate_labelling=input_labelling)
     model.objective = {model.reactions[4]: 1}
     return model
@@ -678,7 +574,6 @@ if __name__ == "__main__":
         # device='cuda:0',
         v2_reversible=False,
         device='cpu',
-        auto_diff=True,
         build_simulator=True,
         which_measurements='lcms',
     )

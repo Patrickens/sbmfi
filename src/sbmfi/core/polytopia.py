@@ -831,21 +831,21 @@ class PolytopeSamplingModel(object):
             rounded.index.name = 'samples_id'
         return rounded
 
-    def map_rounded_2_fluxes(self, rounded: pd.DataFrame, pandalize=False):
+    def map_rounded_2_fluxes(self, rounded: pd.DataFrame, jacobian=True, pandalize=False):
         index = None
         if isinstance(rounded, pd.DataFrame):
             index = rounded.index
             rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
 
-        # same as _to_fluxes_transform
-        # transformed = self._la.tensormul_T(self._E, rounded) + self._epsilon
-        # fluxes = self._la.tensormul_T(self._T, transformed) + self._tau.T
-
         fluxes = self._la.tensormul_T(self._Q, rounded) + self._q.T
+        if jacobian:
+            J = self._Q[None, ...]  # need to add a dimension for batches of samples
 
         if pandalize:
             fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_id)
             fluxes.index.name = 'samples_id'
+        if  jacobian:
+            return fluxes, J
         return fluxes
 
     def get_initial_points(self, num_points: int):

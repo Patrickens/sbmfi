@@ -118,7 +118,4 @@ def gen_annot_df(
 
 
 if __name__ == "__main__":
-    from sbmfi.settings import  *
-    import cobra
-    ijo = cobra.io.read_sbml_model(os.path.join(MODEL_DIR, 'sbml', 'iJO1366.xml'))
-    adf = gen_annot_df(ijo)
+    pass

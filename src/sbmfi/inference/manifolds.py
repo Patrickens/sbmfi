@@ -7,6 +7,7 @@ from flow_matching.utils.manifolds import Manifold
 import math
 
 
+
 class MaxEntManifold(Manifold):
     def __init__(self, vertices: torch.Tensor, tol: float = 1e-8, max_iter: int = 100):
         """
@@ -703,4 +704,4 @@ class Simplex(Manifold):
 
 if __name__ == "__main__":
     from flow_matching.path import GeodesicProbPath,  CondOTProbPath
-    from flow_matching.solver import ODESolver
+    from flow_matching.solver import ODESolver, RiemannianODESolver

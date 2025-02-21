@@ -387,8 +387,8 @@ def map_cylinder_2_ball(
         cylinder: Union[pd.DataFrame, np.ndarray, 'torch.Tensor'],
         hemi=False,
         rescale_val=1.0,
+        jacobian=False,
         pandalize=False,
-        jacobian=False
 ):
     index = None
     if isinstance(cylinder, pd.DataFrame):
@@ -620,25 +620,44 @@ class FluxCoordinateMapper(object):
         return map_rounded_2_ball(self._tsampler, rounded_xch, sep_radius=False)
 
     def map_net_theta_2_net_fluxes(
-            self, net_theta: pd.DataFrame, coordinate_id='rounded', pandalize=False
+            self, net_theta: pd.DataFrame, coordinate_id='rounded', jacobian=False, pandalize=False
     ):
         index = None
         if isinstance(net_theta, pd.DataFrame):
             index = net_theta.index
             net_theta_id = make_net_theta_id(self._sampler, coordinate_id)
             net_theta = self._la.get_tensor(values=net_theta.loc[:, net_theta_id].values)
-        if coordinate_id == 'transformed':
-            net_fluxes = self._la.tensormul_T(self._sampler._T, net_theta) + self._sampler._tau.T  # = transformed
-        else:
+
+        J_rb, J_bc = None, None
+        if coordinate_id != 'transformed':
             if coordinate_id == 'cylinder':
-                net_theta = map_cylinder_2_ball(self._sampler, cylinder=net_theta, rescale_val=1.0) # = ball
+                net_theta = map_cylinder_2_ball(self._sampler, cylinder=net_theta, rescale_val=1.0, jacobian=jacobian) # = ball
+                if jacobian:
+                    net_theta, J_bc = net_theta
             if coordinate_id != 'rounded':
-                net_theta = map_ball_2_rounded(self._sampler, ball=net_theta)  # = rounded
-            net_fluxes = self._sampler.map_rounded_2_fluxes(rounded=net_theta)  # = fluxes
+                net_theta = map_ball_2_rounded(self._sampler, ball=net_theta, jacobian=jacobian)  # = rounded
+                if jacobian:
+                    net_theta, J_rb = net_theta
+            net_fluxes = self._sampler.map_rounded_2_fluxes(rounded=net_theta, jacobian=jacobian)  # = fluxes
+            if jacobian:
+                net_fluxes, J_fr = net_fluxes
+                if J_rb is not None:
+                    J_ft = J_fr @ J_rb
+                if J_bc is not None:
+                    J_ft = J_fr @ J_bc
+                else:
+                    J_ft = J_fr
+        else:
+            net_fluxes = self._la.tensormul_T(self._sampler._T, net_theta) + self._sampler._tau.T  # = transformed
+            if jacobian:
+                J_ft = self._sampler._T[None, ...]
 
         if pandalize:
             net_fluxes = pd.DataFrame(self._la.tonp(net_fluxes), index=index, columns=self._sampler.reaction_id)
             net_fluxes.index.name = 'samples_id'
+
+        if jacobian:
+            return net_fluxes, J_ft
         return net_fluxes
 
     def map_net_fluxes_2_net_theta(
@@ -701,7 +720,7 @@ class FluxCoordinateMapper(object):
             raise ValueError(f'wrong shape brahh, last dim should be {self._n_lr}, is {labelling_fluxes.shape}, maybe wrong trim?')
         return labelling_fluxes
 
-    def map_thermo_2_fluxes(self, thermo_fluxes: pd.DataFrame, pandalize=False):
+    def map_thermo_2_fluxes(self, thermo_fluxes: pd.DataFrame, jacobian=False, pandalize=False):
         index = None
         if isinstance(thermo_fluxes, pd.DataFrame):
             index = thermo_fluxes.index
@@ -733,6 +752,8 @@ class FluxCoordinateMapper(object):
 
     def map_fluxes_2_thermo(self, fluxes: pd.DataFrame, jacobian=False, pandalize=False):
         index = None
+        if jacobian:
+            raise NotImplementedError
         if isinstance(fluxes, pd.DataFrame):
             index = fluxes.index
             fluxes = self._la.get_tensor(values=fluxes.loc[:, self._F.A.columns].values)
@@ -900,7 +921,7 @@ def map_gibbs_2_xch_fluxes(
 
 
 def map_labelling_jac_2_rounded_jac(
-        fcm: FluxCoordinateMapper,
+        psm: FluxCoordinateMapper,
         labelling_jacobian: Union['torch.Tensor', np.array],  # this is a jacobian of state w.r.t. fluxes, we might want to differentiate further to free variables
         thermo_fluxes: pd.DataFrame,
 ):
@@ -910,7 +931,6 @@ def map_labelling_jac_2_rounded_jac(
     # TODO: need to fix fwd and reverse mapping for bi-directional fluxes
     # TODO deal with the fact that cofactor fluxes are included in the coordinate mapper!!!!
 
-    raise NotImplementedError
 
     if fcm._J_lt is None:
         # labelling fluxes w.r.t. thermo fluxes
@@ -976,19 +996,25 @@ if __name__ == "__main__":
     #     abs_dets = abs(self._la.det(J))
     #
     m,k = spiro(backend='torch')
+    m.build_model()
     fcm = FluxCoordinateMapper(m)
-    res = sample_polytope(fcm.sampler, n=50)
+    res = sample_polytope(fcm.sampler, n=50, n_burn=0)
+    b = map_rounded_2_ball(fcm.sampler, )
+
+    f, J = fcm.map_net_theta_2_net_fluxes(res['rounded'], jacobian=True)
+
+
     #
-    sep_radius = False
-    ball, j1 = map_rounded_2_ball(fcm.sampler, res['rounded'], jacobian=True, sep_radius=sep_radius)
-    ding = lambda x: map_rounded_2_ball(fcm.sampler, x, sep_radius=sep_radius)
-    JJ = jacobian(ding, res['rounded'][0])
-    print(j1[0])
-    print(JJ)
-    #
-    r, j = map_ball_2_rounded(fcm.sampler, ball, jacobian=True, sep_radius=sep_radius)
-    ding = lambda x: map_ball_2_rounded(fcm.sampler, x, sep_radius=sep_radius)
-    JJ = jacobian(ding, ball[0])
+    # sep_radius = False
+    # ball, j1 = map_rounded_2_ball(fcm.sampler, res['rounded'], jacobian=True, sep_radius=sep_radius)
+    # ding = lambda x: map_rounded_2_ball(fcm.sampler, x, sep_radius=sep_radius)
+    # JJ = jacobian(ding, res['rounded'][0])
+    # print(j1[0])
+    # print(JJ)
+    # #
+    # r, j = map_ball_2_rounded(fcm.sampler, ball, jacobian=True, sep_radius=sep_radius)
+    # ding = lambda x: map_ball_2_rounded(fcm.sampler, x, sep_radius=sep_radius)
+    # JJ = jacobian(ding, ball[0])
     #
     #
     # print(j[0])

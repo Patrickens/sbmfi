@@ -765,6 +765,9 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         return noisy_observations
 
     def log_lik(self, x_meas, mu_o):
+        if self._cmin is not None:
+            raise ValueError('cannot compute log_lik for observation models with a clip_min, '
+                             'this would be a clipped Gaussian, which is not implemented here')
         x_meas = self._la.atleast_2d(x_meas)  # shape = n_meas x n_mdv
         mu_o = self._la.atleast_2d(mu_o)  # shape = batch x n_d
         diff = mu_o[:, None, :] - x_meas[:, None, :]  # shape = n_obs x batch x n_d

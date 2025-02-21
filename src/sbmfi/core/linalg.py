@@ -69,6 +69,7 @@ def _conditional_torch_import() -> int:
         np.complex64: torch.complex64,
         np.complex128: torch.complex128,
         np.double: torch.double,
+        np.single: torch.float32,
     }
     return version
 
@@ -522,10 +523,10 @@ class TorchBackend:
             raise ValueError("Invalid solver option provided.")
 
         # Set default tensor type.
-        if self._def_dtype == torch.double:
-            torch.set_default_tensor_type(torch.DoubleTensor)
-        elif self._def_dtype == torch.float32:
-            torch.set_default_tensor_type(torch.FloatTensor)
+        # if self._def_dtype == torch.double:
+        #     torch.set_default_tensor_type(torch.DoubleTensor)
+        # elif self._def_dtype == torch.float32:
+        #     torch.set_default_tensor_type(torch.FloatTensor)
         torch.autograd.set_detect_anomaly(True)
 
     def get_tensor(
@@ -850,7 +851,7 @@ class LinAlg:
         "minimum", "maximum", "cumsum", "argmin", "argmax", "clip", "eye", "stack",
         "special.erf", "special.erfinv", "special.expit", "special.logit",
         "argsort", "unique", "cov", "split", "arctan2", "sin", "cos", "sign", "diff", "nansum",
-        "isnan", "float_power", "einsum",
+        "isnan", "float_power", "einsum", 'special.gammaln'
     ]
 
     def __init__(

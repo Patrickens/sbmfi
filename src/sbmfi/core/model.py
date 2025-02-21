@@ -3,6 +3,7 @@ from cobra import Model, Reaction, Metabolite, DictList
 import numpy as np
 import math
 import sys
+import operator
 import pandas as pd
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util   import (
@@ -19,6 +20,7 @@ from sbmfi.core.polytopia import (
 from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite  import LabelledMetabolite, ConvolutedEMU, EMU, IsoCumo
+from sbmfi.lcmsanalysis.formula import Formula
 from itertools import repeat
 from typing import Iterable, Union, Optional
 from abc import abstractmethod
@@ -258,7 +260,6 @@ class LabellingModel(Model):
         self._only_rev = {}  # irreversible reactions whose net flux is always negative
         for reaction in self.reactions:
             lb, ub = reaction.bounds
-            # if isinstance(reaction, LabellingReaction) and (not reaction.pseudo) and ((lb, ub) != (0.0, 0.0)):
             if isinstance(reaction, LabellingReaction) and ((lb, ub) != (0.0, 0.0)):
                 if reaction.rho_max > 0.0:
                     self._labelling_reactions.append(reaction)
@@ -269,6 +270,7 @@ class LabellingModel(Model):
                     self._labelling_reactions.append(reaction._rev_reaction)
                     self._only_rev[reaction._rev_reaction.id] = reaction.id
                     for metabolite in reaction._metabolites:
+                        # this has to happen here, since this is where _only_rev is created!
                         if reaction in metabolite._reaction:
                             metabolite._reaction.remove(reaction)
                         metabolite._reaction.add(reaction._rev_reaction)
@@ -419,7 +421,7 @@ class LabellingModel(Model):
                     for metabolite in rev_reaction._metabolites:
                         metabolite._reaction.add(rev_reaction)
                         # during picking, we completely delete _rev_reaction and after its recreation
-                        #      we need to put the atom_map back in
+                        #    thats why we need to put the atom_map back in here
                         reaction._rev_reaction.set_atom_map(atom_map=dict([
                             (met, (-stoich, atoms)) for met, (stoich, atoms) in reaction._atom_map.items()
                         ]))
@@ -569,12 +571,11 @@ class LabellingModel(Model):
     def remove_groups(self, group_list):
         raise NotImplementedError
 
-    def copy(self) -> Model:
-        # NB this will delete all things associated with build_simulator, but keeps polytope
+    def copy(self) -> 'LabellingModel':
+        # NB this will delete all things associated with build_simulator, but keeps polytope intact
         return pickle.loads(pickle.dumps(self))
 
     def reset_state(self):
-        # TODO do all of this with self._la.set_to(...)
         self._dsdv[:] = 0.0
         self._jacobian[:] = 0.0
 
@@ -1015,7 +1016,6 @@ class EMU_Model(LabellingModel):
         self._initialize_Y()
 
     def _initialize_emu_indices(self):
-        # TODO: this might go wrong after pickling?? This is why we rebuild
         for (weight, xemus), yemus in zip(self._xemus.items(), self._yemus.values()):
             for emu in (yemus + xemus):
                 if isinstance(emu, ConvolutedEMU):
@@ -1210,8 +1210,6 @@ class EMU_Model(LabellingModel):
 class RatioEMU_Model(EMU_Model, RatioMixin): pass
 
 
-from sbmfi.lcmsanalysis.formula import Formula
-import operator
 def model_builder_from_dict(
         reaction_kwargs: dict,
         metabolite_kwargs: dict,
@@ -1289,6 +1287,7 @@ if __name__ == "__main__":
     v2_reversible = True
     add_biomass = True
     add_cofactor = True
+    C_symmetric = True
     which_labellings = ['A','B']
     L_12_omega = 1.0
     measured_boundary_fluxes = ('h_out', )
@@ -1363,7 +1362,7 @@ if __name__ == "__main__":
     metabolite_kwargs = {
         'A': {'formula': 'C2H4O5'},
         'B': {'formula': 'C2HPO3'},
-        'C': {'formula': 'C4H6N4OS'},
+        'C': {'formula': 'C4H6N4OS', 'symmetric': C_symmetric},
         'D': {'formula': 'C3H2'},
         'E': {'formula': 'C2H4O5'},
         'F': {'formula': 'CH2'},
@@ -1526,61 +1525,3 @@ if __name__ == "__main__":
     mm.build_model()
     mm.set_fluxes(labelling_fluxes=fluxes)
     res2 = mm.cascade(pandalize=True)
-    # print()
-    # print(mm.labelling_reactions.get_by_id('v5_rev').metabolites)
-    # print(mm.labelling_reactions.get_by_id('v5_rev').atom_map)
-
-
-
-    # for m in mm.metabolites:
-    #     momet = model.metabolites.get_by_id(m.id)
-    #     print(momet, momet._reaction)
-    #     print(m, m._reaction)
-    #     print()
-
-    # for r in mm.reactions:
-    #     if not isinstance(r, LabellingReaction):
-    #         continue
-    #
-    #     rr = model.reactions.get_by_id(r.id)
-    #     for m in r.metabolites:
-    #         for a in r.atom_map:
-    #             if a.id == m.id:
-    #                 print(a is m)
-
-
-
-    #
-    #
-    # mm.build_model()
-    # print(mm.labelling_reactions)
-    # mm.set_fluxes(labelling_fluxes=fluxes)
-
-    # print(model._xemus) # TODO xemus are different
-    # print(mm._xemus)
-    # print(model._yemus)
-    # print(mm._yemus)
-    # print(model.measurements)
-    # print(model.substrate_labelling)
-    # print(mm.measurements)
-    # print(mm.substrate_labelling)
-
-    # print(model.pseudo_reactions)
-    # print(model.pseudo_metabolites)
-    # print(mm.pseudo_reactions)
-    # print(mm.pseudo_metabolites)
-
-    # print(model._only_rev)
-    # print(mm._only_rev)
-    # res2 = mm.cascade()
-
-
-    # fcm = model.flux_coordinate_mapper
-    # thermo = fcm.map_fluxes_2_thermo(fluxes.to_frame().T, pandalize=True)
-    # print(fcm._F.A @ fluxes <= fcm._F.b)
-    # print(thermo)
-    # a = model.pretty_cascade(2)
-    # print(a)
-    # print(model._fluxes)
-    #
-    # ding = model.cascade(pandalize=True)

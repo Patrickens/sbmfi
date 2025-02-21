@@ -33,7 +33,9 @@ def compute_convex_hull(df, x_col, y_col):
 
 
 def plot_dataframes(
-        vertices, samples, points=None,
+        vertices, samples,
+        n_sample_cdf=5000,
+        points=None,
         x_col='x', y_col='y',
         x_label='X-axis', y_label='Y-axis',
         label1='Vertices Convex Hull',
@@ -126,7 +128,7 @@ def plot_dataframes(
 
     # --- Plot KDE density from samples using Seaborn ---
     sns.kdeplot(
-        data=samples,
+        data=samples[:n_sample_cdf],
         x=x_col,
         y=y_col,
         fill=True,

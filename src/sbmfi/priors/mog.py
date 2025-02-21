@@ -24,7 +24,7 @@ class MixtureOfGaussians(torch.distributions.Distribution):
         self.num_dimensions = means.shape[1]
 
         # Ensure weights sum to 1
-        if not torch.isclose(weights.sum(), torch.tensor(1.0)):
+        if not torch.isclose(weights.sum(), torch.tensor(1.0).to(device=weights.device, dtype=weights.dtype)):
             raise ValueError("Mixture weights must sum to 1.")
 
         # Define the categorical distribution for component selection

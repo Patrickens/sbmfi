@@ -3,6 +3,8 @@ from sbmfi.lcmsanalysis.formula import Formula
 import numpy as np
 import re
 from abc import abstractmethod
+from typing import Dict, Union
+
 
 # TODO: CHARGES ARE NOT REGISTERED CORRECTLY!
 
@@ -74,6 +76,10 @@ class LabelledMetabolite(Metabolite):
     def elements(self):
         return self._formula
 
+    @elements.setter
+    def elements(self, elements_dict: Dict[str, Union[int, float]]) -> None:
+        raise NotImplementedError
+
     def remove_from_model(self, destructive=False):
         raise NotImplementedError
 
@@ -118,10 +124,6 @@ class IsoCumo(Object):
         if not self.metabolite.elements['C'] == val.shape[0]:
             raise ValueError('Label does not match number of carbons')
         self._label = val
-
-    @property
-    def formula(self):
-        return (self.metabolite._formula.add_C13(nC13=self.weight)).to_chnops()
 
 
 class EMU_Metabolite(LabelledMetabolite):
