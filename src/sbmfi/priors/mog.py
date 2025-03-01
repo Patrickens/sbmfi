@@ -43,6 +43,9 @@ class MixtureOfGaussians(torch.distributions.Distribution):
         :param sample_shape: Shape of the samples to generate.
         :return: Tensor of samples with shape (*sample_shape, num_dimensions).
         """
+        if isinstance(sample_shape, int):
+            sample_shape = (sample_shape, )
+        sample_shape = torch.Size(sample_shape)
         num_samples = sample_shape.numel() if sample_shape else 1
 
         # Sample component indices

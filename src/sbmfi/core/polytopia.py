@@ -889,8 +889,7 @@ class MarkovTransition():
             n_cdf=7,
             proposal_id='gauss',
             chord_std=0.4,
-            transition_id='barker',
-            always_jump=False,
+            transition_id='peskun',
             return_log_prob_pi=True,  # if we need to compute Z, we should save the log_probs for all proposals
     ):
         self._la = model._la
@@ -904,7 +903,6 @@ class MarkovTransition():
         self._pi = target_density
 
         self._n_cdf = n_cdf
-        self._jump = always_jump
         self._retlp = return_log_prob_pi
 
         if transition_id not in ['barker', 'peskun']:
@@ -981,7 +979,7 @@ class MarkovTransition():
         log_probs = self._log_prob_pi
         if log_q is not None:
             if self._barker:
-                log_probs = self._log_prob_pi + 0.0
+                log_probs = self._log_prob_pi + 0.0  # copy data
                 log_probs[1:] += log_q
             else:
                 log_probs = self._log_prob_pi + log_q.sum(1)
@@ -1020,7 +1018,7 @@ def sample_polytope(
         phi: float = None,
         linalg: LinAlg = None,
         kernel_id: str = 'svd',
-        markov_transition=None,
+        markov_transition: MarkovTransition=None,
         return_what='rounded',
         show_progress=False,
 ):
@@ -1258,11 +1256,37 @@ if __name__ == "__main__":
         # device='cuda:0',
         v2_reversible=False,
         device='cpu',
-        auto_diff=True,
         build_simulator=True,
         which_measurements='lcms',
     )
-
     psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn, linalg=model._la)
-    res = sample_polytope(psm, n=100, show_progress=True)
+
+
+    import torch
+    from sbmfi.priors.mog import MixtureOfGaussians
+
+    n = 3
+    gen = torch.Generator().manual_seed(3)
+    K = psm.dimensionality
+
+    if n > K:
+        raise ValueError('Come on now.')
+
+    means = torch.eye(psm.dimensionality) * 1.015
+    means = torch.cat([means, -means])
+
+    perm = torch.randperm(means.shape[0], generator=gen)
+    which_means = perm[:n]
+    means = means[which_means]
+
+    weights = torch.randint(low=1, high=5, size=torch.Size((n,)), dtype=torch.double, generator=gen)
+    weights /= weights.sum()
+
+    covs = torch.eye(means.shape[-1])
+    covs = torch.stack([covs] * means.shape[0]) * weights[:, None, None] / 8  # means that the distributions with less weight are more concentrated, good for plotting
+
+    target = MixtureOfGaussians(means=means, covariances=covs, weights=weights)
+
+    markov = MarkovTransition(psm, target_density=target, n_cdf=3)
+    res = sample_polytope(psm, n_burn=0, n_chains=1, n=100, show_progress=True, markov_transition=markov)
 

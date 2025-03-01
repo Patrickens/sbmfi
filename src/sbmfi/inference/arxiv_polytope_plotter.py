@@ -5,7 +5,7 @@ import seaborn as sns
 import matplotlib as mpl
 from scipy.spatial import ConvexHull
 import matplotlib.patches as mpatches
-
+import matplotlib.ticker as ticker
 
 def compute_convex_hull(df, x_col, y_col):
     """
@@ -53,6 +53,8 @@ def plot_dataframes(
         legend_loc='best',
         s_points=25,
         points_color='#C41E3A',
+        yticker=1.0,
+        xticker=1.0,
 ):
     """
     Plots:
@@ -154,6 +156,8 @@ def plot_dataframes(
     ax.set_xlabel(x_label, fontsize=font_dict.get('xlabel', 14))
     ax.set_ylabel(y_label, fontsize=font_dict.get('ylabel', 14))
     ax.tick_params(axis='both', which='major', labelsize=font_dict.get('ticks', 12))
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(xticker))
+    ax.yaxis.set_major_locator(ticker.MultipleLocator(yticker))
     ax.grid(True, linestyle='--', alpha=0.7)
 
     # Process and create the legend if requested.

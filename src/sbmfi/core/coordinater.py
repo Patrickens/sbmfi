@@ -15,6 +15,7 @@ from sbmfi.core.polytopia import (
     LabellingPolytope,
     get_rounded_polytope,
 )
+from scipy.linalg import helmert
 
 
 def make_net_theta_id(
@@ -93,7 +94,7 @@ def map_polar_2_ball(
     return coords
 
 
-def map_ball_2_rounded(
+def map_ball_2_rounded_old(
         psm: PolytopeSamplingModel,
         ball: Union[pd.DataFrame, np.ndarray, 'torch.Tensor'],
         hemi: bool = False,
@@ -225,7 +226,7 @@ def map_ball_2_rounded(
     return rounded
 
 
-def map_rounded_2_ball(
+def map_rounded_2_ball_old(
         psm:PolytopeSamplingModel,
         rounded: Union[pd.DataFrame, np.ndarray, 'torch.Tensor'],
         hemi: bool = False,
@@ -457,7 +458,7 @@ def map_cylinder_2_ball(
     return ball
 
 
-def barycentrics_from_simplex(x, simplex, vertices):
+def barycentrics_from_simplex(x: np.ndarray, simplex, vertices):
     T = vertices[simplex]
     A = (T[1:] - T[0]).T
     b = x - T[0]
@@ -466,7 +467,7 @@ def barycentrics_from_simplex(x, simplex, vertices):
     return lambdas_simplex, simplex
 
 
-def map_cartesian_2_delauney(x, vertices):
+def map_cartesian_2_delauney(x: np.ndarray, vertices: np.ndarray):
     tri = Delaunay(vertices)
     simplex_index = tri.find_simplex(x)
     if simplex_index == -1:
@@ -477,50 +478,6 @@ def map_cartesian_2_delauney(x, vertices):
     for i, idx in enumerate(simplex):
         full_lambdas[idx] = lambdas_simplex[i]
     return full_lambdas
-
-
-def map_cartesian_2_max_entropy(
-        x,
-        vertices=None,
-        tolerance=1e-10
-):
-    """
-    Compute maximum entropy coordinates for point x in R^d.
-
-    The coordinates are defined by
-      λ_i(x) = exp(v_i·μ) / Z(μ)   with Z(μ) = Σ_j exp(v_j·μ),
-    where μ in R^d is chosen so that Σ_i λ_i(x) v_i = x.
-
-    This function solves f(μ) = Σ_i (exp(v_i·μ)/Z(μ)) v_i - x = 0 for μ.
-
-    Parameters:
-      x        : numpy array of shape (d,)
-      vertices : numpy array of shape (n, d)
-      tol      : tolerance for the root finder
-
-    Returns:
-      lambdas  : numpy array of shape (n,), the maximum entropy coordinates.
-    """
-    if not isinstance(x, np.ndarray):
-        raise ValueError('only for numpy so far')
-
-    n, d = vertices.shape
-
-    def f(mu):
-        dot_products = vertices.dot(mu)  # shape (n,)
-        exp_dot = np.exp(dot_products)
-        Z = np.sum(exp_dot)
-        lambdas = exp_dot / Z  # shape (n,)
-        return np.dot(lambdas, vertices) - x  # shape (d,)
-
-    mu0 = np.zeros(d)
-    sol = root(f, mu0, tol=tolerance)
-    mu = sol.x
-    dot_products = vertices.dot(mu)
-    exp_dot = np.exp(dot_products)
-    Z = np.sum(exp_dot)
-    lambdas = exp_dot / Z
-    return lambdas
 
 
 class FluxCoordinateMapper(object):
@@ -983,25 +940,234 @@ def make_theta_polytope(fcm: FluxCoordinateMapper):
     return Polytope(A=pd.concat([A, A_xch], axis=0), b=pd.concat([net_polytope.b, b_xch]))
 
 
+def map_simplex_2_ilr(simplex, linalg=LinAlg('torch'), H=None, eps=1e-12, jacobian=False):
+    if H is None:
+        H = linalg.get_tensor(values=helmert(simplex.shape[-1]), dtype=simplex.dtype)
+
+    if len(simplex.shape) < 2:
+        simplex = simplex[None, :]
+
+    safe_simplex = linalg.clip(simplex, eps, 1)
+
+    ilr = (H @ linalg.log(safe_simplex.T)).T
+    if jacobian:
+        J = linalg.diag_embed(1 / safe_simplex)
+        J = H @ J
+        return ilr, J
+    return ilr
+
+
+def map_ilr_2_simplex(z, linalg=LinAlg('torch'), H=None, jacobian=False):
+    if H is None:
+        H = linalg.get_tensor(values=helmert(z.shape[-1] + 1), dtype=z.dtype, device=z.device)
+
+    if len(z.shape) < 2:
+        z = z[None, :]
+
+    logx = (H.T @ z.T).T  # shape (B, D)
+
+    x = linalg.exp(logx)
+    x = x / x.sum(axis=1, keepdims=True)
+
+    if jacobian:
+        dx_dv = linalg.diag_embed(x) - linalg.einsum('ni,nj->nij', x, x)
+        J =  dx_dv @ H.T
+        return x, J
+    return x
+
+
+def map_rounded_2_max_entropy(x: np.ndarray, vertices: np.ndarray, tolerance=1e-10):
+    if not isinstance(x, np.ndarray):
+        raise ValueError('only for numpy so far')
+
+    def jacobian_map_rounded_2_max_entropy(mu) -> np.ndarray:
+        dot_products = vertices.dot(mu)  # shape (n,)
+        # Subtract maximum to improve stability
+        max_dot = np.max(dot_products)
+        exp_dot = np.exp(dot_products - max_dot)  # shape (n,)
+        Z = np.sum(exp_dot)
+        lambdas = exp_dot / Z  # shape (n,)
+
+        # Compute weighted outer products in a stable manner.
+        J = (vertices * lambdas[:, None]).T @ vertices
+
+        # Compute the weighted average of vertices
+        v_bar = np.sum(lambdas[:, None] * vertices, axis=0)
+        J -= np.outer(v_bar, v_bar)
+        return J
+
+    def f(mu, x):
+        dot_products = vertices.dot(mu)  # shape (n,)
+        max_dot = np.max(dot_products)
+        exp_dot = np.exp(dot_products - max_dot)
+        Z = np.sum(exp_dot)
+        lambdas = exp_dot / Z  # shape (n,)
+        return np.dot(lambdas, vertices) - x  # shape (d,)
+
+    # Ensure x is at least 2-dimensional (each row is a point)
+    if len(x.shape) < 2:
+        x = x[None, :]
+    elif len(x.shape) != 2:
+        raise NotImplementedError("x must be 1D or 2D.")
+
+    results = []
+    K = x.shape[1]
+    mu0 = np.zeros(K)
+    for xi in x:
+        # We use a lambda to fix xi in the function f.
+        sol = root(lambda mu: f(mu, xi), mu0, tol=tolerance, jac=jacobian_map_rounded_2_max_entropy)
+        mu = sol.x
+        dot_products = vertices.dot(mu)
+        max_dot = np.max(dot_products)
+        exp_dot = np.exp(dot_products - max_dot)
+        Z = np.sum(exp_dot)
+        lambdas = exp_dot / Z
+        results.append(lambdas)
+    return np.array(results)
+
+
+def map_rounded_2_ball(
+        psm: PolytopeSamplingModel,
+        rounded: Union[pd.DataFrame, np.ndarray, 'torch.Tensor'],
+        hemi: bool = False,
+        alpha_root: float = None,
+        sep_radius: bool = True,
+        jacobian: bool = False,
+        pandalize: bool = False
+):
+    """
+    Maps a point `rounded` (in ℝ^K) into a ball coordinate system.
+
+    For sep_radius=True, the transformation is defined as:
+      norm = ||rounded||
+      directions = rounded / norm
+      alpha_frac = (norm / alpha_max(directions))^(alpha_root)
+      result = [directions, alpha_frac]
+
+    When jacobian=True, the function returns (result, J) where J has shape:
+       - (n_samples, K+1, K) when sep_radius is True
+       - (n_samples, K,   K) when sep_radius is False.
+
+    The Jacobian for the scalar component (last row) now includes the additional term
+    accounting for the dependence of alpha_max on the directions.
+
+    Note:
+      This mapping is the inverse of the ball→rounded transformation that uses
+         t' = (radius_fraction)^(1/alpha_root) · α_max.
+      Hence, to invert it correctly the radius fraction is recovered as:
+         radius_fraction = (norm/α_max)^(α_root)
+      and the Jacobian derivative is multiplied by α_root.
+    """
+    index = None
+    if isinstance(rounded, pd.DataFrame):
+        index = rounded.index
+        rounded = psm._la.get_tensor(values=rounded.loc[:, psm.rounded_id].values)
+
+    # Ensure rounded is 2D. If it's 1D, add a batch dimension.
+    if len(rounded.shape) == 1:
+        rounded = rounded[None, :]
+
+    K = psm.dimensionality  # expected input dimension
+    if jacobian:
+        out_dim = K + 1 if sep_radius else K
+        J = psm._la.get_tensor(shape=(*rounded.shape[:-1], out_dim, K))
+        if hemi:
+            raise NotImplementedError("Jacobian for hemi=True is not implemented.")
+        if len(rounded.shape) > 2:
+            raise NotImplementedError(f"{rounded.shape} not supported; expected (n_samples x K) tensor.")
+
+    # ----- Forward computation -----
+    norm = psm._la.norm(rounded, 2, -1, keepdims=True)  # shape: (n_samples, 1)
+    directions = rounded / norm  # shape: (n_samples, K)
+    if hemi:
+        signs = psm._la.sign(directions[..., [0]])
+        directions = directions * signs
+
+    # Compute α_max from the linear constraints:
+    allpha = psm._h.T / psm._la.tensormul_T(psm._G, directions)
+    alpha_max = psm._la.min_pos_max_neg(
+        allpha,
+        return_what=0 if hemi else 1,
+        keepdims=True,
+        return_indices=jacobian
+    )
+    if jacobian:
+        alpha_max, active_constraints = alpha_max
+        active_G = psm._G[active_constraints]  # shape: (n_samples, 1, K)
+        denom = psm._la.tensormul_T(active_G, directions[..., None, :])  # shape: (n_samples, 1, 1)
+
+    if hemi:
+        # (For hemi=True, a slightly different formula is used; not detailed here.)
+        alpha_min, alpha_max = alpha_max
+        first_el = directions[..., [0]]
+        alpha = (rounded[..., [0]] - (alpha_min * first_el)) / first_el
+        alpha_frac = alpha / (alpha_max - alpha_min)
+    else:
+        # Here t = norm/α_max is the untransformed radius fraction.
+        alpha_frac = norm / alpha_max  # shape: (n_samples, 1)
+
+    # --- FIX: Correct exponentiation ---
+    # We want the inverse of the ball→rounded mapping that uses:
+    #      t' = (radius_fraction)^(1/α_root) · α_max.
+    # Thus, to recover radius_fraction from rounded we need:
+    #      radius_fraction = (norm/α_max)^(α_root)
+    if alpha_root is None:
+        alpha_root = K  # default: use α_root = K (which is the reciprocal of 1/K)
+    alpha_frac = psm._la.float_power(alpha_frac, alpha_root)  # now exponentiate with α_root
+
+    if sep_radius:
+        result = psm._la.cat([directions, alpha_frac], dim=-1)  # shape: (n_samples, K+1)
+    else:
+        result = directions * alpha_frac  # shape: (n_samples, K)
+
+    if jacobian:
+        batch_shape = rounded.shape[:-1]  # e.g. (n_samples,)
+
+        # Compute d(directions)/dx = I/norm - (rounded rounded^T)/(norm^3)
+        I = psm._la.eye(K, device=rounded.device)
+        I_expanded = I.view(*((1,) * len(batch_shape)), K, K).expand(*batch_shape, K, K)
+        d_directions_dx = I_expanded / norm[..., None] - psm._la.einsum('bi,bj->bij', rounded, rounded) / (norm[..., None] ** 3)
+
+        # --- FIX: Derivative of alpha_frac = (norm/α_max)^(α_root) ---
+        # The derivative of x^(α_root) is α_root * x^(α_root - 1). Thus:
+        term1 = rounded / (norm ** 2)  # derivative of norm (ignoring α_max dependence)
+        # Correction for the dependence of α_max on directions:
+        term2 = psm._la.einsum('bmn,bnk->bmk', active_G, d_directions_dx).squeeze(1) / (denom.squeeze(-1))
+        # Total derivative:
+        d_alpha_frac_dx = alpha_frac * alpha_root * (term1 + term2)  # shape: (n_samples, K)
+
+        if sep_radius:
+            J[..., :K, :] = d_directions_dx
+            J[..., K, :] = d_alpha_frac_dx
+        else:
+            J[..., :, :] = (alpha_frac.unsqueeze(-1) * d_directions_dx +
+                            psm._la.einsum('bi,bj->bij', directions, d_alpha_frac_dx))
+    if pandalize:
+        net_theta_id = make_net_theta_id(psm, coordinate_id='ball', hemi=hemi, sep_radius=sep_radius)
+        result = pd.DataFrame(psm._la.tonp(result), index=index, columns=net_theta_id)
+        result.index.name = 'samples_id'
+    if jacobian:
+        return result, J
+    return result
+
+
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
     from sbmfi.core.polytopia import sample_polytope
     from torch.autograd.functional import jacobian
     import torch
 
-    # def log_prob_rev(self, z, context=None):
-    #     ball, J_bc = self._fcm.map_cylinder_2_ball(z, rescale_val=self._rescale, jacobian=True)
-    #     rounded, J_rb = self._fcm.map_ball_2_rounded(ball, jacobian=True)
-    #     J = self._la.tensormul_T(J_rb, self._la.transax(J_bc))
-    #     abs_dets = abs(self._la.det(J))
-    #
+
+
     m,k = spiro(backend='torch')
     m.build_model()
     fcm = FluxCoordinateMapper(m)
     res = sample_polytope(fcm.sampler, n=50, n_burn=0)
     b = map_rounded_2_ball(fcm.sampler, )
 
-    f, J = fcm.map_net_theta_2_net_fluxes(res['rounded'], jacobian=True)
+
+
+    # f, J = fcm.map_net_theta_2_net_fluxes(res['rounded'], jacobian=True)
 
 
     #

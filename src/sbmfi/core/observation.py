@@ -3,7 +3,7 @@ import pandas as pd
 from typing import Iterable, Union, Dict, Tuple
 from itertools import product, cycle
 
-import scipy.linalg
+from scipy.linalg import helmert
 from cobra import Metabolite
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.model import LabellingModel, RatioMixin
@@ -328,7 +328,7 @@ class MDV_LogRatioTransform():
                 i, j = 0, 0
                 for ion_id, df in observation_df.groupby('ion_id', sort=False):
                     # basis = self._gramm_schmidt_basis(df.shape[0])
-                    basis = self._la.get_tensor(values=scipy.linalg.helmert(df.shape[0], full=False))
+                    basis = self._la.get_tensor(values=helmert(df.shape[0], full=False))
                     k, l = basis.shape
                     self._ilr_basis[j: j + l, i: i + k] = basis.T
                     self._sumatrix[j: j + l, j: j + l]  = 1.0

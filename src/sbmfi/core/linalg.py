@@ -388,6 +388,11 @@ class NumpyBackend:
         """Return the indices for the upper-triangle of an (n x n) array, offset by k."""
         return np.triu_indices(n=n, k=k)
 
+    @staticmethod
+    def diag_embed(A):
+        result = A[..., None] * np.eye(A.shape[-1])
+        return result
+
     def zeros(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> np.ndarray:
         """Return a zeros array of the given shape and dtype."""
         if dtype is None:
@@ -772,6 +777,10 @@ class TorchBackend:
         """Return the indices for the upper-triangle of an (n x n) tensor."""
         indices = torch.triu_indices(row=n, col=n, offset=k)
         return indices[0], indices[1]
+
+    @staticmethod
+    def diag_embed(A):
+        return torch.diag_embed(A)
 
     def zeros(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> torch.Tensor:
         """Return a tensor filled with zeros."""
@@ -1368,6 +1377,10 @@ class LinAlg:
         n_unsqueezes = like.ndim - A.ndim
         return A[(None,) * n_unsqueezes + (...,)]
 
+    def diag_embed(self, A):
+        if len(A.shape) > 2:
+            raise ValueError
+        return self._BACKEND.diag_embed(A)
 
 # =============================================================================
 # Main for Testing

@@ -171,7 +171,7 @@ class BallManifold(Manifold):
     the open ball is scaled back to lie inside.
     """
 
-    def __init__(self, dim: int, radius: float = 1.0, eps: float = 1e-5):
+    def __init__(self, dim: int, radius: float = 1.0, eps: float = 1e-9):
         """
         Args:
             dim (int): Dimension of the ambient space ℝ^n.
