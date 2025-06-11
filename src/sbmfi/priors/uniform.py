@@ -22,6 +22,7 @@ from torch.distributions import constraints
 from torch.distributions import Distribution
 import math
 import tqdm
+import functools
 #   https://math.stackexchange.com/questions/4484178/computing-barycentric-coordinates-for-convex-n-dimensional-polytope-that-is-not
 
 def sampling_tasks(
@@ -126,10 +127,15 @@ def volume_tasks(
         yield tuple(kwargs.values())  # because cannot pickle dict_values... god I hate dict_keys and dict_values
 
 
-def sizifier(fn):
-    def inner():
-        return
-    return fn
+def format_sample_shape(func):
+    @functools.wraps(func)
+    def wrapper(self, sample_shape=torch.Size(), *args, **kwargs):
+        if isinstance(sample_shape, int):
+            sample_shape = torch.Size((sample_shape,))
+        elif not isinstance(sample_shape, torch.Size):
+            sample_shape = torch.Size(sample_shape)
+        return func(self, sample_shape, *args, **kwargs)
+    return wrapper
 
 
 class _CannonicalPolytopeSupport(_Dependent):  #
@@ -242,9 +248,8 @@ class BaseRoundedPrior(_BasePrior):
         # supp.to(dtype=torch.float32)  # TODO maybe pass dtype as a kwarg or maybe always enforce float32
         return supp
 
+    @format_sample_shape
     def rsample(self, sample_shape: _size = torch.Size()) -> torch.Tensor:
-        if not isinstance(sample_shape, torch.Size):
-            sample_shape = torch.Size(sample_shape)
         n = sample_shape.numel()
         n_burn = 500 if self._initial_points is None else 0  # dont need burnin if we already sampled
         results = sample_polytope(
@@ -313,10 +318,8 @@ class XchFluxPrior(_BaseXchFluxPrior):  # TODO rename
             self._which = 'gauss'
             raise NotImplementedError('this should signal that we sample from a truncated normal!')
 
+    @format_sample_shape
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
-        if not isinstance(sample_shape, torch.Size):
-            sample_shape = torch.Size(sample_shape)
-
         result = self._la.sample_bounded_distribution(
             shape=sample_shape,
             lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1],
@@ -355,9 +358,8 @@ class UniformRoundedFleXchPrior(BaseRoundedPrior):
         # supp.to(dtype=torch.float32)  # TODO maybe pass dtype as a kwarg or maybe always enforce float32
         return supp
 
+    @format_sample_shape
     def rsample(self, sample_shape: _size = torch.Size()) -> torch.Tensor:
-        if not isinstance(sample_shape, torch.Size):
-            sample_shape = torch.Size(sample_shape)
         rounded_xch = super(UniformRoundedFleXchPrior, self).rsample(sample_shape)
         if self._fcm._nx > 0:
             xch_samples = self._xch_prior.sample(sample_shape)

@@ -5,7 +5,7 @@ import itertools
 from torch.distributions import MultivariateNormal, Categorical
 
 class MixtureOfGaussians(torch.distributions.Distribution):
-    def __init__(self, means: torch.Tensor, covariances: torch.Tensor, weights: torch.Tensor):
+    def __init__(self, means: torch.Tensor, covariances: torch.Tensor, weights: torch.Tensor, log_Z=0.0):
         """
         Initialize a mixture of Gaussians distribution.
 
@@ -18,6 +18,7 @@ class MixtureOfGaussians(torch.distributions.Distribution):
         self.means = means
         self.covariances = covariances
         self.weights = weights
+        self.log_Z = log_Z
 
         # Number of components and dimensions
         self.num_components = means.shape[0]
@@ -74,7 +75,7 @@ class MixtureOfGaussians(torch.distributions.Distribution):
             dim=-1
         )
         # Marginalize over components
-        return torch.logsumexp(log_probs, dim=-1)
+        return torch.logsumexp(log_probs, dim=-1) - self.log_Z
 
     def copy_to(self, device):
         return MixtureOfGaussians(

@@ -5,7 +5,7 @@ from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservatio
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex
-from sbmfi.inference.bayesian import _BaseBayes
+from sbmfi.inference.sampling import _BaseBayes
 from sbmfi.priors.uniform import UniformRoundedFleXchPrior
 from sbmfi.settings import MODEL_DIR
 from sbmfi.core.polytopia import transform_polytope_keep_transform, simplify_polytope

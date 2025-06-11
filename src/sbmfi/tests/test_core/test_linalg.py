@@ -9,10 +9,7 @@ try:
 except ImportError:
     torch = None
 
-# Import the LinAlg class from your module.
-# Adjust the import if your file name is different.
 from sbmfi.core.linalg import LinAlg
-
 
 # -------------------------------------------------------------------
 # Fixtures for instantiating the LinAlg object for each backend.
@@ -23,7 +20,6 @@ def linalg(request):
     Fixture returning a LinAlg instance for each backend.
     """
     return LinAlg(backend=request.param, seed=123)
-
 
 # -------------------------------------------------------------------
 # Test get_tensor (creation with and without indices)
@@ -40,7 +36,6 @@ def test_get_tensor(linalg):
     else:
         np.testing.assert_array_equal(tensor.diag().cpu().numpy(), np.array([1, 2, 3]))
 
-
 # -------------------------------------------------------------------
 # Test LU factorization and solving linear systems
 # -------------------------------------------------------------------
@@ -56,7 +51,6 @@ def test_lu_solve(linalg):
         np.testing.assert_allclose(x, sol, rtol=1e-5)
     else:
         np.testing.assert_allclose(x.cpu().numpy(), sol, rtol=1e-5)
-
 
 # -------------------------------------------------------------------
 # Test add_at and dadd_at operations
@@ -79,7 +73,6 @@ def test_add_at(linalg):
     else:
         np.testing.assert_array_equal(res.cpu().numpy(), expected)
 
-
 def test_dadd_at(linalg):
     # Use a simple vector and check that the output shape remains unchanged.
     x = linalg.ones((5,))
@@ -91,7 +84,6 @@ def test_dadd_at(linalg):
         assert res.shape == x.shape
     else:
         assert res.cpu().numpy().shape == x.shape
-
 
 # -------------------------------------------------------------------
 # Test convolution
@@ -105,7 +97,6 @@ def test_convolve(linalg):
         np.testing.assert_allclose(conv_result, expected)
     else:
         np.testing.assert_allclose(conv_result.cpu().numpy(), expected)
-
 
 # -------------------------------------------------------------------
 # Test nonzero
@@ -122,7 +113,6 @@ def test_nonzero(linalg):
     expected_values = np.array([1, 2])
     np.testing.assert_array_equal(np.sort(values), np.sort(expected_values))
 
-
 # -------------------------------------------------------------------
 # Test tonp (conversion to NumPy array)
 # -------------------------------------------------------------------
@@ -138,7 +128,6 @@ def test_tonp(linalg):
         np_arr = linalg.tonp(t)
         np.testing.assert_array_equal(np_arr, t)
 
-
 # -------------------------------------------------------------------
 # Test set_to (setting all elements)
 # -------------------------------------------------------------------
@@ -150,7 +139,6 @@ def test_set_to(linalg):
         np.testing.assert_array_equal(A, expected)
     else:
         np.testing.assert_array_equal(A.cpu().numpy(), expected)
-
 
 # -------------------------------------------------------------------
 # Test random generation functions (randn, randu, randperm)
@@ -165,14 +153,12 @@ def test_rand_shapes(linalg):
         assert tuple(r1.shape) == (4, 4)
         assert tuple(r2.shape) == (4, 4)
 
-
 def test_randperm(linalg):
     perm = linalg.randperm(10)
     if linalg.backend == "numpy":
         assert set(perm) == set(range(10))
     else:
         assert set(perm.cpu().numpy()) == set(range(10))
-
 
 # -------------------------------------------------------------------
 # Test min and max (with return_indices)
@@ -188,7 +174,6 @@ def test_min_max(linalg):
     expected_max = np.argmax(arr, axis=1)
     np.testing.assert_array_equal(max_idx, expected_max)
 
-
 # -------------------------------------------------------------------
 # Test logsumexp
 # -------------------------------------------------------------------
@@ -200,7 +185,6 @@ def test_logsumexp(linalg):
         np.testing.assert_allclose(result, expected, rtol=1e-5)
     else:
         np.testing.assert_allclose(result.cpu().numpy(), expected, rtol=1e-5)
-
 
 # -------------------------------------------------------------------
 # Test basic tensor operations: permutax, transax, unsqueeze, cat.
@@ -229,7 +213,6 @@ def test_tensor_ops(linalg):
         E = linalg.cat([A, A], dim=0)
         np.testing.assert_array_equal(E.cpu().numpy(), torch.cat([A, A], dim=0).cpu().numpy())
 
-
 # -------------------------------------------------------------------
 # Test probability functions: norm_pdf, norm_log_pdf, norm_cdf, norm_inv_cdf.
 # -------------------------------------------------------------------
@@ -241,4 +224,4 @@ def test_probability_functions(linalg):
     inv_cdf = linalg.norm_inv_cdf(cdf, mu=0.0, std=1.0)
     np.testing.assert_allclose(inv_cdf, x, rtol=1e-5)
     # Check that the log PDF equals log(pdf).
-    np.testing.assert_allclose(log_pdf, np.log(pdf), rtol=1e-5)
+    np.testing.assert_allclose(log_pdf, np.log(pdf), rtol=1e-5) 

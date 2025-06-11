@@ -22,7 +22,6 @@ from PolyRound.static_classes.rounding.maximum_volume_ellipsoid import MaximumVo
 from fractions import Fraction
 from importlib.metadata import version
 from scipy.spatial import ConvexHull
-# import pypoman
 
 class LabellingPolytope(Polytope):
     tolerance = 1e-12
@@ -763,12 +762,12 @@ class PolytopeSamplingModel(object):
         if kernel_id not in ['rref', 'svd']:
             raise ValueError(f'{kernel_id} not a valid basis kernel basis')
 
-        if polytope.A.columns.str.contains(_xch_reactions_rex).any() or \
-                polytope.A.columns.str.contains(_rev_reactions_rex).any():
+        if (polytope.A.columns.str.contains(_xch_reactions_rex).any() or \
+                polytope.A.columns.str.contains(_rev_reactions_rex).any()) and pr_verbose:
             print(
                 'This is not a net-polytope, you sure about this? '
                 'Volume computation should not include xch fluxes and is unreliable for polytope over '
-                '20 dimensions such as labelling polytopes due to the algorithm implementation'
+                '~20 dimensions such as labelling polytopes due to the algorithm implementation'
             )
 
         self._pr_settings = PolyRoundSettings(**{'verbose': pr_verbose, **kwargs})

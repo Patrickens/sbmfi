@@ -1,7 +1,7 @@
 import pickle
 import pandas as pd
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model, model_builder_from_dict
-from sbmfi.inference.bayesian import _BaseBayes
+from sbmfi.inference.sampling import _BaseBayes
 from sbmfi.priors.uniform import UniformRoundedFleXchPrior
 from sbmfi.core.observation import (
     ClassicalObservationModel,
@@ -17,7 +17,7 @@ import sys, os
 import cobra
 from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
-from sbmfi.lcmsanalysis.formula import Formula
+from sbmfi.formula import Formula
 
 def spiro(
         backend='numpy',
