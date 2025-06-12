@@ -36,7 +36,7 @@ class LabelledMetabolite(Metabolite):
             total_intensity = None,  # either a number or a distribution from which total intensities are sampled
     ):
         if isinstance(metabolite, LabelledMetabolite):
-            raise NotImplementedError
+            raise NotImplementedError('Cannot instantiate LabelledMetabolite with another LabelledMetabolite')
         elif isinstance(metabolite, Metabolite):  # only if metabolite
             self.__dict__.update(metabolite.__dict__)
             self.formula = formula if formula else self.__dict__.pop('formula')

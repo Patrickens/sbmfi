@@ -52,38 +52,7 @@ def test_lu_solve(linalg):
     else:
         np.testing.assert_allclose(x.cpu().numpy(), sol, rtol=1e-5)
 
-# -------------------------------------------------------------------
-# Test add_at and dadd_at operations
-# -------------------------------------------------------------------
-def test_add_at(linalg):
-    # Create a 1D tensor of zeros.
-    x = linalg.zeros((5,))
-    # Let y be a simple array.
-    y = np.array([1, 2, 3, 4, 5])
-    # indices: first column holds the index to update; second column selects a value from y.
-    indices = np.array([[0, 1], [1, 2]])
-    stoich = 2.0
-    # Expected: x[0] += 2 * y[1] and x[1] += 2 * y[2]
-    expected = np.zeros(5)
-    expected[0] += 2 * y[1]
-    expected[1] += 2 * y[2]
-    res = linalg.add_at(x.copy(), y, indices, stoich)
-    if linalg.backend == "numpy":
-        np.testing.assert_array_equal(res, expected)
-    else:
-        np.testing.assert_array_equal(res.cpu().numpy(), expected)
 
-def test_dadd_at(linalg):
-    # Use a simple vector and check that the output shape remains unchanged.
-    x = linalg.ones((5,))
-    y = np.arange(1, 6)
-    indices = np.array([[0, 1], [1, 2]])
-    stoich = 1.5
-    res = linalg.dadd_at(x.copy(), y, indices, stoich)
-    if linalg.backend == "numpy":
-        assert res.shape == x.shape
-    else:
-        assert res.cpu().numpy().shape == x.shape
 
 # -------------------------------------------------------------------
 # Test convolution

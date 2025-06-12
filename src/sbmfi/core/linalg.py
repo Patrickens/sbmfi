@@ -55,6 +55,10 @@ def _conditional_torch_import() -> int:
         print("torch not installed, cannot use this backend")
         raise e
 
+    if version < 10:
+        raise Warning('torch needs to be at least version 1.10 for lu_factor to be differentiable, '
+                      'autodiff does now work for lower versions')
+
     global _NP_TORCH_DTYPE
     _NP_TORCH_DTYPE = {
         np.bool_: torch.bool,
@@ -105,11 +109,12 @@ def _merge_duplicate_indices(
     return uniq_indices, new_values
 
 
-# =============================================================================
-# NumPy Backend
-# =============================================================================
+class Backend:
+    def __init__(self):
+        pass
 
-class NumpyBackend:
+
+class NumpyBackend(Backend):
     """
     Backend implementation using NumPy (and SciPy) for linear algebra operations.
     """
@@ -166,7 +171,7 @@ class NumpyBackend:
             A = np.zeros(shape=shape, dtype=dtype)
             if indices is not None and indices.size:
                 indices, values = _merge_duplicate_indices(indices, values)
-                A[tuple(indices.T)] = values
+                A[tuple(indices.T)] = values.astype(dtype)
         else:
             if dtype is None:
                 dtype = values.dtype
@@ -436,50 +441,7 @@ class NumpyBackend:
         return self._rng.choice(tot, n, replace=replace)
 
 
-# =============================================================================
-# PyTorch Backends
-# =============================================================================
-
-class FactorExTorchBackend:
-    """
-    PyTorch backend that uses torch.linalg.lu_factor_ex to enable batch processing even if some systems fail.
-    """
-
-    @staticmethod
-    def LU(A, **kwargs: Any):
-        """Compute the LU factorization with error handling."""
-        return torch.linalg.lu_factor_ex(A, **kwargs)
-
-    @staticmethod
-    def solve(LU, b, **kwargs: Any):
-        """Solve the linear system given the LU factorization."""
-        if b.ndim == 1:
-            b = torch.atleast_2d(b).T
-        return torch.lu_solve(b, *LU[:2])
-
-
-class NonDiffTorchBackend:
-    """
-    PyTorch backend for versions where torch.lu_solve is not differentiable.
-    """
-
-    @staticmethod
-    def LU(A, **kwargs: Any):
-        """Return A (placeholder for LU factorization)."""
-        return A
-
-    @staticmethod
-    def solve(LU, b, **kwargs: Any):
-        """
-        Solve the linear system using torch.linalg.solve.
-        Ensures b is at least 2D.
-        """
-        if b.ndim == 1:
-            b = torch.atleast_2d(b).T
-        return torch.linalg.solve(LU, b)
-
-
-class TorchBackend:
+class TorchBackend(Backend):
     """
     Backend implementation using PyTorch for linear algebra operations.
     """
@@ -493,7 +455,6 @@ class TorchBackend:
     def __init__(
         self,
         seed: Optional[int] = None,
-        solver: str = 'lu_solve_ex',
         device: str = 'cpu',
         dtype: type = np.double,
         **kwargs: Any
@@ -503,7 +464,6 @@ class TorchBackend:
 
         Args:
             seed (Optional[int]): Seed for random number generation.
-            solver (str): Solver to use for linear systems ('lu_solve_ex', 'lu_solve_nondiff', or 'lu_solve').
             device (str): Device identifier ('cpu' or 'cuda').
             dtype (type): Default numerical type.
         """
@@ -516,16 +476,6 @@ class TorchBackend:
         self._rng = torch.Generator(self._device)
         if isinstance(seed, int):
             self._rng.manual_seed(seed)
-
-        # Select appropriate LU and solve functions.
-        if (version < 10) or (solver == 'lu_solve_nondiff'):
-            TorchBackend.LU = staticmethod(NonDiffTorchBackend.LU)
-            TorchBackend.solve = staticmethod(NonDiffTorchBackend.solve)
-        elif solver == 'lu_solve_ex':
-            TorchBackend.LU = staticmethod(FactorExTorchBackend.LU)
-            TorchBackend.solve = staticmethod(FactorExTorchBackend.solve)
-        elif solver != 'lu_solve':
-            raise ValueError("Invalid solver option provided.")
 
         # Set default tensor type.
         # if self._def_dtype == torch.double:
@@ -574,7 +524,7 @@ class TorchBackend:
             if indices is not None and indices.size:
                 indices, values = _merge_duplicate_indices(indices, values)
                 indices = torch.as_tensor(indices, dtype=torch.int64, device=device)
-                A[tuple(indices.T)] = torch.as_tensor(values, device=device)
+                A[tuple(indices.T)] = torch.as_tensor(values, device=device, dtype=dtype)
         else:
             if dtype is None:
                 if isinstance(values, np.ndarray):
@@ -613,46 +563,6 @@ class TorchBackend:
     def vecopy(A: torch.Tensor) -> torch.Tensor:
         """Return a copy of the tensor A."""
         return A.clone()
-
-    @staticmethod
-    def add_at(x: torch.Tensor, y: torch.Tensor, indices: torch.Tensor, stoich: float) -> torch.Tensor:
-        """
-        Add at specific indices using product of selected entries from y.
-
-        Args:
-            x (torch.Tensor): Tensor to update.
-            y (torch.Tensor): Tensor for computing the product.
-            indices (torch.Tensor): Indices tensor.
-            stoich (float): Multiplier.
-
-        Returns:
-            torch.Tensor: Updated tensor.
-        """
-        x.index_add_(0, indices[:, 0], stoich * torch.prod(y[indices[:, 1:]], dim=1))
-        return x
-
-    @staticmethod
-    def dadd_at(x: torch.Tensor, y: torch.Tensor, indices: torch.Tensor, stoich: float) -> torch.Tensor:
-        """
-        Differential version of add_at.
-
-        Args:
-            x (torch.Tensor): Tensor to update.
-            y (torch.Tensor): Tensor for computing the product.
-            indices (torch.Tensor): Indices tensor.
-            stoich (float): Multiplier.
-
-        Returns:
-            torch.Tensor: Updated tensor.
-        """
-        for i in range(1, indices.shape[1]):
-            remaining = torch.cat([torch.arange(1, i), torch.arange(i + 1, indices.shape[1])])
-            x.index_add_(
-                0,
-                indices[:, 0],
-                torch.prod(y[indices[:, remaining]], dim=1) * x[indices[:, i]] * stoich,
-            )
-        return x
 
     @staticmethod
     def convolve(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -828,21 +738,6 @@ class TorchBackend:
         return self.multinomial(n, probs, replace=replace)
 
 
-# =============================================================================
-# Cupy Backend Placeholder
-# =============================================================================
-
-class CupyBackend:
-    """
-    Placeholder for a CuPy backend implementation.
-    """
-    pass
-
-
-# =============================================================================
-# Unified LinAlg Class
-# =============================================================================
-
 class LinAlg:
     """
     A unified linear algebra API that abstracts the backend (NumPy or PyTorch).
@@ -867,7 +762,6 @@ class LinAlg:
         self,
         backend: str,
         batch_size: int = 1,
-        solver: str = "lu_solve_ex",
         device: str = "cpu",
         fkwargs: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
@@ -879,7 +773,6 @@ class LinAlg:
         Args:
             backend (str): Either 'numpy' or 'torch'.
             batch_size (int): Batch size for processing.
-            solver (str): Solver option for linear systems.
             device (str): Device for PyTorch ('cpu' or 'cuda').
             fkwargs (Optional[Dict[str, Any]]): Additional kwargs for factorization routines.
             seed (Optional[int]): Random seed.
@@ -894,7 +787,7 @@ class LinAlg:
         if backend == "numpy":
             self._BACKEND = NumpyBackend(seed=seed, dtype=dtype)
         elif backend == "torch":
-            self._BACKEND = TorchBackend(seed=seed, solver=solver, device=device, dtype=dtype)
+            self._BACKEND = TorchBackend(seed=seed, device=device, dtype=dtype)
         else:
             raise ValueError("Invalid backend provided.")
 
@@ -915,7 +808,6 @@ class LinAlg:
         self._backwargs = {
             "backend": backend,
             "seed": seed,
-            "solver": solver,
             "device": device,
             "dtype": dtype,
             "fkwargs": self._fkwargs,
@@ -1001,14 +893,6 @@ class LinAlg:
     def solve(self, LU: Any, b: Any, **kwargs: Any) -> Any:
         """Solve a linear system given LU and right-hand side b."""
         return self._BACKEND.solve(LU, b, **{**self._fkwargs["solve"], **kwargs})
-
-    def add_at(self, x: Any, y: Any, indices: Any, stoich: float) -> Any:
-        """Perform an add-at operation."""
-        return self._BACKEND.add_at(x, y, indices, stoich)
-
-    def dadd_at(self, x: Any, y: Any, indices: Any, stoich: float) -> Any:
-        """Perform the differential add-at operation."""
-        return self._BACKEND.dadd_at(x, y, indices, stoich)
 
     def convolve(self, a: Any, v: Any) -> Any:
         """Compute the convolution of a and v."""
@@ -1382,9 +1266,6 @@ class LinAlg:
             raise ValueError
         return self._BACKEND.diag_embed(A)
 
-# =============================================================================
-# Main for Testing
-# =============================================================================
 
 if __name__ == "__main__":
     import pickle
@@ -1392,17 +1273,10 @@ if __name__ == "__main__":
     import cProfile
     import torch
 
-    # Generate a random 5x5 matrix.
-    a = np.random.randn(5, 5)
-
-    # Test NumPy backend.
-    # nl = LinAlg(backend="numpy")
-    # print("NumPy min:", nl.min(a, dim=1, return_indices=True, keepdims=True))
-
-    # Test PyTorch backend.
-    nt = LinAlg(backend="torch")
-
-    a = nt.sample_unit_hyper_sphere_ball((20, 5), ball=True)
-    print(a)
-    print(torch.norm(a, dim=1))
-    # print("Torch min:", nt.min(torch.as_tensor(a), dim=1, keepdims=True, return_indices=True))
+    linalg = LinAlg(backend='torch', seed=123)
+    shape = (3, 3)
+    # Use indices to set the diagonal entries.
+    indices = np.array([[0, 0], [1, 1], [2, 2]])
+    values = np.array([1, 2, 3])
+    tensor = linalg.get_tensor(shape=shape, indices=indices, values=values,
+                               squeeze=False, dtype=np.float64, device=None)

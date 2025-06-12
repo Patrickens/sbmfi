@@ -13,8 +13,6 @@ from copy import copy, deepcopy
 class LabellingReaction(Reaction):
     """Base class for reactions in either cumomer or EMU simulation algorithms
     bi-directional refers to net-flux proceeding in both directions and
-    # TODO reaction.forward_variable and reaction.reverse_variable do now work with _rev_reactions
-    # TODO nee to fix when to set _is_built = False, we only want to update fcm and the like, not necessarily all matrices for EMU simulation
     Attributes
     ----------
     atom_map : collections.OrderedDict
@@ -35,7 +33,7 @@ class LabellingReaction(Reaction):
             pseudo: bool = False,
     ):
         if isinstance(reaction, LabellingReaction):
-            raise NotImplementedError
+            raise NotImplementedError('Cannot instantiate LabellingReaction with another LabellingReaction')
         if isinstance(reaction, Reaction):
             self.__dict__.update(reaction.__dict__)
         else:

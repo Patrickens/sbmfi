@@ -103,7 +103,7 @@ class LabellingModel(Model):
             model: Model,
     ):
         if isinstance(model, LabellingModel):
-            raise NotImplementedError
+            raise NotImplementedError('Cannot instantiate LabellingModel with another LabellingModel')
         elif not isinstance(model, Model):
             raise ValueError('Need to instantiate with an existing cobra model')
         super(LabellingModel, self).__init__(id_or_model=model)
