@@ -1,4 +1,3 @@
-from cobra.util.context import get_context
 from cobra import Model, Reaction, Metabolite, DictList
 import numpy as np
 import math
@@ -20,7 +19,7 @@ from sbmfi.core.polytopia import (
 from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite  import LabelledMetabolite, ConvolutedEMU, EMU, IsoCumo
-from sbmfi.lcmsanalysis.formula import Formula
+from sbmfi.compound.formula import Formula
 from itertools import repeat
 from typing import Iterable, Union, Optional
 from abc import abstractmethod

@@ -2,7 +2,7 @@ import re
 from cobra import DictList, Model
 import math
 from typing import Iterable, Union
-from sbmfi.lcmsanalysis.formula import Formula, isotopologues
+from sbmfi.compound.formula import Formula, isotopologues
 from sbmfi.core.util import _strip_bigg_rex
 import pandas as pd
 import numpy as np

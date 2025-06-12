@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from sbmfi.formula import Formula, isotopologues
+from sbmfi.compound import Formula, isotopologues
 
 def test_formula_initialization():
     # Test empty formula

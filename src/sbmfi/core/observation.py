@@ -2,30 +2,24 @@ import numpy as np
 import pandas as pd
 from typing import Iterable, Union, Dict, Tuple
 from itertools import product, cycle
-
 from scipy.linalg import helmert
 from cobra import Metabolite
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.metabolite import EMU
-from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.core.polytopia import (
     project_polytope,
-    LabellingPolytope,
     simplify_polytope
 )
 from sbmfi.core.util import (
     make_multidex,
-    _bigg_compartment_ids
 )
 from sbmfi.lcmsanalysis.util import (
     build_correction_matrix,
-    gen_annot_df,
-    _strip_bigg_rex
 )
 # from sbmfi.lcmsanalysis.zemzed import add_formulas
-from sbmfi.lcmsanalysis.formula import Formula
-from sbmfi.lcmsanalysis.adducts import emzed_adducts
+from sbmfi.compound.formula import Formula
+from sbmfi.compound.adducts import emzed_adducts
 
 
 class MDV_ObservationModel(object):

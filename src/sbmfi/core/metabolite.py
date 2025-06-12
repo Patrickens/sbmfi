@@ -1,5 +1,5 @@
 from cobra import Metabolite, Object, DictList
-from sbmfi.lcmsanalysis.formula import Formula
+from sbmfi.compound.formula import Formula
 import numpy as np
 import re
 from abc import abstractmethod

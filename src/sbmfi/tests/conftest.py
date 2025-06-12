@@ -1,7 +1,7 @@
 import pytest
 from collections import OrderedDict
 import pandas as pd
-from sbmfi.core.model import LabellingModel, EMU_Model, CumomerModel
+from sbmfi.core.model import LabellingModel, EMU_Model
 
 # Test data for model tests
 reaction_kwargs = {
@@ -79,13 +79,6 @@ def emu_SUModel():
     )
     return parametrize(model=M)
 
-@pytest.fixture(scope="function")
-def emu_CUModel():
-    M = CumomerModel(
-        id_or_model='test_SUModel',
-        name='test_SUModel',
-    )
-    return parametrize(model=M)
 
 @pytest.fixture(scope="function")
 def emu_EMUdel():

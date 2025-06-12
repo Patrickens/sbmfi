@@ -17,7 +17,7 @@ import sys, os
 import cobra
 from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
-from sbmfi.formula import Formula
+from sbmfi.compound import Formula
 
 def spiro(
         backend='numpy',

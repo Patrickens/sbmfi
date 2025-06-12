@@ -10,13 +10,17 @@ from pathlib import Path
 # Get the directory containing this file
 current_dir = Path(__file__).parent
 
-# Load the NIST mass data from JSON
-with open(current_dir / 'nist_mass.json', 'r') as f:
-    _nist_mass = json.load(f)
+# 1) Define a hook to convert any dict whose values are 2-element lists into
+#    a dict with int keys and tuple values:
+def isotope_hook(d):
+    # detect an “isotopes” dict by checking that every value is a length-2 list
+    if d and all(isinstance(v, list) and len(v) == 2 for v in d.values()):
+        return {int(k): tuple(v) for k, v in d.items()}
+    return d
 
-# Convert string keys to integers for isotope numbers
-for element in _nist_mass:
-    _nist_mass[element] = {int(k): tuple(v) for k, v in _nist_mass[element].items()}
+# 2) Load back, using our hook for the inner dicts:
+with open(current_dir / 'nist_mass.json', 'r') as f:
+    _nist_mass = json.load(f, object_hook=isotope_hook)
 
 # ALMOST ALL STOLEN FROM PYTEOMICS!
 
