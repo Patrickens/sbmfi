@@ -27,7 +27,7 @@ def build_correction_matrix(
     abundances = np.zeros(shape=n_mdv, dtype=np.double)
     for (formula, abundance) in isotopologues(
             formula=formula, elements_with_isotopes=elements, report_abundance=True,
-            isotope_threshold=isotope_threshold, overall_threshold=overall_threshold, n_mdv=n_mdv
+            isotope_threshold=isotope_threshold, overall_threshold=overall_threshold, n_mdv=n_mdv # TODO n_mdv has been removed
     ):
         # shift = formula.shift()
         raise ValueError('TODO REIMPLEMENT SHIFT COMPUTATION HERE')

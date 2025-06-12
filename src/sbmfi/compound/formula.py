@@ -399,7 +399,6 @@ def isotopologues(
         isotope_threshold=5e-4,
         overall_threshold=0.0,
         abundances=_nist_mass,
-        n_mdv = None,
     ):
     """Iterate over possible isotopic states of a molecule.
     The molecule can be defined by formula, sequence, parsed sequence, or composition.
@@ -453,9 +452,6 @@ def isotopologues(
         for elem in isotopologue:
             for isotope in elem:
                 ic[isotope] += 1
-        if n_mdv is not None:
-            if ic.shift() >= n_mdv:
-                continue
         if report_abundance or overall_threshold > 0.0:
             abundance = ic.abundance(abundances=abundances)
             if abundance > overall_threshold:
@@ -469,7 +465,6 @@ def isotopologues(
 
 if __name__ == "__main__":
 
-    f = Formula('[13]CC5H12O6')
-    nasty = _nist_mass.copy()
-    nasty.pop('C')
-    print(f.abundance(nasty))
+    f = Formula('C2HO')
+    isos = list(isotopologues(f, isotope_threshold=0.01))
+    print(isos)

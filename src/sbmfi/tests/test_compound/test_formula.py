@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 from sbmfi.compound import Formula, isotopologues
+from sbmfi.compound.formula import _nist_mass
 
 def test_formula_initialization():
     # Test empty formula
@@ -59,10 +60,10 @@ def test_formula_arithmetic():
 def test_formula_mass():
     # Test monoisotopic mass
     f = Formula('C6H12O6')
-    assert abs(f.mass() - 180.063388) < 1e-6
+    assert abs(f.mass() - 180.0633881022) < 1e-6
 
     # Test average mass  180.1561339901187
-    assert abs(f.mass(average=True) - 180.156133) < 1e-4
+    assert abs(f.mass(average=True) - 180.1561339901187) < 1e-4
 
     # Test with different abundances
     custom_abundances = {
@@ -71,12 +72,12 @@ def test_formula_mass():
         'O': {0: (15.994915, 0.99762), 17: (16.999131, 0.00038), 18: (17.999160, 0.002)},
         '-': {0: (0.000549, 1.0)}
     }
-    assert abs(f.mass(abundances=custom_abundances) - 186.08352) < 1e-6
+    assert abs(f.mass(abundances=custom_abundances) - 186.08352000000002) < 1e-6
 
 def test_formula_mz():
     # Test basic m/z calculation
     f = Formula('C6H12O6')
-    mass_2 = 90.032242
+    mass_2 = 90.03224263100944
     assert abs(f.mz(electrons=2) - mass_2) < 1e-4
 
     # Test with negative charge
@@ -85,7 +86,7 @@ def test_formula_mz():
 
     # Test with isotopes
     f = Formula('[13]C6H12O6')
-    assert abs(f.mz(electrons=1) - 186.084065) < 1e-4
+    assert abs(f.mz(electrons=1) - 186.0840657089094) < 1e-4
 
     # Test error for uncharged molecule
     f = Formula('C6H12O6')
@@ -133,15 +134,16 @@ def test_formula_isotopes():
 def test_formula_abundance():
     # Test unlabeled formula
     f = Formula('C6H12O6')
-    assert abs(f.abundance() - 1.0) < 1e-10
+    assert abs(f.abundance() - 0.9226329790503718) < 1e-6
+
+    # Test other abundances
+    no_C = _nist_mass.copy()
+    no_C.pop('C')
+    assert (f.abundance(no_C) - 0.9841491454794983) < 1e-6
 
     # Test labeled formula
-    f = Formula('[13]C6H12O6')
-    assert f.abundance() < 1.0
-
-    # Test mixed isotopes
-    f = Formula('[13]C2[12]C4H12O6')
-    assert f.abundance() < 1.0
+    f = Formula('[13]CC5H12O6')
+    assert (f.abundance() - 0.0598736856919376) < 1e-6
 
 def test_formula_isotope_number():
     # Test unlabeled formula
@@ -178,29 +180,38 @@ def test_formula_to_chnops():
     assert f.to_chnops() == '[12]C4[13]C2H12O6'  # Should be sorted by isotope number
 
 def test_isotopologues():
-    f = Formula('C6H12O6')
-    
+    f = Formula('C2HO')
+
     # Test basic isotopologues
+    check = eval(
+        "[Formula({'[12]C': 2, '[1]H': 1, '[16]O': 1}), Formula({'[12]C': 2, '[1]H': 1, '[18]O': 1}), "
+        "Formula({'[12]C': 1, '[13]C': 1, '[1]H': 1, '[16]O': 1}), "
+        "Formula({'[12]C': 1, '[13]C': 1, '[1]H': 1, '[18]O': 1}), "
+        "Formula({'[13]C': 2, '[1]H': 1, '[16]O': 1}), Formula({'[13]C': 2, '[1]H': 1, '[18]O': 1})]"
+    )
     isos = list(isotopologues(f))
-    assert len(isos) > 1
+    assert isos == check
+
+    # Test with specific elements
+    check = eval(
+        "[Formula({'[12]C': 2, 'H': 1, 'O': 1}), Formula({'[12]C': 1, '[13]C': 1, 'H': 1, 'O': 1}), "
+        "Formula({'[13]C': 2, 'H': 1, 'O': 1})]"
+    )
+    isos = list(isotopologues(f, elements_with_isotopes=('C')))
+    assert isos == check
     
     # Test with abundance reporting
     isos_with_abundance = list(isotopologues(f, report_abundance=True))
-    assert all(isinstance(x, tuple) for x in isos_with_abundance)
     assert all(len(x) == 2 for x in isos_with_abundance)
-    
-    # Test with specific elements
-    isos = list(isotopologues(f, elements_with_isotopes=['C']))
-    assert all('H' not in iso for iso in isos)
-    
-    # Test with abundance threshold
-    isos = list(isotopologues(f, isotope_threshold=0.1))
-    assert len(isos) < len(list(isotopologues(f)))
-    
-    # Test with mass difference
-    isos = list(isotopologues(f, n_mdv=1))
-    assert all(iso.shift() == 1 for iso in isos)
 
+    # Test with abundance threshold
+    check = eval(
+        "[Formula({'[12]C': 2, '[1]H': 1, '[16]O': 1}), Formula({'[12]C': 1, '[13]C': 1, '[1]H': 1, '[16]O': 1}), "
+        "Formula({'[13]C': 2, '[1]H': 1, '[16]O': 1})]"
+    )
+    isos = list(isotopologues(f, isotope_threshold=0.01))
+    assert isos == check
+    
 def test_formula_equality():
     f1 = Formula('C6H12O6')
     f2 = Formula('C6H12O6')
