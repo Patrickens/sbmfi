@@ -29,7 +29,8 @@ def build_correction_matrix(
             formula=formula, elements_with_isotopes=elements, report_abundance=True,
             isotope_threshold=isotope_threshold, overall_threshold=overall_threshold, n_mdv=n_mdv
     ):
-        shift = formula.shift()
+        # shift = formula.shift()
+        raise ValueError('TODO REIMPLEMENT SHIFT COMPUTATION HERE')
         if shift < 0:
             raise ValueError(f'Shift under 0 {formula.to_chnops()}')
         abundances[shift] += abundance
@@ -112,8 +113,8 @@ def gen_annot_df(
             return f.to_chnops()
         annot_df['formula'] = annot_df['formula'].apply(neutralproton)
 
-    annot_df['mz'] = annot_df['formula'].apply(lambda f: Formula(f).mass(ion=False))
-    annot_df = annot_df.sort_values(by='mz').drop('mz', axis=1).reset_index(drop=True)
+    annot_df['mass'] = annot_df['formula'].apply(lambda f: Formula(f).mass())
+    annot_df = annot_df.sort_values(by='mass').drop('mass', axis=1).reset_index(drop=True)
     return annot_df
 
 

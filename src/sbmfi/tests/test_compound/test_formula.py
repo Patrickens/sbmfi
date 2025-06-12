@@ -55,12 +55,38 @@ def test_formula_mass():
     assert abs(f.mass() - 180.063388) < 1e-6
 
     # Test average mass
-    f = Formula('C6H12O6')
     assert abs(f.mass(average=True) - 180.1559) < 1e-4
 
-    # Test charged mass
+    # Test with different abundances
+    custom_abundances = {
+        'C': {0: (12.0, 0.989), 13: (13.003355, 0.011)},
+        'H': {0: (1.007825, 0.999885), 2: (2.014102, 0.000115)},
+        'O': {0: (15.994915, 0.99762), 17: (16.999131, 0.00038), 18: (17.999160, 0.002)},
+        '-': {0: (0.000549, 1.0)}
+    }
+    assert abs(f.mass(abundances=custom_abundances) - 180.063388) < 1e-6
+
+def test_formula_mz():
+    # Test basic m/z calculation
+    f = Formula('C6H12O6')
+    assert abs(f.mz(electrons=1) - 179.0553) < 1e-4
+
+    # Test with negative charge
     f = Formula('C6H12O6-')
-    assert abs(f.mass(charge=1) - 179.0553) < 1e-4
+    assert abs(f.mz() - 179.0553) < 1e-4
+
+    # Test with multiple electrons
+    f = Formula('C6H12O6')
+    assert abs(f.mz(electrons=2) - 89.5276) < 1e-4
+
+    # Test with isotopes
+    f = Formula('[13]C6H12O6')
+    assert abs(f.mz(electrons=1) - 185.0683) < 1e-4
+
+    # Test error for uncharged molecule
+    f = Formula('C6H12O6')
+    with pytest.raises(ValueError, match='Result is not a charged molecule!'):
+        f.mz()
 
 def test_formula_isotopes():
     f = Formula('C6H12O6')

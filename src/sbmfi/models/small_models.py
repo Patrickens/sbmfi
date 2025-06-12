@@ -283,7 +283,7 @@ def spiro(
 
     observation_df = MDV_ObservationModel.generate_observation_df(model, annotation_df)
     annotation_df['mz'] = 0.0
-    annotation_df.loc[observation_df['annot_df_idx'], 'mz'] = observation_df['isotope_decomposition'].apply(lambda x: Formula(x).mass()).values
+    annotation_df.loc[observation_df['annot_df_idx'], 'mz'] = observation_df['isotope_decomposition'].apply(lambda x: Formula(x).mz()).values
 
     labelling_specific_annots = {
         'A': ['C+0', 'C+3', 'C+4', 'D+0', 'D+2', 'D+3', 'H+0', 'H+1', 'L+0', 'L+1', 'L+2', 'L+5', 'L|[1,2]+0', 'L|[1,2]+1'],

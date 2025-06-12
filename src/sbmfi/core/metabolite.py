@@ -85,7 +85,7 @@ class LabelledMetabolite(Metabolite):
 
     @property
     def formula_weight(self):
-        return self._formula.mass(ion=False)
+        return self._formula.mass()
 
     @abstractmethod
     def _init_state(self):

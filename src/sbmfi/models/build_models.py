@@ -1693,7 +1693,7 @@ def _parse_anton_measurements(recompute=False, verbose=False, adduct_name='M-'):
         meas_dct = _anton_measurements[meas_id]
         formula = Formula(meas_dct['formula'])
         if verbose:
-            print(meas_id, formula.to_chnops(), formula.mass(charge=-1))
+            print(meas_id, formula.to_chnops(), formula.mz(electrons=-1))
         n_MDV = len(meas_dct['anton_pos'].split('-')) + 1
         formula['C'] -= (n_MDV - 1)
         index = meas_ids.loc[meas_ids['meas_id'] == meas_id].index

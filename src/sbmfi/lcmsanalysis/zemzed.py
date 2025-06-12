@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
-from sbmfi.lcmsanalysis.formula import Formula
-from sbmfi.lcmsanalysis.adducts import emzed_adducts
-from sbmfi.lcmsanalysis.nist_mass import _nist_mass
+from sbmfi.compound.formula import Formula
+from sbmfi.compound.adducts import emzed_adducts
 import pickle
 import os
 from sbmfi.settings import BASE_DIR

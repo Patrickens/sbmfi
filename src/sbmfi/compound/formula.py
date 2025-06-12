@@ -207,7 +207,7 @@ class Formula(FormulAlgebra):
         else:
             return f'[{k}]{elem}'
 
-    def mass(self, charge=0, average=False, ion=True, abundances=_nist_mass):
+    def mass(self, average=False, abundances=_nist_mass):
         """ calculates the mass of the formula object
         TODO: TEST ion=False/True!!
         Parameters
@@ -222,9 +222,6 @@ class Formula(FormulAlgebra):
         # Calculate mass
         mass = 0.0
         for isotope_string, amount in self.items():
-            if isotope_string == '-':
-                amount -= charge
-
             k, elem = self._parse_isotope_string(isotope_string)
             # Calculate average mass if required and the isotope number is
             # not specified.
@@ -235,13 +232,16 @@ class Formula(FormulAlgebra):
             else:
                 mass += (amount * abundances[elem][k][0])
 
-        # Calculate m/z if required
-        nE = charge - self['-']
-        if (nE != 0) and ion:
-            mass = abs(mass/nE)
-        elif ion:
-            raise ValueError('Not a charged molecule!')
         return mass
+
+    def mz(self, electrons=0):
+        # returns the mass over charge of a molecule with charge added to it
+        nE = self['-'] + electrons
+        if nE == 0:
+            raise ValueError('Result is not a charged molecule!')
+        mass = self.mass() # mono-isotopic with most abundant isotopes if not specified
+        mass += _nist_mass['-'][0][0] * electrons
+        return abs(mass / nE)
 
     def to_chnops(self) -> str:
         """Unique string representation of a given formula; elements
@@ -264,65 +264,128 @@ class Formula(FormulAlgebra):
         return the_string
 
     def add_C13(self, nC13:int):
-        """Exchanges C[12] for C[13] atoms in a Formula"""
-        if nC13 > 0:
-            self['[13]C'] = nC13
-            self['C'] -= nC13
-        elif nC13 < 0:
-            self['C'] -= nC13
-            self['[13]C'] += nC13
+        """Exchanges C[12] for C[13] atoms in a Formula
+
+        Parameters
+        ----------
+        nC13 : int
+            Number of 12C atoms to exchange for 13C atoms
+
+
+        Returns
+        -------
+        new : Formula
+            Formula where nC13 with nC13 C[13] atoms and the rest C[12] atoms
+
+        Examples
+        --------
+        Formula('C2H5OH').add_C13(nC13=2)
+        """
+        nC = self['C'] + self['[12]C']
+        if not ('[13]C' not in self) and (nC13 <= nC):
+            raise ValueError('brøhh...')
+        new = self.copy()
+        hasC = new.pop('C', 0) + new.pop('[12]C', 0)
+        if hasC > 0:
+            new += {'[12]C': nC - nC13, '[13]C': nC13}
+        return new
 
     def full_isotope(self):
-        """Returns a Formula with all atoms fully isotopically labeled"""
-        result = self.copy()
-        for isotope_string, amount in self.items():
-            if isotope_string == '-':
-                continue
+        """Turn non-isotopic atoms into their most probable versions.
+        Watch out, for large molecules this does not mean that the most
+        probable isotopic composition is returned!
+
+        Returns
+        -------
+        full_isotope : Formula
+            Formula where all atoms have an isotopic specification
+
+        Examples
+        --------
+        Formula('C2H5OH').full_isotope()
+        TODO
+        """
+        new = self.copy()
+        for isotope_string, number in self.items():
             k, elem = self._parse_isotope_string(isotope_string)
             if k == 0:
-                # Find the most abundant isotope
-                max_abundance = 0
-                max_isotope = 0
-                for isotope, data in _nist_mass[elem].items():
-                    if data[1] > max_abundance:
-                        max_abundance = data[1]
-                        max_isotope = isotope
-                result[self._make_isotope_string(max_isotope, elem)] = amount
-                del result[isotope_string]
-        return result
+                new.pop(isotope_string)
+                k = int(round(_nist_mass[elem][0][0]))
+                new[self._make_isotope_string(k, elem)] += number
+        return new
 
     def no_isotope(self):
-        """Returns a Formula with all atoms unlabeled"""
-        result = self.copy()
-        for isotope_string, amount in self.items():
-            if isotope_string == '-':
-                continue
+        """Removes all isotopic specifications from a Formula
+        Returns
+        -------
+        full_isotope : Formula
+            Formula where all atoms have an isotopic specification
+
+        Examples
+        --------
+        Formula('C[13]C[12]H[2]H4OH').no_isotope()
+        TODO
+        """
+        new = self.copy()
+        for isotope_string, number in self.items():
             k, elem = self._parse_isotope_string(isotope_string)
             if k != 0:
-                result[elem] = amount
-                del result[isotope_string]
-        return result
+                new.pop(isotope_string)
+                new[elem] += number
+        return new
+
 
     def abundance(self, abundances=_nist_mass):
-        """Calculates the natural abundance of the formula"""
-        abundance = 1.0
-        for isotope_string, amount in self.items():
-            if isotope_string == '-':
-                continue
-            k, elem = self._parse_isotope_string(isotope_string)
-            if k == 0:
-                # For unlabeled atoms, use the natural abundance
-                for isotope, data in abundances[elem].items():
-                    if isotope:
-                        abundance *= data[1] ** amount
-            else:
-                # For labeled atoms, use the specific isotope abundance
-                abundance *= abundances[elem][k][1] ** amount
-        return abundance
+        """
+        TODO slow but readable...
+        Calculate the relative abundance of a given isotopic composition
+        of a molecule.
 
-    def shift(self):
-        """Returns the mass shift of the formula relative to the unlabeled formula"""
-        return self.mass() - self.no_isotope().mass()
+        Parameters
+        ----------
+        elements : list, optional
+            Which elements to include when calculating the abundance.
+            For instance when calculating a correction matrix, all elements
+            except for carbon.
+
+        Returns
+        -------
+        abundance : float
+            The relative abundance of a given isotopic composition.
+        """
+        isotopic_composition = defaultdict(dict)
+
+        for element in self:
+            k, elem = self._parse_isotope_string(element)
+            if ((elem in isotopic_composition) and
+                    (k == 0 or 0 in isotopic_composition[elem])):
+                raise ValueError(f'{elem} all or none isotope numbers')
+            else:
+                isotopic_composition[elem][k] = (self[element])
+
+        num1, num2, denom = 1.0, 1.0, 1.0
+        for elem, isotope_dict in isotopic_composition.items():
+            if elem == '-':
+                continue
+            num1 *= factorial(sum(isotope_dict.values()))
+            for k, isotope_content in isotope_dict.items():
+                denom *= factorial(isotope_content)
+                if k:
+                    num2 *= (abundances[elem][k][1] ** isotope_content)
+
+        return num2 * (num1 / denom)
+
+    def isotope_number(self, relative=True):
+        iso_n = 0
+        for isotope_string, number in self.items():
+            k, elem = self._parse_isotope_string(isotope_string)
+            k_0 = int(round(_nist_mass[elem][0][0]))
+            if relative:
+                iso_i = (k if k == 0 else k - k_0) * number
+            else:
+                iso_i = (k_0 if k == 0 else k) * number
+            iso_n += iso_i
+        return iso_n
 
 
 def isotopologues(
@@ -334,65 +397,75 @@ def isotopologues(
         abundances=_nist_mass,
         n_mdv = None,
     ):
-    """Generate all possible isotopologues of a formula.
-    
+    """Iterate over possible isotopic states of a molecule.
+    The molecule can be defined by formula, sequence, parsed sequence, or composition.
+    The space of possible isotopic compositions is restrained by parameters
+    ``elements_with_isotopes``, ``isotope_threshold``, ``overall_threshold``.
+
     Parameters
     ----------
-    formula : Formula
-        The formula to generate isotopologues for
-    report_abundance : bool, default False
-        If True, also return the natural abundance of each isotopologue
-    elements_with_isotopes : list, optional
-        List of elements to consider for isotopic labeling. If None, all elements are considered.
-    isotope_threshold : float, default 5e-4
-        Minimum abundance for an isotope to be considered
-    overall_threshold : float, default 0.0
-        Minimum overall abundance for an isotopologue to be included
-    abundances : dict, default _nist_mass
-        Dictionary of isotope abundances
-    n_mdv : int, optional
-        If provided, only return isotopologues with this number of mass differences
-        
+    formula : str
+        A string with a chemical formula.
+    report_abundance : bool, optional
+        If :py:const:`True`, the output will contain 2-tuples: `(composition, abundance)`.
+        Otherwise, only compositions are yielded. Default is :py:const:`False`.
+    elements_with_isotopes : container of str, optional
+        A set of elements to be considered in isotopic distribution
+        (by default, every element has an isotopic distribution).
+    isotope_threshold : float, optional
+        The threshold abundance of a specific isotope to be considered.
+        Default is :py:const:`5e-4`.
+    overall_threshold : float, optional
+        The threshold abundance of the calculateed isotopic composition.
+        Default is :py:const:`0`.
+
     Returns
     -------
-    list
-        List of isotopologues (and their abundances if report_abundance is True)
+    isotopologues : iterator
+        Iterator over possible isotopic compositions.
     """
-    if elements_with_isotopes is None:
-        elements_with_isotopes = list(abundances.keys())
-    
-    # Get all possible isotopes for each element
-    isotopes = {}
-    for elem in elements_with_isotopes:
-        if elem in abundances:
-            isotopes[elem] = [k for k, v in abundances[elem].items() 
-                            if v[1] > isotope_threshold]
-    
-    # Generate all possible combinations
-    combinations = []
-    for elem in elements_with_isotopes:
-        if elem in formula:
-            n = formula[elem]
-            if n > 0:
-                combinations.append([(elem, k) for k in isotopes.get(elem, [0])])
-    
-    # Generate all isotopologues
-    result = []
-    for combo in product(*combinations):
-        new_formula = formula.copy()
-        for elem, k in combo:
-            if k != 0:
-                new_formula[f'[{k}]{elem}'] = new_formula.pop(elem)
-        
-        if n_mdv is not None:
-            if new_formula.shift() != n_mdv:
-                continue
-                
-        if report_abundance:
-            abundance = new_formula.abundance(abundances)
-            if abundance > overall_threshold:
-                result.append((new_formula, abundance))
+
+    formula = Formula(formula=formula).no_isotope()
+    dict_elem_isotopes = {}
+    for elem in formula:
+        if (elements_with_isotopes is None) or (elem in elements_with_isotopes):
+            compare = -1 if elem == '-' else 0
+            isotopes = {k: v for k, v in abundances[elem].items() if k != compare and v[1] >= isotope_threshold}
+            list_isotopes = [Formula._make_isotope_string(k, elem) for k in isotopes]
+            dict_elem_isotopes[elem] = list_isotopes
         else:
-            result.append(new_formula)
-    
-    return result 
+            dict_elem_isotopes[elem] = [elem]
+
+    all_isotoplogues = []
+    for elem, list_isotopes in dict_elem_isotopes.items():
+        n = abs(formula[elem])
+        list_comb_element_n = []
+        for elementXn in combinations_with_replacement(list_isotopes, n):
+            list_comb_element_n.append(elementXn)
+        all_isotoplogues.append(list_comb_element_n)
+
+    for isotopologue in product(*all_isotoplogues):
+        ic = Formula()
+        for elem in isotopologue:
+            for isotope in elem:
+                ic[isotope] += 1
+        if n_mdv is not None:
+            if ic.shift() >= n_mdv:
+                continue
+        if report_abundance or overall_threshold > 0.0:
+            abundance = ic.abundance(abundances=abundances)
+            if abundance > overall_threshold:
+                if report_abundance:
+                    yield (ic, abundance)
+                else:
+                    yield ic
+        else:
+            yield ic
+
+
+if __name__ == "__main__":
+
+    f = Formula('[13]C3[12]C2C5H12O3')
+    print(f)
+    print(f.full_isotope())
+    print(f.isotope_number(False))
