@@ -343,7 +343,7 @@ class Formula(FormulAlgebra):
 
         Parameters
         ----------
-        elements : list, optional
+        abundances : list, optional
             Which elements to include when calculating the abundance.
             For instance when calculating a correction matrix, all elements
             except for carbon.
@@ -353,19 +353,23 @@ class Formula(FormulAlgebra):
         abundance : float
             The relative abundance of a given isotopic composition.
         """
+
+        full_iso = self.full_isotope()
         isotopic_composition = defaultdict(dict)
 
-        for element in self:
+        for element in full_iso:
             k, elem = self._parse_isotope_string(element)
             if ((elem in isotopic_composition) and
                     (k == 0 or 0 in isotopic_composition[elem])):
                 raise ValueError(f'{elem} all or none isotope numbers')
             else:
-                isotopic_composition[elem][k] = (self[element])
+                isotopic_composition[elem][k] = (full_iso[element])
 
         num1, num2, denom = 1.0, 1.0, 1.0
         for elem, isotope_dict in isotopic_composition.items():
             if elem == '-':
+                continue
+            if elem not in abundances:
                 continue
             num1 *= factorial(sum(isotope_dict.values()))
             for k, isotope_content in isotope_dict.items():
@@ -465,7 +469,7 @@ def isotopologues(
 
 if __name__ == "__main__":
 
-    f = Formula('[13]C3[12]C2C5H12O3')
-    print(f)
-    print(f.full_isotope())
-    print(f.isotope_number(False))
+    f = Formula('[13]CC5H12O6')
+    nasty = _nist_mass.copy()
+    nasty.pop('C')
+    print(f.abundance(nasty))
