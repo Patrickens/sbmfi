@@ -246,9 +246,9 @@ class TestModelBuilder:
     @pytest.fixture
     def basic_metabolite_kwargs(self):
         return {
-            'A': {'formula': 'C1'},
-            'B': {'formula': 'C1'},
-            'C': {'formula': 'C2'}
+            'A': {'formula': 'C1', 'compartment': 'c', 'charge': -1},
+            'B': {'formula': 'C1', 'compartment': 'c', 'charge': -1},
+            'C': {'formula': 'C2', 'compartment': 'c', 'charge': -2}
         }
 
     def test_basic_model_creation(self, basic_reaction_kwargs, basic_metabolite_kwargs):
@@ -260,6 +260,13 @@ class TestModelBuilder:
         assert len(model.metabolites) == 3
         assert 'r1' in model.reactions
         assert all(m in model.metabolites for m in ['A', 'B', 'C'])
+        
+        # Verify metabolite attributes
+        for met_id, kwargs in basic_metabolite_kwargs.items():
+            metabolite = model.metabolites.get_by_id(met_id)
+            assert metabolite.formula == kwargs['formula']
+            assert metabolite.compartment == kwargs['compartment']
+            assert metabolite.charge == kwargs['charge']
 
     def test_biomass_reaction(self, basic_metabolite_kwargs):
         """Test model creation with biomass reaction"""
