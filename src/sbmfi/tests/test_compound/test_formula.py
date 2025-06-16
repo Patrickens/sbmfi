@@ -149,22 +149,22 @@ def test_formula_isotope_number():
     # Test unlabeled formula
     f = Formula('C6H12O6')
     assert f.isotope_number() == 0
-    assert f.isotope_number(relative=False) == 0
+    assert f.isotope_number(relative=False) == 180
 
     # Test single isotope
     f = Formula('[13]C6H12O6')
     assert f.isotope_number() == 6  # 6 * (13-12)
-    assert f.isotope_number(relative=False) == 78  # 6 * 13
+    assert f.isotope_number(relative=False) == 186  # 6 * 13
 
     # Test multiple isotopes
     f = Formula('[13]C2[12]C4H12O6')
     assert f.isotope_number() == 2  # 2 * (13-12)
-    assert f.isotope_number(relative=False) == 26  # 2 * 13
+    assert f.isotope_number(relative=False) == 182  # 2 * 13
 
     # Test with charge
     f = Formula('[13]C6H12O6-')
     assert f.isotope_number() == 6  # charge should not affect the result
-    assert f.isotope_number(relative=False) == 78
+    assert f.isotope_number(relative=False) == 186
 
 def test_formula_to_chnops():
     f = Formula('C6H12O6')

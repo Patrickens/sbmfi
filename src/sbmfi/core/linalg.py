@@ -1455,15 +1455,67 @@ class LinAlg(Backend):
 
 
 if __name__ == "__main__":
-    import pickle
-    import timeit
-    import cProfile
-    import torch
+    def test_tensormul_T(linalg):
+        # Test 1: Basic 2D matrix multiplication
+        A = np.array([[1, 2],
+                      [3, 4]])
+        x = np.array([[5, 6],
+                      [7, 8]])
+        A_tensor = linalg.get_tensor(values=A)
+        x_tensor = linalg.get_tensor(values=x)
 
-    # -------------------------------------------------------------------
-    # Test LU factorization and solving linear systems
-    # -------------------------------------------------------------------
+        # tensormul_T does: (A @ x.T).T
+        result = linalg.tensormul_T(A_tensor, x_tensor)
+        expected = (A @ x.T).T
+        np.testing.assert_array_equal(result, expected)
 
+        # Test 2: 3D tensors with default dimensions (-2, -1)
+        A = np.array([[[1, 2],
+                       [3, 4]],
+                      [[5, 6],
+                       [7, 8]]])
+        x = np.array([[[9, 10],
+                       [11, 12]],
+                      [[13, 14],
+                       [15, 16]]])
+        A_tensor = linalg.get_tensor(values=A)
+        x_tensor = linalg.get_tensor(values=x)
 
-    # test_min_max(LinAlg('torch'))
-    # test_min_max(LinAlg('numpy'))
+        # For each batch:
+        # tensormul_T does: (A[i] @ x[i].T).T
+        result = linalg.tensormul_T(A_tensor, x_tensor)
+        expected = np.array([(A[0] @ x[0].T).T,
+                             (A[1] @ x[1].T).T])
+        np.testing.assert_array_equal(result, expected)
+
+        # Test 3: 3D tensors with custom dimensions (0, 1)
+        A = np.array([[[1, 2],
+                       [3, 4]],
+                      [[5, 6],
+                       [7, 8]]])
+        x = np.array([[[9, 10],
+                       [11, 12]],
+                      [[13, 14],
+                       [15, 16]]])
+        A_tensor = linalg.get_tensor(values=A)
+        x_tensor = linalg.get_tensor(values=x)
+
+        # When dim0=0, dim1=1, we first transpose x along dimensions 0 and 1
+        # Then multiply with A, then transpose the result back
+        result = linalg.tensormul_T(A_tensor, x_tensor, dim0=0, dim1=1)
+
+        # Calculate expected result:
+        # 1. First transpose x along dimensions 0 and 1
+        x_transposed = np.transpose(x, (1, 0, 2))
+        # 2. For each batch, multiply A[i] with x_transposed[i].T
+        # 3. Transpose the result back
+        expected = np.array([
+            np.transpose(A[0] @ x_transposed[0].T),
+            np.transpose(A[1] @ x_transposed[1].T)
+        ])
+        print(result)
+        print(x_transposed)
+        np.testing.assert_array_equal(result, expected)
+
+    test_tensormul_T(LinAlg('numpy'))
+    test_tensormul_T(LinAlg('torch'))

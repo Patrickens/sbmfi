@@ -348,7 +348,8 @@ def test_min_max(linalg):
 # -------------------------------------------------------------------
 def test_logsumexp(linalg):
     arr = np.array([1, 2, 3])
-    result = linalg.logsumexp(arr, dim=0)
+    arr_tensor = linalg.get_tensor(values=arr)
+    result = linalg.logsumexp(arr_tensor, dim=0)
     expected = scipy.special.logsumexp(arr)
     if linalg.backend == "numpy":
         np.testing.assert_allclose(result, expected, rtol=1e-5)
@@ -359,38 +360,161 @@ def test_logsumexp(linalg):
 # Test basic tensor operations: permutax, transax, unsqueeze, cat.
 # -------------------------------------------------------------------
 def test_tensor_ops(linalg):
-    if linalg.backend == "numpy":
-        A = np.array([[1, 2],
-                      [3, 4]])
-        B = linalg.permutax(A, 1, 0)
-        np.testing.assert_array_equal(B, A.T)
-        C = linalg.transax(A, 0, 1)
-        np.testing.assert_array_equal(C, A.T)
-        D = linalg.unsqueeze(A, 0)
-        np.testing.assert_array_equal(D, np.expand_dims(A, 0))
-        E = linalg.cat([A, A], dim=0)
-        np.testing.assert_array_equal(E, np.concatenate([A, A], axis=0))
-    else:
-        A = torch.tensor([[1, 2],
-                          [3, 4]])
-        B = linalg.permutax(A, 1, 0)
-        np.testing.assert_array_equal(B.cpu().numpy(), A.t().cpu().numpy())
-        C = linalg.transax(A, 0, 1)
-        np.testing.assert_array_equal(C.cpu().numpy(), A.t().cpu().numpy())
-        D = linalg.unsqueeze(A, 0)
-        np.testing.assert_array_equal(D.cpu().numpy(), A.unsqueeze(0).cpu().numpy())
-        E = linalg.cat([A, A], dim=0)
-        np.testing.assert_array_equal(E.cpu().numpy(), torch.cat([A, A], dim=0).cpu().numpy())
+    # Test permutax and transax
+    A = np.array([[1, 2],
+                  [3, 4]])
+    A_tensor = linalg.get_tensor(values=A)
+    
+    B = linalg.permutax(A_tensor, 1, 0)
+    expected = A.T
+    np.testing.assert_array_equal(linalg.tonp(B), expected)
+    
+    C = linalg.transax(A_tensor, 0, 1)
+    np.testing.assert_array_equal(linalg.tonp(C), expected)
+    
+    # Test unsqueeze
+    D = linalg.unsqueeze(A_tensor, 0)
+    expected = np.expand_dims(A, 0)
+    np.testing.assert_array_equal(linalg.tonp(D), expected)
+    
+    # Test cat
+    E = linalg.cat([A_tensor, A_tensor], dim=0)
+    expected = np.concatenate([A, A], axis=0)
+    np.testing.assert_array_equal(linalg.tonp(E), expected)
 
 # -------------------------------------------------------------------
 # Test probability functions: norm_pdf, norm_log_pdf, norm_cdf, norm_inv_cdf.
 # -------------------------------------------------------------------
 def test_probability_functions(linalg):
     x = np.array([0.0, 0.5, 1.0])
-    pdf = linalg.norm_pdf(x, mu=0.0, std=1.0)
-    log_pdf = linalg.norm_log_pdf(x, mu=0.0, std=1.0)
-    cdf = linalg.norm_cdf(x, mu=0.0, std=1.0)
-    inv_cdf = linalg.norm_inv_cdf(cdf, mu=0.0, std=1.0)
-    np.testing.assert_allclose(inv_cdf, x, rtol=1e-5)
-    # Check that the log PDF equals log(pdf).
-    np.testing.assert_allclose(log_pdf, np.log(pdf), rtol=1e-5) 
+    x_tensor = linalg.get_tensor(values=x)
+    std_tensor = linalg.get_tensor(values=np.array(1.0))
+    
+    pdf = linalg.norm_pdf(x_tensor, mu=0.0, std=std_tensor)
+    log_pdf = linalg.norm_log_pdf(x_tensor, mu=0.0, std=std_tensor)
+    cdf = linalg.norm_cdf(x_tensor, mu=0.0, std=std_tensor)
+    inv_cdf = linalg.norm_inv_cdf(cdf, mu=0.0, std=std_tensor)
+    
+    if linalg.backend == "numpy":
+        np.testing.assert_allclose(inv_cdf, x, rtol=1e-5)
+        np.testing.assert_allclose(log_pdf, np.log(pdf), rtol=1e-5)
+    else:
+        np.testing.assert_allclose(inv_cdf.cpu().numpy(), x, rtol=1e-5)
+        np.testing.assert_allclose(log_pdf.cpu().numpy(), np.log(pdf.cpu().numpy()), rtol=1e-5)
+
+# -------------------------------------------------------------------
+# Test min_pos_max_neg
+# Note: This function is designed to work with float arrays only.
+# -------------------------------------------------------------------
+def test_min_pos_max_neg(linalg):
+    # Test 1: Basic case with positive and negative values
+    A = np.array([[-2.0, 1.0, 3.0],
+                  [-1.0, 2.0, -3.0]], dtype=np.float64)
+    A_tensor = linalg.get_tensor(values=A)
+    
+    # Test return_what=1 (max positive)
+    result = linalg.min_pos_max_neg(A_tensor, return_what=1)
+    expected = np.array([1.0, 2.0])  # min of positive values in each row
+    np.testing.assert_array_equal(result, expected)
+    
+    # Test return_what=-1 (min negative)
+    result = linalg.min_pos_max_neg(A_tensor, return_what=-1)
+    expected = np.array([-2.0, -1.0])  # max of negative values in each row
+    np.testing.assert_array_equal(result, expected)
+    
+    # Test return_what=0 (both)
+    min_neg, max_pos = linalg.min_pos_max_neg(A_tensor, return_what=0)
+    expected_min_neg = np.array([-2.0, -1.0])
+    expected_max_pos = np.array([1.0, 2.0])
+    np.testing.assert_array_equal(min_neg, expected_min_neg)
+    np.testing.assert_array_equal(max_pos, expected_max_pos)
+    
+    # Test 2: With keepdims=True
+    result = linalg.min_pos_max_neg(A_tensor, return_what=1, keepdims=True)
+    expected = np.array([[1.0], [2.0]])  # min of positive values in each row
+    np.testing.assert_array_equal(result, expected)
+    
+    # Test 3: With return_indices=True
+    result, indices = linalg.min_pos_max_neg(A_tensor, return_what=1, return_indices=True)
+    expected = np.array([1.0, 2.0])
+    expected_indices = np.array([1, 1])  # indices of min positive values
+    np.testing.assert_array_equal(result, expected)
+    np.testing.assert_array_equal(indices, expected_indices)
+    
+    # Test 4: All positive values
+    A = np.array([[1.0, 2.0, 3.0],
+                  [4.0, 5.0, 6.0]], dtype=np.float64)
+    A_tensor = linalg.get_tensor(values=A)
+    result = linalg.min_pos_max_neg(A_tensor, return_what=-1)
+    expected = np.array([-np.inf, -np.inf])  # no negative values
+    np.testing.assert_array_equal(result, expected)
+    
+    # Test 5: All negative values
+    A = np.array([[-1.0, -2.0, -3.0],
+                  [-4.0, -5.0, -6.0]], dtype=np.float64)
+    A_tensor = linalg.get_tensor(values=A)
+    result = linalg.min_pos_max_neg(A_tensor, return_what=1)
+    expected = np.array([np.inf, np.inf])  # no positive values
+    np.testing.assert_array_equal(result, expected)
+
+# -------------------------------------------------------------------
+# Test tensormul_T
+# -------------------------------------------------------------------
+def test_tensormul_T(linalg):
+    # Test 1: Basic 2D matrix multiplication
+    A = np.array([[1, 2],
+                  [3, 4]])
+    x = np.array([[5, 6],
+                  [7, 8]])
+    A_tensor = linalg.get_tensor(values=A)
+    x_tensor = linalg.get_tensor(values=x)
+
+    # tensormul_T does: (A @ x.T).T
+    result = linalg.tensormul_T(A_tensor, x_tensor)
+    expected = (A @ x.T).T
+    np.testing.assert_array_equal(result, expected)
+
+    # Test 2: 3D tensors with default dimensions (-2, -1)
+    A = np.array([[[1, 2],
+                   [3, 4]],
+                  [[5, 6],
+                   [7, 8]]])
+    x = np.array([[[9, 10],
+                   [11, 12]],
+                  [[13, 14],
+                   [15, 16]]])
+    A_tensor = linalg.get_tensor(values=A)
+    x_tensor = linalg.get_tensor(values=x)
+
+    # For each batch:
+    # tensormul_T does: (A[i] @ x[i].T).T
+    result = linalg.tensormul_T(A_tensor, x_tensor)
+    expected = np.array([(A[0] @ x[0].T).T,
+                        (A[1] @ x[1].T).T])
+    np.testing.assert_array_equal(result, expected)
+
+    # Test 3: 3D tensors with custom dimensions (0, 1)
+    A = np.array([[[1, 2],
+                   [3, 4]],
+                  [[5, 6],
+                   [7, 8]]])
+    x = np.array([[[9, 10],
+                   [11, 12]],
+                  [[13, 14],
+                   [15, 16]]])
+    A_tensor = linalg.get_tensor(values=A)
+    x_tensor = linalg.get_tensor(values=x)
+
+    # When dim0=0, dim1=1, we first swap axes 0 and 1 of x
+    # Then multiply with A, then swap axes of the result back
+    result = linalg.tensormul_T(A_tensor, x_tensor, dim0=0, dim1=1)
+
+    # Calculate expected result:
+    # 1. First swap axes 0 and 1 of x
+    x_swapped = np.swapaxes(x, 0, 1)
+    # 2. Multiply A with x_swapped (batch matrix multiplication)
+    mul_result = A @ x_swapped
+    # 3. Swap axes of the result back
+    expected = np.swapaxes(mul_result, 0, 1)
+
+    np.testing.assert_array_equal(result, expected)
