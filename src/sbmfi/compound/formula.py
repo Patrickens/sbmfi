@@ -463,6 +463,37 @@ def isotopologues(
             yield ic
 
 
+def build_correction_matrix(
+        # TODO incorporate a ppm argument so that we exclude correcting isotopes that are further than resolution away!
+        formula, elements=None, isotope_threshold=1e-4, overall_threshold=0.0001, exclude_carbon=True, n_mdv=None
+) -> np.array:
+    formula = Formula(formula=formula).no_isotope()
+
+    if exclude_carbon:
+        n_C = formula.pop('C', 4) + 1 # here we exclude carbon
+    else:
+        n_C = formula.get('C', 4) + 1
+
+    if n_mdv is None:
+        n_mdv = n_C
+
+    abundances = np.zeros(shape=n_mdv, dtype=np.double)
+    for (formula, abundance) in isotopologues(
+            formula=formula, elements_with_isotopes=elements, report_abundance=True,
+            isotope_threshold=isotope_threshold, overall_threshold=overall_threshold, n_mdv=n_mdv # TODO n_mdv has been removed
+    ):
+        # shift = formula.shift()
+        raise ValueError('TODO REIMPLEMENT SHIFT COMPUTATION HERE')
+        if shift < 0:
+            raise ValueError(f'Shift under 0 {formula.to_chnops()}')
+        abundances[shift] += abundance
+    corr_mat = np.zeros((n_mdv, n_mdv), dtype=np.double)
+    for i in range(n_mdv):
+        np.fill_diagonal(corr_mat[i:], abundances[i])
+    # corr_mat = corr_mat / corr_mat.sum(0)[None, :]
+    return corr_mat
+
+
 if __name__ == "__main__":
 
     f = Formula('C2HO')

@@ -22,12 +22,10 @@ from sbmfi.core.polytopia import (
     thermo_2_net_polytope
 )
 from sbmfi.core.coordinater import FluxCoordinateMapper
-from sbmfi.lcmsanalysis.formula import Formula, isotopologues
-from sbmfi.lcmsanalysis.util import build_correction_matrix
+from sbmfi.compound.formula import Formula, isotopologues, build_correction_matrix, _nist_mass
 import cvxpy as cp
 from typing import Iterable
 import copy
-from sbmfi.lcmsanalysis.nist_mass import _nist_mass
 import itertools
 from math import comb
 

@@ -56,7 +56,10 @@ def create_full_metabolite_kwargs(
                     if 'formula' in met_kwargs:
                         met_formula = Formula(met_kwargs.get('formula'))
                         if met_formula['C'] != len(atoms):
-                            raise ValueError
+                            raise ValueError(
+                                f"Formula mismatch for metabolite {met_id}: "
+                                f"formula has {met_formula['C']} carbon atoms but atom mapping has {len(atoms)} atoms"
+                            )
                     elif infer_formula:
                         met_kwargs['formula'] = f'C{len(atoms)}'
                 else:

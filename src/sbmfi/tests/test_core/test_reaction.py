@@ -1,8 +1,9 @@
 import pytest
 import numpy as np
-from cobra import Reaction, Metabolite
+from cobra import Reaction, Metabolite, Model
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU
+from sbmfi.core.model import LabellingModel, EMU_Model
 
 @pytest.fixture
 def basic_reaction():
@@ -119,6 +120,42 @@ def pseudo_reaction(basic_metabolites):
     })
     return emu_reaction
 
+@pytest.fixture
+def basic_model():
+    model = Model('test_model')
+    a = Metabolite('A', formula='C6H12O6')
+    b = Metabolite('B', formula='C6H12O6')
+    model.add_metabolites([a, b])
+    rxn = Reaction('test_rxn')
+    rxn.add_metabolites({a: -1, b: 1})
+    model.add_reactions([rxn])
+    return model
+
+@pytest.fixture
+def linalg():
+    from sbmfi.core.linalg import LinAlg
+    return LinAlg(backend='numpy')
+
+@pytest.fixture
+def labelling_model(basic_model, linalg):
+    model = LabellingModel(model=basic_model, linalg=linalg)
+    return model
+
+@pytest.fixture
+def emu_model(basic_model, linalg):
+    model = EMU_Model(model=basic_model, linalg=linalg)
+    return model
+
+@pytest.fixture
+def labelled_reaction_in_model(labelling_model):
+    reaction = labelling_model.reactions.get_by_id('test_rxn')
+    return reaction
+
+@pytest.fixture
+def emu_reaction_in_model(emu_model):
+    reaction = emu_model.reactions.get_by_id('test_rxn')
+    return reaction
+
 class TestLabellingReaction:
     def test_init_with_reaction(self, basic_reaction):
         lr = LabellingReaction(reaction=basic_reaction)
@@ -190,26 +227,52 @@ class TestLabellingReaction:
         labelled_reaction.dgibbsr = -10.0  # -10 kJ/mol
         assert labelled_reaction.dgibbsr == -10.0
 
-    def test_set_atom_map(self, labelled_reaction):
-        a = list(labelled_reaction.metabolites.keys())[0]
-        b = list(labelled_reaction.metabolites.keys())[1]
+    def test_set_atom_map(self, labelled_reaction_in_model):
+        a = list(labelled_reaction_in_model.metabolites.keys())[0]
+        b = list(labelled_reaction_in_model.metabolites.keys())[1]
         atom_map = {
             a: (-1, [('C1', 'C1'), ('C2', 'C2')]),
             b: (1, [('C1', 'C1'), ('C2', 'C2')])
         }
-        labelled_reaction.set_atom_map(atom_map)
-        assert len(labelled_reaction._atom_map) == 2
+        labelled_reaction_in_model.set_atom_map(atom_map)
+        assert len(labelled_reaction_in_model._atom_map) == 2
 
-    def test_build_reaction_string(self, atom_mapped_reaction):
-        rxn_str = atom_mapped_reaction.build_reaction_string()
+    def test_build_atom_map_from_string(self, labelled_reaction_in_model):
+        atom_map_str = "A/C1C2 --> B/C1C2"
+        atom_map, is_biomass = labelled_reaction_in_model.build_atom_map_from_string(atom_map_str)
+        assert len(atom_map) == 2
+        assert not is_biomass
+
+    def test_build_reaction_string(self, labelled_reaction_in_model):
+        # First set up atom mapping
+        a = list(labelled_reaction_in_model.metabolites.keys())[0]
+        b = list(labelled_reaction_in_model.metabolites.keys())[1]
+        atom_map = {
+            a: (-1, [('C1', 'C1'), ('C2', 'C2')]),
+            b: (1, [('C1', 'C1'), ('C2', 'C2')])
+        }
+        labelled_reaction_in_model.set_atom_map(atom_map)
+        
+        # Now test building the string
+        rxn_str = labelled_reaction_in_model.build_reaction_string()
         assert 'A/C1C1' in rxn_str
         assert 'B/C1C1' in rxn_str
         assert '-->' in rxn_str
 
-    def test_multiply_reaction(self, atom_mapped_reaction):
-        original_str = atom_mapped_reaction.build_reaction_string()
-        atom_mapped_reaction *= -1
-        new_str = atom_mapped_reaction.build_reaction_string()
+    def test_multiply_reaction(self, labelled_reaction_in_model):
+        # First set up atom mapping
+        a = list(labelled_reaction_in_model.metabolites.keys())[0]
+        b = list(labelled_reaction_in_model.metabolites.keys())[1]
+        atom_map = {
+            a: (-1, [('C1', 'C1'), ('C2', 'C2')]),
+            b: (1, [('C1', 'C1'), ('C2', 'C2')])
+        }
+        labelled_reaction_in_model.set_atom_map(atom_map)
+        
+        # Now test multiplication
+        original_str = labelled_reaction_in_model.build_reaction_string()
+        labelled_reaction_in_model *= -1
+        new_str = labelled_reaction_in_model.build_reaction_string()
         assert original_str != new_str
         assert 'A/C1C1' in new_str
         assert 'B/C1C1' in new_str

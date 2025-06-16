@@ -11,14 +11,9 @@ from sbmfi.core.polytopia import (
     project_polytope,
     simplify_polytope
 )
-from sbmfi.core.util import (
-    make_multidex,
-)
-from sbmfi.lcmsanalysis.util import (
-    build_correction_matrix,
-)
+from sbmfi.core.util import make_multidex
 # from sbmfi.lcmsanalysis.zemzed import add_formulas
-from sbmfi.compound.formula import Formula
+from sbmfi.compound.formula import Formula, build_correction_matrix
 from sbmfi.compound.adducts import emzed_adducts
 
 
