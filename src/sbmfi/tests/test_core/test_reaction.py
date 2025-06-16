@@ -34,6 +34,91 @@ def atom_mapped_reaction():
     })
     return lr
 
+@pytest.fixture
+def basic_metabolites():
+    # Non-symmetric metabolites
+    a = EMU_Metabolite(metabolite=Metabolite('A', formula='C3H6O3'))
+    b = EMU_Metabolite(metabolite=Metabolite('B', formula='C2H4O2'))
+    c = EMU_Metabolite(metabolite=Metabolite('C', formula='C2H4O2'))
+    x = EMU_Metabolite(metabolite=Metabolite('X', formula='C3H6O3'))
+    y = EMU_Metabolite(metabolite=Metabolite('Y', formula='C2H4O2'))
+    z = EMU_Metabolite(metabolite=Metabolite('Z', formula='C3H6O3'))
+    return {'a': a, 'b': b, 'c': c, 'x': x, 'y': y, 'z': z}
+
+@pytest.fixture
+def symmetric_metabolites():
+    # Symmetric metabolites
+    a_sym = EMU_Metabolite(metabolite=Metabolite('A_sym', formula='C3H6O3'), symmetric=True)
+    b_sym = EMU_Metabolite(metabolite=Metabolite('B_sym', formula='C2H4O2'), symmetric=True)
+    c_sym = EMU_Metabolite(metabolite=Metabolite('C_sym', formula='C2H4O2'), symmetric=True)
+    x_sym = EMU_Metabolite(metabolite=Metabolite('X_sym', formula='C3H6O3'), symmetric=True)
+    y_sym = EMU_Metabolite(metabolite=Metabolite('Y_sym', formula='C2H4O2'), symmetric=True)
+    z_sym = EMU_Metabolite(metabolite=Metabolite('Z_sym', formula='C3H6O3'), symmetric=True)
+    return {'a': a_sym, 'b': b_sym, 'c': c_sym, 'x': x_sym, 'y': y_sym, 'z': z_sym}
+
+@pytest.fixture
+def single_substrate_reaction(basic_metabolites):
+    reaction = Reaction('A_to_X')
+    reaction.add_metabolites({basic_metabolites['a']: -1, basic_metabolites['x']: 1})
+    emu_reaction = EMU_Reaction(reaction=reaction)
+    emu_reaction.set_atom_map({
+        basic_metabolites['a']: (-1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')]),
+        basic_metabolites['x']: (1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')])
+    })
+    return emu_reaction
+
+@pytest.fixture
+def two_substrate_one_product_reaction(basic_metabolites):
+    reaction = Reaction('A_B_to_Y')
+    reaction.add_metabolites({
+        basic_metabolites['a']: -1,
+        basic_metabolites['b']: -1,
+        basic_metabolites['y']: 1
+    })
+    emu_reaction = EMU_Reaction(reaction=reaction)
+    emu_reaction.set_atom_map({
+        basic_metabolites['a']: (-1, [('C1', 'C1'), ('C2', 'C2')]),
+        basic_metabolites['b']: (-1, [('C1', 'C1'), ('C2', 'C2')]),
+        basic_metabolites['y']: (1, [('C1', 'C1'), ('C2', 'C2')])
+    })
+    return emu_reaction
+
+@pytest.fixture
+def two_substrate_two_product_reaction(basic_metabolites):
+    reaction = Reaction('A_B_to_X_Y')
+    reaction.add_metabolites({
+        basic_metabolites['a']: -1,
+        basic_metabolites['b']: -1,
+        basic_metabolites['x']: 1,
+        basic_metabolites['y']: 1
+    })
+    emu_reaction = EMU_Reaction(reaction=reaction)
+    emu_reaction.set_atom_map({
+        basic_metabolites['a']: (-1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')]),
+        basic_metabolites['b']: (-1, [('C1', 'C1'), ('C2', 'C2')]),
+        basic_metabolites['x']: (1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')]),
+        basic_metabolites['y']: (1, [('C1', 'C1'), ('C2', 'C2')])
+    })
+    return emu_reaction
+
+@pytest.fixture
+def pseudo_reaction(basic_metabolites):
+    reaction = Reaction('A_B_C_to_Z')
+    reaction.add_metabolites({
+        basic_metabolites['a']: -1,
+        basic_metabolites['b']: -1,
+        basic_metabolites['c']: -1,
+        basic_metabolites['z']: 1
+    })
+    emu_reaction = EMU_Reaction(reaction=reaction)
+    emu_reaction.set_atom_map({
+        basic_metabolites['a']: (-1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')]),
+        basic_metabolites['b']: (-1, [('C1', 'C1'), ('C2', 'C2')]),
+        basic_metabolites['c']: (-1, [('C1', 'C1'), ('C2', 'C2')]),
+        basic_metabolites['z']: (1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')])
+    })
+    return emu_reaction
+
 class TestLabellingReaction:
     def test_init_with_reaction(self, basic_reaction):
         lr = LabellingReaction(reaction=basic_reaction)
@@ -206,4 +291,175 @@ class TestEMU_Reaction:
         # Test pretty printing tensors
         pretty_str = emu_reaction.pretty_tensors(weight=2)
         assert isinstance(pretty_str, str)
-        assert len(pretty_str) > 0 
+        assert len(pretty_str) > 0
+
+    def test_single_substrate_reaction(self, single_substrate_reaction, basic_metabolites):
+        # Test atom mapping
+        assert len(single_substrate_reaction._atom_map) == 2
+        assert basic_metabolites['a'] in single_substrate_reaction._atom_map
+        assert basic_metabolites['x'] in single_substrate_reaction._atom_map
+        
+        # Test reactant-product mapping
+        product_emu = basic_metabolites['x'].get_emu(np.array([0, 1, 2]))
+        mapping = single_substrate_reaction.map_reactants_products(
+            product_emu=product_emu,
+            substrate_metabolites=[basic_metabolites['a']]
+        )
+        assert len(mapping) > 0
+        assert all(isinstance(m, tuple) for m in mapping)
+        assert all(m[1] == product_emu for m in mapping)  # Check product EMU
+        assert all(m[2].metabolite == basic_metabolites['a'] for m in mapping)  # Check reactant metabolite
+
+        # Test reverse reaction
+        rev_reaction = single_substrate_reaction._rev_reaction
+        assert rev_reaction is not None
+        assert rev_reaction.pseudo is True
+        assert len(rev_reaction._atom_map) == 2
+        assert basic_metabolites['a'] in rev_reaction._atom_map
+        assert basic_metabolites['x'] in rev_reaction._atom_map
+        
+        # Check reverse reaction atom mapping is inverted
+        for met, (stoich, atoms) in rev_reaction._atom_map.items():
+            orig_stoich, orig_atoms = single_substrate_reaction._atom_map[met]
+            assert stoich == -orig_stoich
+            assert np.array_equal(atoms, orig_atoms)
+
+    def test_two_substrate_one_product_reaction(self, two_substrate_one_product_reaction, basic_metabolites):
+        # Test atom mapping
+        assert len(two_substrate_one_product_reaction._atom_map) == 3
+        assert basic_metabolites['a'] in two_substrate_one_product_reaction._atom_map
+        assert basic_metabolites['b'] in two_substrate_one_product_reaction._atom_map
+        assert basic_metabolites['y'] in two_substrate_one_product_reaction._atom_map
+        
+        # Test reactant-product mapping
+        product_emu = basic_metabolites['y'].get_emu(np.array([0, 1]))
+        mapping = two_substrate_one_product_reaction.map_reactants_products(
+            product_emu=product_emu,
+            substrate_metabolites=[basic_metabolites['a'], basic_metabolites['b']]
+        )
+        assert len(mapping) > 0
+        assert all(isinstance(m, tuple) for m in mapping)
+        assert all(m[1] == product_emu for m in mapping)  # Check product EMU
+        assert all(m[2].metabolite in [basic_metabolites['a'], basic_metabolites['b']] for m in mapping)  # Check reactant metabolites
+
+        # Test reverse reaction
+        rev_reaction = two_substrate_one_product_reaction._rev_reaction
+        assert rev_reaction is not None
+        assert rev_reaction.pseudo is True
+        assert len(rev_reaction._atom_map) == 3
+        assert basic_metabolites['a'] in rev_reaction._atom_map
+        assert basic_metabolites['b'] in rev_reaction._atom_map
+        assert basic_metabolites['y'] in rev_reaction._atom_map
+        
+        # Check reverse reaction atom mapping is inverted
+        for met, (stoich, atoms) in rev_reaction._atom_map.items():
+            orig_stoich, orig_atoms = two_substrate_one_product_reaction._atom_map[met]
+            assert stoich == -orig_stoich
+            assert np.array_equal(atoms, orig_atoms)
+
+    def test_two_substrate_two_product_reaction(self, two_substrate_two_product_reaction, basic_metabolites):
+        # Test atom mapping
+        assert len(two_substrate_two_product_reaction._atom_map) == 4
+        assert basic_metabolites['a'] in two_substrate_two_product_reaction._atom_map
+        assert basic_metabolites['b'] in two_substrate_two_product_reaction._atom_map
+        assert basic_metabolites['x'] in two_substrate_two_product_reaction._atom_map
+        assert basic_metabolites['y'] in two_substrate_two_product_reaction._atom_map
+        
+        # Test reactant-product mapping for X
+        product_emu_x = basic_metabolites['x'].get_emu(np.array([0, 1, 2]))
+        mapping_x = two_substrate_two_product_reaction.map_reactants_products(
+            product_emu=product_emu_x,
+            substrate_metabolites=[basic_metabolites['a'], basic_metabolites['b']]
+        )
+        assert len(mapping_x) > 0
+        assert all(isinstance(m, tuple) for m in mapping_x)
+        assert all(m[1] == product_emu_x for m in mapping_x)
+        assert all(m[2].metabolite == basic_metabolites['a'] for m in mapping_x)  # X should only come from A
+        
+        # Test reactant-product mapping for Y
+        product_emu_y = basic_metabolites['y'].get_emu(np.array([0, 1]))
+        mapping_y = two_substrate_two_product_reaction.map_reactants_products(
+            product_emu=product_emu_y,
+            substrate_metabolites=[basic_metabolites['a'], basic_metabolites['b']]
+        )
+        assert len(mapping_y) > 0
+        assert all(isinstance(m, tuple) for m in mapping_y)
+        assert all(m[1] == product_emu_y for m in mapping_y)
+        assert all(m[2].metabolite == basic_metabolites['b'] for m in mapping_y)  # Y should only come from B
+
+        # Test reverse reaction
+        rev_reaction = two_substrate_two_product_reaction._rev_reaction
+        assert rev_reaction is not None
+        assert rev_reaction.pseudo is True
+        assert len(rev_reaction._atom_map) == 4
+        assert basic_metabolites['a'] in rev_reaction._atom_map
+        assert basic_metabolites['b'] in rev_reaction._atom_map
+        assert basic_metabolites['x'] in rev_reaction._atom_map
+        assert basic_metabolites['y'] in rev_reaction._atom_map
+        
+        # Check reverse reaction atom mapping is inverted
+        for met, (stoich, atoms) in rev_reaction._atom_map.items():
+            orig_stoich, orig_atoms = two_substrate_two_product_reaction._atom_map[met]
+            assert stoich == -orig_stoich
+            assert np.array_equal(atoms, orig_atoms)
+
+    def test_pseudo_reaction(self, pseudo_reaction, basic_metabolites):
+        # Test atom mapping
+        assert len(pseudo_reaction._atom_map) == 4
+        assert basic_metabolites['a'] in pseudo_reaction._atom_map
+        assert basic_metabolites['b'] in pseudo_reaction._atom_map
+        assert basic_metabolites['c'] in pseudo_reaction._atom_map
+        assert basic_metabolites['z'] in pseudo_reaction._atom_map
+        
+        # Test reactant-product mapping
+        product_emu = basic_metabolites['z'].get_emu(np.array([0, 1, 2]))
+        mapping = pseudo_reaction.map_reactants_products(
+            product_emu=product_emu,
+            substrate_metabolites=[basic_metabolites['a'], basic_metabolites['b'], basic_metabolites['c']]
+        )
+        assert len(mapping) > 0
+        assert all(isinstance(m, tuple) for m in mapping)
+        assert all(m[1] == product_emu for m in mapping)
+        assert all(m[2].metabolite in [basic_metabolites['a'], basic_metabolites['b'], basic_metabolites['c']] for m in mapping)
+
+        # Test that pseudo reaction has no reverse reaction
+        assert pseudo_reaction._rev_reaction is None
+
+    def test_symmetric_metabolites(self, symmetric_metabolites):
+        # Create a reaction with symmetric metabolites
+        reaction = Reaction('A_sym_to_X_sym')
+        reaction.add_metabolites({symmetric_metabolites['a']: -1, symmetric_metabolites['x']: 1})
+        emu_reaction = EMU_Reaction(reaction=reaction)
+        emu_reaction.set_atom_map({
+            symmetric_metabolites['a']: (-1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')]),
+            symmetric_metabolites['x']: (1, [('C1', 'C1'), ('C2', 'C2'), ('C3', 'C3')])
+        })
+        
+        # Test reactant-product mapping with symmetric metabolites
+        product_emu = symmetric_metabolites['x'].get_emu(np.array([0, 1]))
+        mapping = emu_reaction.map_reactants_products(
+            product_emu=product_emu,
+            substrate_metabolites=[symmetric_metabolites['a']]
+        )
+        assert len(mapping) > 0
+        assert all(isinstance(m, tuple) for m in mapping)
+        assert all(m[1] == product_emu for m in mapping)
+        assert all(m[2].metabolite == symmetric_metabolites['a'] for m in mapping)
+        
+        # Test that symmetric metabolites generate correct number of mappings
+        # For symmetric metabolites, we should get additional mappings due to symmetry
+        assert len(mapping) > 1  # Should have more than one mapping due to symmetry
+
+        # Test reverse reaction for symmetric metabolites
+        rev_reaction = emu_reaction._rev_reaction
+        assert rev_reaction is not None
+        assert rev_reaction.pseudo is True
+        assert len(rev_reaction._atom_map) == 2
+        assert symmetric_metabolites['a'] in rev_reaction._atom_map
+        assert symmetric_metabolites['x'] in rev_reaction._atom_map
+        
+        # Check reverse reaction atom mapping is inverted
+        for met, (stoich, atoms) in rev_reaction._atom_map.items():
+            orig_stoich, orig_atoms = emu_reaction._atom_map[met]
+            assert stoich == -orig_stoich
+            assert np.array_equal(atoms, orig_atoms) 

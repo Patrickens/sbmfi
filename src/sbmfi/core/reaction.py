@@ -42,7 +42,6 @@ class LabellingReaction(Reaction):
         self._pseudo = pseudo
 
         self._atom_map = {}  # {Met: (stoich, [tuple('atoms'),...] ) } required to be ordered for the
-        self._rect_prod_map: np.array = None  # mapping all reactant atoms to (present) product atoms
         self._rho_min = 0.0  # minimal fraction of flux going in the reverse direction; has to do with Gibbs free energy change
         self._rho_max = 0.0
         self._dgibbsr  = 0.0  # the currently set dGr
@@ -374,8 +373,6 @@ class LabellingReaction(Reaction):
 
     def set_atom_map(self, atom_map: dict):
         """
-        The concatenated reactant labels map onto the concatenated product labels as follows
-        [abcdef] -> [abdcef], thus: self._rect_prod_map = [0,1,3,2,4,5]
 
         Parameters
         ----------
@@ -437,7 +434,6 @@ class LabellingReaction(Reaction):
             if not self._pseudo:
                 if cumul_prod_atoms.shape[0] != cumul_rect_atoms.shape[0]:
                     raise ValueError(f'cannot have a reverse reaction for an unbalanced forward reaction {self.id}')
-            self._rect_prod_map = np.where(cumul_prod_atoms[:, None] == cumul_rect_atoms[None, :])[1]
 
         if not self._pseudo:
             self._rev_reaction.set_atom_map(atom_map=dict([

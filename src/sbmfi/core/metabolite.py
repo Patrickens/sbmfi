@@ -33,7 +33,6 @@ class LabelledMetabolite(Metabolite):
             metabolite: Metabolite,
             symmetric: bool = False,
             formula: str = '',
-            total_intensity = None,  # either a number or a distribution from which total intensities are sampled
     ):
         if isinstance(metabolite, LabelledMetabolite):
             raise NotImplementedError('Cannot instantiate LabelledMetabolite with another LabelledMetabolite')
