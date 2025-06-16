@@ -231,7 +231,8 @@ def test_convolve(linalg):
 def test_nonzero(linalg):
     A = np.array([[0, 1],
                   [2, 0]])
-    indices, values = linalg.nonzero(A)
+    A_tensor = linalg.get_tensor(values=A)
+    indices, values = linalg.nonzero(A_tensor)
     # Expected nonzero indices (order might differ).
     expected_indices = [tuple(row) for row in np.array([[0, 1], [1, 0]])]
     res_indices = sorted([tuple(row) for row in indices])

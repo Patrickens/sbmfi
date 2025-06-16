@@ -101,6 +101,10 @@ def _merge_duplicate_indices(
 
 
 class Backend:
+    """
+    Abstract base class defining the interface for numerical linear algebra backends.
+    Both NumpyBackend and TorchBackend must implement all methods defined here.
+    """
     def __init__(self, seed: Optional[int] = None, dtype: type = np.double, fkwargs=None):
         kwargs = copy.deepcopy(self._DEFAULT_FKWARGS)
         if fkwargs is not None:
@@ -108,7 +112,7 @@ class Backend:
                 if fname in kwargs:
                     kwargs[fname].update(instance_kwargs)
         self._fkwargs = kwargs
-        self._def_dtype = dtype
+        self._default_dtype = dtype
 
     def _determine_dtype(self, values=None, dtype=None):
         """
@@ -128,7 +132,369 @@ class Backend:
             dtype = values.dtype.type
             return dtype
 
-        return self._def_dtype
+        return self._default_dtype
+
+    def get_tensor(
+        self,
+        shape: Optional[Tuple[int, ...]] = None,
+        indices: Optional[np.ndarray] = None,
+        values: Optional[np.ndarray] = None,
+        dtype: Optional[Any] = None,
+        device: Optional[Any] = None,
+    ) -> Any:
+        """
+        Create a tensor and optionally populate it via indices and values.
+
+        Args:
+            shape: Desired shape. If None, shape is inferred from values.
+            indices: Array of indices. If None, creates a dense tensor.
+            values: Array of values. Required if indices is provided.
+            dtype: Data type. If None, inferred from values or uses default.
+            device: Device to use (for torch backend).
+
+        Returns:
+            The created tensor.
+        """
+        raise NotImplementedError
+
+    def LU(self, A: Any) -> Any:
+        """
+        Compute the LU factorization of a matrix or batch of matrices.
+
+        Args:
+            A: Input matrix or batch of matrices.
+
+        Returns:
+            The LU factorization.
+        """
+        raise NotImplementedError
+
+    def solve(self, LU: Any, b: Any) -> Any:
+        """
+        Solve a linear system given an LU factorization.
+
+        Args:
+            LU: The LU factorization.
+            b: Right-hand side vector or matrix.
+
+        Returns:
+            The solution to the linear system.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def vecopy(A: Any) -> Any:
+        """
+        Return a copy of the input tensor.
+
+        Args:
+            A: Input tensor.
+
+        Returns:
+            A copy of the input tensor.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def convolve(a: Any, v: Any) -> Any:
+        """
+        Perform a one-dimensional convolution.
+
+        Args:
+            a: First input tensor.
+            v: Second input tensor.
+
+        Returns:
+            The convolution result.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def nonzero(A: Any) -> Tuple[Any, Any]:
+        """
+        Return indices and values of nonzero elements.
+
+        Args:
+            A: Input tensor.
+
+        Returns:
+            Tuple of (indices, values) for nonzero elements.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def tonp(A: Any) -> np.ndarray:
+        """
+        Convert tensor to numpy array.
+
+        Args:
+            A: Input tensor.
+
+        Returns:
+            Numpy array representation of the tensor.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def permutax(A: Any, *args: int) -> Any:
+        """
+        Permute the axes of A.
+
+        Args:
+            A: Input tensor.
+            *args: New axis order.
+
+        Returns:
+            Tensor with permuted axes.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def transax(A: Any, dim0: int, dim1: int) -> Any:
+        """
+        Swap axes dim0 and dim1 of A.
+
+        Args:
+            A: Input tensor.
+            dim0: First dimension to swap.
+            dim1: Second dimension to swap.
+
+        Returns:
+            Tensor with swapped axes.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def unsqueeze(A: Any, dim: int) -> Any:
+        """
+        Add a new axis at the specified dimension.
+
+        Args:
+            A: Input tensor.
+            dim: Dimension to add.
+
+        Returns:
+            Tensor with new axis.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def cat(As: list[Any], dim: int = 0) -> Any:
+        """
+        Concatenate a list of tensors along the specified dimension.
+
+        Args:
+            As: List of tensors to concatenate.
+            dim: Dimension along which to concatenate.
+
+        Returns:
+            Concatenated tensor.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def max(
+        A: Any,
+        dim: Optional[int] = None,
+        keepdims: bool = False,
+        return_indices: bool = False
+    ) -> Union[Any, Tuple[Any, Any]]:
+        """
+        Return the maximum value(s) along a dimension.
+
+        Args:
+            A: Input tensor.
+            dim: Dimension along which to compute max.
+            keepdims: Whether to keep reduced dimensions.
+            return_indices: Whether to return indices.
+
+        Returns:
+            Either max values or tuple of (values, indices).
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def min(
+        A: Any,
+        dim: Optional[int] = None,
+        keepdims: bool = False,
+        return_indices: bool = False
+    ) -> Union[Any, Tuple[Any, Any]]:
+        """
+        Return the minimum value(s) along a dimension.
+
+        Args:
+            A: Input tensor.
+            dim: Dimension along which to compute min.
+            keepdims: Whether to keep reduced dimensions.
+            return_indices: Whether to return indices.
+
+        Returns:
+            Either min values or tuple of (values, indices).
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def view(A: Any, shape: Tuple[int, ...]) -> Any:
+        """
+        Reshape tensor to the given shape.
+
+        Args:
+            A: Input tensor.
+            shape: Desired shape.
+
+        Returns:
+            Reshaped tensor.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def logsumexp(A: Any, dim: int = 0, keepdims: bool = False) -> Any:
+        """
+        Compute the log-sum-exp of A along the specified dimension.
+
+        Args:
+            A: Input tensor.
+            dim: Dimension along which to compute.
+            keepdims: Whether to keep reduced dimensions.
+
+        Returns:
+            Log-sum-exp result.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def atan2(x: Any, y: Any) -> Any:
+        """
+        Return the elementwise arctan of x/y using the signs of the arguments.
+
+        Args:
+            x: First input tensor.
+            y: Second input tensor.
+
+        Returns:
+            Elementwise arctan result.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def triu_indices(n: int, k: int = 0) -> Tuple[Any, Any]:
+        """
+        Return the indices for the upper-triangle of an (n x n) array.
+
+        Args:
+            n: Size of the square array.
+            k: Offset from the diagonal.
+
+        Returns:
+            Tuple of (row indices, column indices).
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def diag_embed(A: Any) -> Any:
+        """
+        Create a diagonal matrix from the input tensor.
+
+        Args:
+            A: Input tensor.
+
+        Returns:
+            Diagonal matrix.
+        """
+        raise NotImplementedError
+
+    def zeros(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
+        """
+        Return a tensor filled with zeros.
+
+        Args:
+            shape: Desired shape.
+            dtype: Data type.
+
+        Returns:
+            Zero tensor.
+        """
+        raise NotImplementedError
+
+    def ones(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
+        """
+        Return a tensor filled with ones.
+
+        Args:
+            shape: Desired shape.
+            dtype: Data type.
+
+        Returns:
+            Ones tensor.
+        """
+        raise NotImplementedError
+
+    def randn(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
+        """
+        Return samples from the standard normal distribution.
+
+        Args:
+            shape: Desired shape.
+            dtype: Data type.
+
+        Returns:
+            Random samples.
+        """
+        raise NotImplementedError
+
+    def randu(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
+        """
+        Return samples from the uniform distribution over [0, 1).
+
+        Args:
+            shape: Desired shape.
+            dtype: Data type.
+
+        Returns:
+            Random samples.
+        """
+        raise NotImplementedError
+
+    def randperm(self, n: int) -> Any:
+        """
+        Return a random permutation of integers from 0 to n-1.
+
+        Args:
+            n: Size of permutation.
+
+        Returns:
+            Random permutation.
+        """
+        raise NotImplementedError
+
+    def multinomial(self, n: int, p: Any, replace: bool = True) -> Any:
+        """
+        Draw samples from a multinomial distribution.
+
+        Args:
+            n: Number of samples.
+            p: Probability distribution.
+            replace: Whether to sample with replacement.
+
+        Returns:
+            Drawn samples.
+        """
+        raise NotImplementedError
+
+    def choice(self, n: int, tot: int, replace: bool = False) -> Any:
+        """
+        Randomly choose n indices from tot possibilities.
+
+        Args:
+            n: Number of choices.
+            tot: Total number of possibilities.
+            replace: Whether to sample with replacement.
+
+        Returns:
+            Chosen indices.
+        """
+        raise NotImplementedError
 
 
 class NumpyBackend(Backend):
@@ -228,12 +594,6 @@ class NumpyBackend(Backend):
     @staticmethod
     def tonp(A: np.ndarray) -> np.ndarray:
         """Return the input as a NumPy array (identity for NumPy)."""
-        return A
-
-    @staticmethod
-    def set_to(A: np.ndarray, vals: Union[float, np.ndarray]) -> np.ndarray:
-        """Set all elements of A to the given value(s)."""
-        A[:] = vals if isinstance(vals, (int, float)) else vals[:]
         return A
 
     @staticmethod
@@ -583,7 +943,7 @@ class TorchBackend(Backend):
         return A.unsqueeze(dim)
 
     @staticmethod
-    def cat(As: list[torch.Tensor], dim: int) -> torch.Tensor:
+    def cat(As: list[torch.Tensor], dim: int = 0) -> torch.Tensor:
         """Concatenate a list of tensors along dimension dim."""
         return torch.cat(As, dim)
 
@@ -633,6 +993,11 @@ class TorchBackend(Backend):
     def logsumexp(A: torch.Tensor, dim: int = 0, keepdims: bool = False) -> torch.Tensor:
         """Compute the log-sum-exp of A along dimension dim."""
         return torch.logsumexp(A, dim=dim, keepdim=keepdims)
+
+    @staticmethod
+    def atan2(x, y):
+        """Return the elementwise arctan of x/y using the signs of the arguments."""
+        return torch.atan2(x, y)
 
     @staticmethod
     def triu_indices(n: int, k: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -692,7 +1057,7 @@ class TorchBackend(Backend):
         return self.multinomial(n, probs, replace=replace)
 
 
-class LinAlg:
+class LinAlg(Backend):
     """
     A unified linear algebra API that abstracts the backend (NumPy or PyTorch).
 
