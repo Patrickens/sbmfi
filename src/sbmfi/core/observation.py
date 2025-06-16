@@ -882,7 +882,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         if self._p is None:
             raise ValueError('set parameters to compute sigma elements')
 
-        sigma = self._la.get_tensor(shape=(logI.shape[0], self._n_o, self._n_o), squeeze=False)
+        sigma = self._la.get_tensor(shape=(logI.shape[0], self._n_o, self._n_o))
 
         std = self._p.std(I=logI) / 2
         sigma[:, self._indices[self._diag, 0], self._indices[self._diag, 1]] = std**2 / 2

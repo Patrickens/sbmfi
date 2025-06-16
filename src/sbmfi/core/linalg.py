@@ -21,7 +21,6 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import scipy
-from scipy import linalg
 from scipy.special import expit, logit, logsumexp, erf, erfinv
 
 # Global constants used for probability density functions.
@@ -32,10 +31,6 @@ _2PI = 2 * math.pi
 _1_SQRT2 = 1.0 / _SQRT2
 _LN2PI_2 = math.log(_2PI) / 2.0
 
-
-# =============================================================================
-# Utility Functions
-# =============================================================================
 
 def _conditional_torch_import() -> int:
     """
@@ -54,10 +49,6 @@ def _conditional_torch_import() -> int:
     except ImportError as e:
         print("torch not installed, cannot use this backend")
         raise e
-
-    if version < 10:
-        raise Warning('torch needs to be at least version 1.10 for lu_factor to be differentiable, '
-                      'autodiff does now work for lower versions')
 
     global _NP_TORCH_DTYPE
     _NP_TORCH_DTYPE = {
@@ -110,8 +101,34 @@ def _merge_duplicate_indices(
 
 
 class Backend:
-    def __init__(self):
-        pass
+    def __init__(self, seed: Optional[int] = None, dtype: type = np.double, fkwargs=None):
+        kwargs = copy.deepcopy(self._DEFAULT_FKWARGS)
+        if fkwargs is not None:
+            for fname, instance_kwargs in fkwargs.items():
+                if fname in kwargs:
+                    kwargs[fname].update(instance_kwargs)
+        self._fkwargs = kwargs
+        self._def_dtype = dtype
+
+    def _determine_dtype(self, values=None, dtype=None):
+        """
+        Determine the appropriate dtype for tensor creation.
+        
+        Args:
+            values: Input values array (optional)
+            dtype: Explicitly requested dtype (optional)
+            
+        Returns:
+            The determined dtype
+        """
+        if dtype is not None:
+            return dtype
+
+        if values is not None and values.size:
+            dtype = values.dtype.type
+            return dtype
+
+        return self._def_dtype
 
 
 class NumpyBackend(Backend):
@@ -125,7 +142,7 @@ class NumpyBackend(Backend):
     }
     _BATCH_PROCESSING = True
 
-    def __init__(self, seed: Optional[int] = None, dtype: type = np.double, **kwargs: Any):
+    def __init__(self, seed: Optional[int] = None, dtype: type = np.double, fkwargs=None, **kwargs: Any):
         """
         Initialize the NumPy backend.
 
@@ -133,135 +150,49 @@ class NumpyBackend(Backend):
             seed (Optional[int]): Seed for the random number generator.
             dtype (type): Default data type for created arrays.
         """
+        super(NumpyBackend, self).__init__(seed=seed, dtype=dtype, fkwargs=fkwargs)
         self._rng = np.random.default_rng(seed=seed)
         self._def_dtype = dtype
 
     def get_tensor(
         self,
-        shape: Optional[Tuple[int, ...]],
-        indices: Optional[np.ndarray],
-        values: Optional[np.ndarray],
-        squeeze: bool,
-        dtype: Optional[Any],
+        shape: Optional[Tuple[int, ...]] = None,
+        indices: Optional[np.ndarray] = None,
+        values: Optional[np.ndarray] = None,
+        dtype: Optional[Any] = None,
         device: Any = None,  # device is unused for NumPy
     ) -> np.ndarray:
         """
         Create a tensor (NumPy array) and optionally populate entries using indices and values.
 
         Args:
-            shape (Optional[Tuple[int, ...]]): Desired shape of the tensor.
-            indices (Optional[np.ndarray]): Array of indices.
-            values (Optional[np.ndarray]): Array of values corresponding to indices.
-            squeeze (bool): Whether to squeeze dimensions if needed.
-            dtype (Optional[Any]): Data type of the array.
+            shape (Optional[Tuple[int, ...]]): Desired shape of the tensor. If None, shape is inferred from values.
+            indices (Optional[np.ndarray]): Array of indices. If None, creates a dense tensor.
+            values (Optional[np.ndarray]): Array of values. Required if indices is provided.
+            dtype (Optional[Any]): Data type of the array. If None, inferred from values or uses default.
             device: Unused for NumPy.
 
         Returns:
             np.ndarray: The created tensor.
         """
+        dtype = self._determine_dtype(values, dtype)
+        
         if shape is not None:
-            if values is not None and values.size:
-                if dtype is None:
-                    dtype = values.dtype
-                    if dtype in (np.float32, np.float64):
-                        dtype = self._def_dtype  # use default for consistency
-            else:
-                if dtype is None:
-                    dtype = self._def_dtype
             A = np.zeros(shape=shape, dtype=dtype)
-            if indices is not None and indices.size:
+            if indices is None:
+                if values is not None:
+                    A[:] = values.astype(dtype)
+            elif indices.size:
                 indices, values = _merge_duplicate_indices(indices, values)
                 A[tuple(indices.T)] = values.astype(dtype)
         else:
-            if dtype is None:
-                dtype = values.dtype
-                if dtype in (np.float32, np.float64):
-                    dtype = self._def_dtype
             A = np.array(values, dtype=dtype)
-        if A.ndim == 3 and squeeze:
-            A = A.squeeze(0)
         return A
-
-    @staticmethod
-    def LU(A: np.ndarray, **kwargs: Any) -> Union[Tuple, list]:
-        """
-        Compute the LU factorization of a matrix or batch of matrices.
-
-        Args:
-            A (np.ndarray): The input array. If 3D, LU is computed for each slice.
-            **kwargs: Additional keyword arguments for SciPy's LU factorization.
-
-        Returns:
-            The LU factorization of A.
-        """
-        if A.ndim == 3:
-            return [NumpyBackend.LU(A[i, :, :], **kwargs) for i in range(A.shape[0])]
-        return linalg.lu_factor(A, **kwargs)
 
     @staticmethod
     def vecopy(A: np.ndarray) -> np.ndarray:
         """Return a copy of array A."""
         return A.copy()
-
-    @staticmethod
-    def solve(LU: Any, b: np.ndarray, **kwargs: Any) -> np.ndarray:
-        """
-        Solve a linear system given an LU factorization.
-
-        Args:
-            LU: The LU factorization (or batch thereof).
-            b (np.ndarray): Right-hand side.
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            np.ndarray: The solution array.
-        """
-        if b.ndim == 3:
-            solution = np.empty_like(b)
-            for i in range(b.shape[0]):
-                solution[i, :, :] = NumpyBackend.solve(LU[i], b[i, :, :], **kwargs)
-            return solution
-        return linalg.lu_solve(LU, b, **kwargs)
-
-    @staticmethod
-    def add_at(x: np.ndarray, y: np.ndarray, indices: np.ndarray, stoich: float) -> np.ndarray:
-        """
-        Add at specific indices using product of selected entries from y.
-
-        Args:
-            x (np.ndarray): Array to be updated.
-            y (np.ndarray): Array used for computing the product.
-            indices (np.ndarray): Index array where first column is target and subsequent columns index y.
-            stoich (float): Scalar multiplier.
-
-        Returns:
-            np.ndarray: Updated array x.
-        """
-        np.add.at(x, indices[:, 0], stoich * np.prod(y[indices[:, 1:]], axis=1))
-        return x
-
-    @staticmethod
-    def dadd_at(x: np.ndarray, y: np.ndarray, indices: np.ndarray, stoich: float) -> np.ndarray:
-        """
-        Differential version of add_at.
-
-        Args:
-            x (np.ndarray): Array to be updated.
-            y (np.ndarray): Array used for computing the product.
-            indices (np.ndarray): Index array.
-            stoich (float): Scalar multiplier.
-
-        Returns:
-            np.ndarray: Updated array x.
-        """
-        for i in range(1, indices.shape[1]):
-            remaining = np.delete(np.arange(1, indices.shape[1]), np.where(np.arange(1, indices.shape[1]) == i))
-            np.add.at(
-                x,
-                indices[:, 0],
-                np.prod(y[indices[:, remaining]], axis=1) * x[indices[:, i]] * stoich,
-            )
-        return x
 
     @staticmethod
     def convolve(a: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -395,8 +326,44 @@ class NumpyBackend(Backend):
 
     @staticmethod
     def diag_embed(A):
+        if len(A.shape) > 2:
+            raise ValueError
         result = A[..., None] * np.eye(A.shape[-1])
         return result
+
+    def LU(self, A: np.ndarray) -> Union[Tuple, list]:
+        """
+        Compute the LU factorization of a matrix or batch of matrices.
+
+        Args:
+            A (np.ndarray): The input array. If 3D, LU is computed for each slice.
+            **kwargs: Additional keyword arguments for SciPy's LU factorization.
+
+        Returns:
+            The LU factorization of A.
+        """
+        if A.ndim == 3:
+            return [NumpyBackend.LU(A[i, :, :]) for i in range(A.shape[0])]
+        return scipy.linalg.lu_factor(A, self._fkwargs['LU'])
+
+    def solve(self, LU: Any, b: np.ndarray) -> np.ndarray:
+        """
+        Solve a linear system given an LU factorization.
+
+        Args:
+            LU: The LU factorization (or batch thereof).
+            b (np.ndarray): Right-hand side.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            np.ndarray: The solution array.
+        """
+        if b.ndim == 3:
+            solution = np.empty_like(b)
+            for i in range(b.shape[0]):
+                solution[i, :, :] = NumpyBackend.solve(LU[i], b[i, :, :], **self._fkwargs['solve'])
+            return solution
+        return scipy.linalg.lu_solve(LU, b, **self._fkwargs['solve'])
 
     def zeros(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> np.ndarray:
         """Return a zeros array of the given shape and dtype."""
@@ -456,7 +423,8 @@ class TorchBackend(Backend):
         self,
         seed: Optional[int] = None,
         device: str = 'cpu',
-        dtype: type = np.double,
+        dtype: type = np.double, 
+        fkwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ):
         """
@@ -467,7 +435,8 @@ class TorchBackend(Backend):
             device (str): Device identifier ('cpu' or 'cuda').
             dtype (type): Default numerical type.
         """
-        version = _conditional_torch_import()
+        super(TorchBackend, self).__init__(seed=seed, dtype=dtype, fkwargs=fkwargs)
+        _conditional_torch_import()
         self._def_dtype = _NP_TORCH_DTYPE[dtype]
         self._device = torch.device('cpu')
         if torch.cuda.is_available() and 'cuda' in device:
@@ -486,22 +455,20 @@ class TorchBackend(Backend):
 
     def get_tensor(
         self,
-        shape: Optional[Tuple[int, ...]],
-        indices: Optional[np.ndarray],
-        values: Optional[np.ndarray],
-        squeeze: bool,
-        dtype: Optional[Any],
+        shape: Optional[Tuple[int, ...]] = None,
+        indices: Optional[np.ndarray] = None,
+        values: Optional[np.ndarray] = None,
+        dtype: Optional[Any] = None,
         device: Optional[Any] = None,
     ):
         """
         Create a torch tensor and optionally populate it via indices and values.
 
         Args:
-            shape (Optional[Tuple[int, ...]]): Desired shape.
-            indices (Optional[np.ndarray]): Array of indices.
-            values (Optional[np.ndarray]): Array of values.
-            squeeze (bool): Whether to squeeze singleton dimensions.
-            dtype (Optional[Any]): Data type.
+            shape (Optional[Tuple[int, ...]]): Desired shape. If None, shape is inferred from values.
+            indices (Optional[np.ndarray]): Array of indices. If None, creates a dense tensor.
+            values (Optional[np.ndarray]): Array of values. Required if indices is provided.
+            dtype (Optional[Any]): Data type. If None, inferred from values or uses default.
             device (Optional[Any]): Device to use; defaults to self._device.
 
         Returns:
@@ -509,49 +476,31 @@ class TorchBackend(Backend):
         """
         if device is None:
             device = self._device
+        dtype = self._determine_dtype(values, dtype)
+        if not isinstance(dtype, torch.dtype):
+            dtype = _NP_TORCH_DTYPE[dtype]
+            
         if shape is not None:
-            if values is not None and values.size:
-                if dtype is None:
-                    dtype = values.dtype.type
-                    if dtype in (np.float32, np.float64):
-                        dtype = self._def_dtype
-            else:
-                if dtype is None:
-                    dtype = self._def_dtype
-            if not isinstance(dtype, torch.dtype):
-                dtype = _NP_TORCH_DTYPE[dtype]
             A = torch.zeros(shape, dtype=dtype, device=device)
-            if indices is not None and indices.size:
+            if indices is None:
+                if values is not None:
+                    A[:] = torch.as_tensor(values, device=device, dtype=dtype)
+            elif indices.size:
                 indices, values = _merge_duplicate_indices(indices, values)
                 indices = torch.as_tensor(indices, dtype=torch.int64, device=device)
                 A[tuple(indices.T)] = torch.as_tensor(values, device=device, dtype=dtype)
         else:
-            if dtype is None:
-                if isinstance(values, np.ndarray):
-                    dtype = values.dtype.type
-                else:
-                    dtype = values.dtype
-                if not isinstance(dtype, torch.dtype):
-                    dtype = _NP_TORCH_DTYPE[dtype]
-                if dtype in (torch.float32, torch.float64):
-                    dtype = self._def_dtype
-            if not isinstance(dtype, torch.dtype):
-                dtype = _NP_TORCH_DTYPE[dtype]
             A = torch.as_tensor(values, device=device, dtype=dtype)
-        if A.ndim == 3 and squeeze:
-            A = A.squeeze(0)
         return A
 
-    @staticmethod
-    def LU(A, **kwargs: Any):
+    def LU(self, A):
         """
         Compute the LU factorization of A.
         (Placeholder: this is replaced by one of the static methods above.)
         """
-        return torch.linalg.lu_factor(A, **kwargs)
+        return torch.linalg.lu_factor(A)
 
-    @staticmethod
-    def solve(LU, b, **kwargs: Any):
+    def solve(self, LU, b):
         """
         Solve a linear system given LU and right-hand side b.
         """
@@ -690,6 +639,8 @@ class TorchBackend(Backend):
 
     @staticmethod
     def diag_embed(A):
+        if len(A.shape) > 2:
+            raise ValueError
         return torch.diag_embed(A)
 
     def zeros(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> torch.Tensor:
@@ -785,32 +736,32 @@ class LinAlg:
             raise ValueError("Not a supported default float type")
 
         if backend == "numpy":
-            self._BACKEND = NumpyBackend(seed=seed, dtype=dtype)
+            self._BACKEND = NumpyBackend(seed=seed, dtype=dtype, fkwargs=fkwargs)
         elif backend == "torch":
-            self._BACKEND = TorchBackend(seed=seed, device=device, dtype=dtype)
+            self._BACKEND = TorchBackend(seed=seed, device=device, dtype=dtype, fkwargs=fkwargs)
         else:
             raise ValueError("Invalid backend provided.")
 
         # Dynamically attach functions with the same signature from the chosen backend.
         functions = self._fill_functions(backend)
+        for name, method in inspect.getmembers(self._BACKEND, predicate=inspect.isroutine):
+            if not (name.startswith('__') and name.endswith('__')):
+                if name in functions:
+                    raise ValueError
+                functions[name] = method
+
         self.__dict__.update(functions)
 
         self._batch_size = int(batch_size) if self._BACKEND._BATCH_PROCESSING and batch_size > 1 else 1
 
         # Merge user and default kwargs.
-        kwargs = copy.deepcopy(self._BACKEND._DEFAULT_FKWARGS)
-        if fkwargs is not None:
-            for fname, user_kwargs in fkwargs.items():
-                if fname in kwargs:
-                    kwargs[fname].update(user_kwargs)
-        self._fkwargs = kwargs
 
         self._backwargs = {
             "backend": backend,
             "seed": seed,
             "device": device,
             "dtype": dtype,
-            "fkwargs": self._fkwargs,
+            "fkwargs": self._BACKEND._fkwargs,
             "batch_size": self._batch_size,
         }
 
@@ -850,110 +801,7 @@ class LinAlg:
 
     @property
     def backend(self) -> str:
-        """Return the name of the active backend."""
-        if isinstance(self._BACKEND, NumpyBackend):
-            return "numpy"
-        elif isinstance(self._BACKEND, TorchBackend):
-            return "torch"
-        return "unknown"
-
-    def get_tensor(
-        self,
-        shape: Optional[Tuple[int, ...]] = None,
-        indices: Optional[np.ndarray] = None,
-        values: Optional[np.ndarray] = None,
-        squeeze: bool = False,
-        dtype: Optional[Any] = None,
-        device: Optional[Any] = None,
-    ):
-        """
-        Create a tensor using the active backend.
-
-        Args:
-            shape (Optional[Tuple[int, ...]]): Desired shape.
-            indices (Optional[np.ndarray]): Index array.
-            values (Optional[np.ndarray]): Values to place at indices.
-            squeeze (bool): Whether to squeeze the output.
-            dtype (Optional[Any]): Data type.
-            device (Optional[Any]): Device (for torch).
-
-        Returns:
-            Tensor: A NumPy array or torch tensor.
-        """
-        return self._BACKEND.get_tensor(shape, indices, values, squeeze, dtype, device)
-
-    def LU(self, A: Any, **kwargs: Any) -> Any:
-        """Compute the LU factorization of A."""
-        return self._BACKEND.LU(A, **{**self._fkwargs["LU"], **kwargs})
-
-    def vecopy(self, A: Any) -> Any:
-        """Return a copy of A."""
-        return self._BACKEND.vecopy(A)
-
-    def solve(self, LU: Any, b: Any, **kwargs: Any) -> Any:
-        """Solve a linear system given LU and right-hand side b."""
-        return self._BACKEND.solve(LU, b, **{**self._fkwargs["solve"], **kwargs})
-
-    def convolve(self, a: Any, v: Any) -> Any:
-        """Compute the convolution of a and v."""
-        return self._BACKEND.convolve(a, v)
-
-    def nonzero(self, A: Any) -> Tuple[Any, Any]:
-        """Return nonzero indices and corresponding values of A."""
-        return self._BACKEND.nonzero(A)
-
-    def tonp(self, A: Any) -> Any:
-        """Convert tensor A to a NumPy array."""
-        return self._BACKEND.tonp(A)
-
-    def view(self, A: Any, shape: Tuple[int, ...]) -> Any:
-        """Reshape A to the specified shape."""
-        return self._BACKEND.view(A, shape)
-
-    def set_to(self, A: Any, vals: Union[float, Any]) -> Any:
-        """Set all elements of A to vals."""
-        # NumPy implementation works for both backends.
-        return NumpyBackend.set_to(A, vals)
-
-    def diff(self, inputs: Any, outputs: Any) -> Any:
-        """Compute the Jacobian of outputs with respect to inputs."""
-        return self._BACKEND.diff(inputs, outputs)
-
-    def randn(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
-        """Return samples from the standard normal distribution."""
-        return self._BACKEND.randn(shape, dtype)
-
-    def randu(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
-        """Return samples from the uniform distribution."""
-        return self._BACKEND.randu(shape, dtype)
-
-    def randperm(self, n: int) -> Any:
-        """Return a random permutation of integers."""
-        return self._BACKEND.randperm(n)
-
-    def permutax(self, A: Any, *args: int) -> Any:
-        """Permute the dimensions of A."""
-        return self._BACKEND.permutax(A, *args)
-
-    def transax(self, A: Any, dim0: int = -2, dim1: int = -1) -> Any:
-        """Swap dimensions of A."""
-        return self._BACKEND.transax(A, dim0, dim1)
-
-    def unsqueeze(self, A: Any, dim: int) -> Any:
-        """Add a new dimension at index dim."""
-        return self._BACKEND.unsqueeze(A, dim)
-
-    def cat(self, As: list, dim: int = 0) -> Any:
-        """Concatenate a list of tensors along dimension dim."""
-        return self._BACKEND.cat(As, dim)
-
-    def choice(self, n: int, tot: int, replace: bool = False) -> Any:
-        """Randomly choose n elements from tot possibilities."""
-        return self._BACKEND.choice(n, tot, replace)
-
-    def categorical(self, sample_shape: Any, probs: Any = None, logits: Any = None) -> Any:
-        """Placeholder for a categorical sampler (not implemented)."""
-        raise NotImplementedError("Categorical sampling not implemented.")
+        return self._backwargs['backend']
 
     def sample_unit_hyper_sphere_ball(self, shape: Tuple[int, ...], hemi: bool = False, ball=False) -> Any:
         """
@@ -1107,10 +955,6 @@ class LinAlg:
         else:
             raise ValueError("Unsupported distribution type.")
 
-    def triu_indices(self, n: int, k: int = 0) -> Any:
-        """Return the upper triangular indices."""
-        return self._BACKEND.triu_indices(n, k)
-
     def bounded_distribution_log_prob(self, x: Any, lo: Any, hi: Any, mu: Any, std: float = 0.1, which: str = "unif", old_is_new: bool = False, unsqueeze: bool = True, k: int = 1) -> Any:
         """
         Compute the log-probability of x under a bounded distribution.
@@ -1156,30 +1000,6 @@ class LinAlg:
         else:
             return pdf(x, lo, hi, mu, std)
 
-    def multinomial(self, n: int, p: Any) -> Any:
-        """Draw samples from a multinomial distribution."""
-        return self._BACKEND.multinomial(n, p)
-
-    def max(self, A: Any, dim: Optional[int] = None, keepdims: bool = False, return_indices: bool = False) -> Any:
-        """Return maximum values (and optionally indices) along a dimension."""
-        return self._BACKEND.max(A, dim, keepdims, return_indices)
-
-    def min(self, A: Any, dim: Optional[int] = None, keepdims: bool = False, return_indices: bool = False) -> Any:
-        """Return minimum values (and optionally indices) along a dimension."""
-        return self._BACKEND.min(A, dim, keepdims, return_indices)
-
-    def logsumexp(self, A: Any, dim: int = 0) -> Any:
-        """Compute log-sum-exp along the specified dimension."""
-        return self._BACKEND.logsumexp(A, dim)
-
-    def zeros(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
-        """Return a tensor of zeros."""
-        return self._BACKEND.zeros(shape, dtype)
-
-    def ones(self, shape: Tuple[int, ...], dtype: Optional[Any] = None) -> Any:
-        """Return a tensor of ones."""
-        return self._BACKEND.ones(shape, dtype)
-
     def tensormul_T(self, A: Any, x: Any, dim0: int = -2, dim1: int = -1) -> Any:
         """
         Multiply A and the transpose of x along specified dimensions.
@@ -1199,10 +1019,6 @@ class LinAlg:
     def eval_std_normal(self, x: Any) -> Any:
         """Evaluate a standard normal function (for testing)."""
         return x ** 2 - _SQRT2PI
-
-    def cartesian(self, A: Any) -> None:
-        """Placeholder for a Cartesian product method."""
-        pass
 
     def min_pos_max_neg(self, alpha: Any, return_what: int = 1, keepdims: bool = False, return_indices: bool = False) -> Any:
         """
@@ -1261,11 +1077,6 @@ class LinAlg:
         n_unsqueezes = like.ndim - A.ndim
         return A[(None,) * n_unsqueezes + (...,)]
 
-    def diag_embed(self, A):
-        if len(A.shape) > 2:
-            raise ValueError
-        return self._BACKEND.diag_embed(A)
-
 
 if __name__ == "__main__":
     import pickle
@@ -1276,7 +1087,6 @@ if __name__ == "__main__":
     linalg = LinAlg(backend='torch', seed=123)
     shape = (3, 3)
     # Use indices to set the diagonal entries.
-    indices = np.array([[0, 0], [1, 1], [2, 2]])
-    values = np.array([1, 2, 3])
-    tensor = linalg.get_tensor(shape=shape, indices=indices, values=values,
-                               squeeze=False, dtype=np.float64, device=None)
+    int_values = np.array([[1, 2], [3, 4]], dtype=np.int64)
+    tensor = linalg.get_tensor(shape=(2, 2), indices=None,
+                               values=int_values, dtype=None, device=None)
