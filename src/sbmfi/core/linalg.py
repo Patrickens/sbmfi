@@ -343,8 +343,8 @@ class NumpyBackend(Backend):
             The LU factorization of A.
         """
         if A.ndim == 3:
-            return [NumpyBackend.LU(A[i, :, :]) for i in range(A.shape[0])]
-        return scipy.linalg.lu_factor(A, self._fkwargs['LU'])
+            return [self.LU(A[i, :, :]) for i in range(A.shape[0])]
+        return scipy.linalg.lu_factor(A, **self._fkwargs['LU'])
 
     def solve(self, LU: Any, b: np.ndarray) -> np.ndarray:
         """
@@ -361,7 +361,10 @@ class NumpyBackend(Backend):
         if b.ndim == 3:
             solution = np.empty_like(b)
             for i in range(b.shape[0]):
-                solution[i, :, :] = NumpyBackend.solve(LU[i], b[i, :, :], **self._fkwargs['solve'])
+                if len(LU) > 1:
+                    solution[i, :, :] = self.solve(LU[i], b[i, :, :])
+                else:
+                    solution[i, :, :] = self.solve(LU[0], b[i, :, :])
             return solution
         return scipy.linalg.lu_solve(LU, b, **self._fkwargs['solve'])
 
@@ -506,7 +509,7 @@ class TorchBackend(Backend):
         """
         if b.ndim == 1:
             b = torch.atleast_2d(b).T
-        return torch.lu_solve(b, *LU)
+        return torch.lu_solve(b, *LU).squeeze()
 
     @staticmethod
     def vecopy(A: torch.Tensor) -> torch.Tensor:
@@ -1084,9 +1087,70 @@ if __name__ == "__main__":
     import cProfile
     import torch
 
-    linalg = LinAlg(backend='torch', seed=123)
-    shape = (3, 3)
-    # Use indices to set the diagonal entries.
-    int_values = np.array([[1, 2], [3, 4]], dtype=np.int64)
-    tensor = linalg.get_tensor(shape=(2, 2), indices=None,
-                               values=int_values, dtype=None, device=None)
+    # -------------------------------------------------------------------
+    # Test LU factorization and solving linear systems
+    # -------------------------------------------------------------------
+    def test_lu_solve(linalg):
+        # Create numpy arrays for input
+        A = np.array([[3, 1],
+                      [1, 2]], dtype=np.float64)
+
+        # Test 1: 1D b vector
+        b_1d = np.array([9, 8], dtype=np.float64)
+        A_tensor = linalg.get_tensor(values=A)
+        b_tensor = linalg.get_tensor(values=b_1d)
+        LU = linalg.LU(A_tensor)
+        x = linalg.solve(LU, b_tensor)
+        x_np = linalg.tonp(x)
+        expected = np.linalg.solve(A, b_1d)
+        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
+
+        # Test 2: 2D b vector (multiple right-hand sides)
+        b_2d = np.array([[9, 8],
+                         [7, 6]], dtype=np.float64)
+        b_tensor = linalg.get_tensor(values=b_2d)
+        x = linalg.solve(LU, b_tensor)
+        x_np = linalg.tonp(x)
+        expected = np.linalg.solve(A, b_2d)
+        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
+
+        # Test 3: 3D A and b tensors (batch of different matrices)
+        A_3d = np.array([[[3, 1],
+                          [1, 2]],
+                         [[2, 1],
+                          [1, 3]]], dtype=np.float64)
+        b_3d = np.array([[[9, 8],
+                          [7, 6]],
+                         [[5, 4],
+                          [3, 2]]], dtype=np.float64)
+
+        A_tensor = linalg.get_tensor(values=A_3d)
+        b_tensor = linalg.get_tensor(values=b_3d)
+        LU = linalg.LU(A_tensor)
+        x = linalg.solve(LU, b_tensor)
+        x_np = linalg.tonp(x)
+
+        # For each matrix in the batch, solve separately
+        expected = np.array([np.linalg.solve(A_3d[0], b_3d[0]),
+                             np.linalg.solve(A_3d[1], b_3d[1])])
+
+        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
+
+        # Test 4: Single A matrix (broadcasted to 3D) with multiple b values
+        A_3d = A[None, ...]  # Shape: (1, 2, 2)
+
+        A_tensor = linalg.get_tensor(values=A_3d)
+        b_tensor = linalg.get_tensor(values=b_3d)
+        LU = linalg.LU(A_tensor)
+        x = linalg.solve(LU, b_tensor)
+        x_np = linalg.tonp(x)
+
+        # Expected result: solve each b matrix with the same A matrix
+        expected = np.array([np.linalg.solve(A, b_3d[0]),
+                             np.linalg.solve(A, b_3d[1])])
+
+        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
+
+
+    test_lu_solve(LinAlg('numpy'))
+    test_lu_solve(LinAlg('torch'))

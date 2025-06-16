@@ -143,16 +143,41 @@ def test_lu_solve(linalg):
     expected = np.linalg.solve(A, b_2d)
     np.testing.assert_allclose(x_np, expected, rtol=1e-5)
     
-    # Test 3: 3D b vector (batch of multiple right-hand sides)
+    # Test 3: 3D A and b tensors (batch of different matrices)
+    A_3d = np.array([[[3, 1],
+                      [1, 2]],
+                     [[2, 1],
+                      [1, 3]]], dtype=np.float64)
     b_3d = np.array([[[9, 8],
                       [7, 6]],
                      [[5, 4],
                       [3, 2]]], dtype=np.float64)
+    
+    A_tensor = linalg.get_tensor(values=A_3d)
     b_tensor = linalg.get_tensor(values=b_3d)
+    LU = linalg.LU(A_tensor)
     x = linalg.solve(LU, b_tensor)
     x_np = linalg.tonp(x)
+    
+    # For each matrix in the batch, solve separately
+    expected = np.array([np.linalg.solve(A_3d[0], b_3d[0]),
+                        np.linalg.solve(A_3d[1], b_3d[1])])
+    
+    np.testing.assert_allclose(x_np, expected, rtol=1e-5)
+
+    # Test 4: Single A matrix (broadcasted to 3D) with multiple b values
+    A_3d = A[None, ...]  # Shape: (1, 2, 2)
+    
+    A_tensor = linalg.get_tensor(values=A_3d)
+    b_tensor = linalg.get_tensor(values=b_3d)
+    LU = linalg.LU(A_tensor)
+    x = linalg.solve(LU, b_tensor)
+    x_np = linalg.tonp(x)
+    
+    # Expected result: solve each b matrix with the same A matrix
     expected = np.array([np.linalg.solve(A, b_3d[0]),
                         np.linalg.solve(A, b_3d[1])])
+    
     np.testing.assert_allclose(x_np, expected, rtol=1e-5)
 
 # -------------------------------------------------------------------
