@@ -281,15 +281,67 @@ def test_randperm(linalg):
 # Test min and max (with return_indices)
 # -------------------------------------------------------------------
 def test_min_max(linalg):
-    arr = np.array([[3, 1, 2],
-                    [4, 0, 5]])
-    min_val, min_idx = linalg.min(arr, dim=1, keepdims=False, return_indices=True)
-    expected_min = np.argmin(arr, axis=1)
+    A = np.array([[
+            [3, 1, 2],
+            [4, 0, 5]
+        ],[
+            [3, 1, 2],
+            [4, 0, 5]
+        ]])
+    A_tensor = linalg.get_tensor(values=A)
+
+    # Test 1: Basic min/max along dimension
+    min_val, min_idx = linalg.min(A_tensor, dim=1, keepdims=False, return_indices=True)
+    expected_min = np.argmin(A, axis=1)
     np.testing.assert_array_equal(min_idx, expected_min)
 
-    max_val, max_idx = linalg.max(arr, dim=1, keepdims=False, return_indices=True)
-    expected_max = np.argmax(arr, axis=1)
+    max_val, max_idx = linalg.max(A_tensor, dim=1, keepdims=False, return_indices=True)
+    expected_max = np.argmax(A, axis=1)
     np.testing.assert_array_equal(max_idx, expected_max)
+
+    # Test 2: Without return_indices
+    min_val = linalg.min(A_tensor, dim=1, keepdims=False, return_indices=False)
+    expected_min_val = np.min(A, axis=1)
+    np.testing.assert_array_equal(min_val, expected_min_val)
+
+    max_val = linalg.max(A_tensor, dim=1, keepdims=False, return_indices=False)
+    expected_max_val = np.max(A, axis=1)
+    np.testing.assert_array_equal(max_val, expected_max_val)
+
+    # Test 3: With keepdims=True
+    min_val, min_idx = linalg.min(A_tensor, dim=1, keepdims=True, return_indices=True)
+    expected_min = np.argmin(A, axis=1, keepdims=True)
+    np.testing.assert_array_equal(min_idx, expected_min)
+    assert min_val.shape == (2, 1, 3)
+
+    max_val, max_idx = linalg.max(A_tensor, dim=1, keepdims=True, return_indices=True)
+    expected_max = np.argmax(A, axis=1, keepdims=True)
+    np.testing.assert_array_equal(max_idx, expected_max)
+    assert max_val.shape == (2, 1, 3)
+
+    # Test 4: Without dim (global min/max)
+    min_val = linalg.min(A_tensor, dim=None, keepdims=False, return_indices=False)
+    expected_min_val = np.min(A)
+    np.testing.assert_array_equal(min_val, expected_min_val)
+
+    max_val = linalg.max(A_tensor, dim=None, keepdims=False, return_indices=False)
+    expected_max_val = np.max(A)
+    np.testing.assert_array_equal(max_val, expected_max_val)
+
+    # Test 5: Global min/max with return_indices should raise NotImplementedError
+    with pytest.raises(NotImplementedError):
+        linalg.min(A_tensor, dim=None, keepdims=False, return_indices=True)
+    with pytest.raises(NotImplementedError):
+        linalg.max(A_tensor, dim=None, keepdims=False, return_indices=True)
+
+    # Test 6: Global min/max with keepdims=True
+    min_val = linalg.min(A_tensor, dim=None, keepdims=True, return_indices=False)
+    expected_min_val = np.min(A, keepdims=True)
+    np.testing.assert_array_equal(min_val, expected_min_val)
+
+    max_val = linalg.max(A_tensor, dim=None, keepdims=True, return_indices=False)
+    expected_max_val = np.max(A, keepdims=True)
+    np.testing.assert_array_equal(max_val, expected_max_val)
 
 # -------------------------------------------------------------------
 # Test logsumexp

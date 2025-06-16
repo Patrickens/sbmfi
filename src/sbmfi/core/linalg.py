@@ -621,13 +621,13 @@ class NumpyBackend(Backend):
         A: np.ndarray, dim: Optional[int] = None, keepdims: bool = False, return_indices: bool = False
     ):
         """
-        Return the maximum value(s) of A along an axis.
+        Return the maximum value(s) along a dimension.
 
         Args:
             A (np.ndarray): Input array.
-            dim (Optional[int]): Dimension along which to compute the max.
+            dim (Optional[int]): Dimension along which to compute max.
             keepdims (bool): Whether to keep the dimensions.
-            return_indices (bool): Whether to return the indices of max values.
+            return_indices (bool): Whether to return indices of max values.
 
         Returns:
             Either max values or a tuple (max_values, max_indices).
@@ -635,9 +635,11 @@ class NumpyBackend(Backend):
         if dim is not None:
             max_values = A.max(axis=dim, keepdims=keepdims)
             if return_indices:
-                max_indices = A.argmax(axis=dim)
+                max_indices = A.argmax(axis=dim, keepdims=keepdims)
                 return max_values, max_indices
             return max_values
+        if return_indices:
+            raise NotImplementedError
         return A.max()
 
     @staticmethod
@@ -645,13 +647,13 @@ class NumpyBackend(Backend):
         A: np.ndarray, dim: Optional[int] = None, keepdims: bool = False, return_indices: bool = False
     ):
         """
-        Return the minimum value(s) of A along an axis.
+        Return the minimum value(s) along a dimension.
 
         Args:
             A (np.ndarray): Input array.
-            dim (Optional[int]): Dimension along which to compute the min.
+            dim (Optional[int]): Dimension along which to compute min.
             keepdims (bool): Whether to keep the dimensions.
-            return_indices (bool): Whether to return the indices of min values.
+            return_indices (bool): Whether to return indices of min values.
 
         Returns:
             Either min values or a tuple (min_values, min_indices).
@@ -659,9 +661,11 @@ class NumpyBackend(Backend):
         if dim is not None:
             min_values = A.min(axis=dim, keepdims=keepdims)
             if return_indices:
-                min_indices = A.argmin(axis=dim)
+                min_indices = A.argmin(axis=dim, keepdims=keepdims)
                 return min_values, min_indices
             return min_values
+        if return_indices:
+            raise NotImplementedError
         return A.min()
 
     @staticmethod
@@ -966,6 +970,8 @@ class TorchBackend(Backend):
         if dim is not None:
             result = A.max(dim=dim, keepdim=keepdims)
             return result if return_indices else result.values
+        if return_indices:
+            raise NotImplementedError
         return A.max()
 
     @staticmethod
@@ -985,8 +991,10 @@ class TorchBackend(Backend):
             Either the min values or a tuple (values, indices).
         """
         if dim is not None:
-            result = A.min(dim=dim, keepdim=keepdims)
+            result = A.min(dim=dim, keepdims=keepdims)
             return result if return_indices else result.values
+        if return_indices:
+            raise NotImplementedError
         return A.min()
 
     @staticmethod
@@ -1455,67 +1463,7 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------
     # Test LU factorization and solving linear systems
     # -------------------------------------------------------------------
-    def test_lu_solve(linalg):
-        # Create numpy arrays for input
-        A = np.array([[3, 1],
-                      [1, 2]], dtype=np.float64)
-
-        # Test 1: 1D b vector
-        b_1d = np.array([9, 8], dtype=np.float64)
-        A_tensor = linalg.get_tensor(values=A)
-        b_tensor = linalg.get_tensor(values=b_1d)
-        LU = linalg.LU(A_tensor)
-        x = linalg.solve(LU, b_tensor)
-        x_np = linalg.tonp(x)
-        expected = np.linalg.solve(A, b_1d)
-        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
-
-        # Test 2: 2D b vector (multiple right-hand sides)
-        b_2d = np.array([[9, 8],
-                         [7, 6]], dtype=np.float64)
-        b_tensor = linalg.get_tensor(values=b_2d)
-        x = linalg.solve(LU, b_tensor)
-        x_np = linalg.tonp(x)
-        expected = np.linalg.solve(A, b_2d)
-        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
-
-        # Test 3: 3D A and b tensors (batch of different matrices)
-        A_3d = np.array([[[3, 1],
-                          [1, 2]],
-                         [[2, 1],
-                          [1, 3]]], dtype=np.float64)
-        b_3d = np.array([[[9, 8],
-                          [7, 6]],
-                         [[5, 4],
-                          [3, 2]]], dtype=np.float64)
-
-        A_tensor = linalg.get_tensor(values=A_3d)
-        b_tensor = linalg.get_tensor(values=b_3d)
-        LU = linalg.LU(A_tensor)
-        x = linalg.solve(LU, b_tensor)
-        x_np = linalg.tonp(x)
-
-        # For each matrix in the batch, solve separately
-        expected = np.array([np.linalg.solve(A_3d[0], b_3d[0]),
-                             np.linalg.solve(A_3d[1], b_3d[1])])
-
-        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
-
-        # Test 4: Single A matrix (broadcasted to 3D) with multiple b values
-        A_3d = A[None, ...]  # Shape: (1, 2, 2)
-
-        A_tensor = linalg.get_tensor(values=A_3d)
-        b_tensor = linalg.get_tensor(values=b_3d)
-        LU = linalg.LU(A_tensor)
-        x = linalg.solve(LU, b_tensor)
-        x_np = linalg.tonp(x)
-
-        # Expected result: solve each b matrix with the same A matrix
-        expected = np.array([np.linalg.solve(A, b_3d[0]),
-                             np.linalg.solve(A, b_3d[1])])
-
-        np.testing.assert_allclose(x_np, expected, rtol=1e-5)
 
 
-    test_lu_solve(LinAlg('numpy'))
-    test_lu_solve(LinAlg('torch'))
+    # test_min_max(LinAlg('torch'))
+    # test_min_max(LinAlg('numpy'))
