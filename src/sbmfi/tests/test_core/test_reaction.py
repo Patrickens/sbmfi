@@ -142,17 +142,49 @@ class TestLabellingReaction:
         assert labelled_reaction.pseudo is True
 
     def test_rho_bounds(self, labelled_reaction):
-        # Test rho_max
+        # Test default values
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == 0.0
+
+        # Test valid value assignments
         labelled_reaction.rho_max = 0.5
         assert labelled_reaction.rho_max == 0.5
-        with pytest.raises(ValueError):
-            labelled_reaction.rho_max = 1.5  # Should be <= 0.999
-
-        # Test rho_min
         labelled_reaction.rho_min = 0.1
         assert labelled_reaction.rho_min == 0.1
-        with pytest.raises(ValueError):
-            labelled_reaction.rho_min = -0.1  # Should be >= 0
+
+        # Test values > 1.0
+        with pytest.raises(ValueError, match='rho values cannot be greater than 1.0'):
+            labelled_reaction.rho_max = 1.5
+        with pytest.raises(ValueError, match='rho values cannot be greater than 1.0'):
+            labelled_reaction.rho_min = 1.5
+
+        # Test negative values
+        with pytest.raises(ValueError, match='rho values cannot be negative'):
+            labelled_reaction.rho_min = -0.1
+        with pytest.raises(ValueError, match='rho values cannot be negative'):
+            labelled_reaction.rho_max = -0.1
+
+        # Test rho_min > rho_max
+        labelled_reaction.rho_max = 0.3
+        with pytest.raises(ValueError, match='rho_min cannot be greater than rho_max'):
+            labelled_reaction.rho_min = 0.4
+
+        # Test rho_max < _RHO_MIN
+        labelled_reaction.rho_min = 0.0  # Reset rho_min first
+        labelled_reaction.rho_max = 0.0005  # Less than _RHO_MIN (0.001)
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == 0.0
+
+        # Test reversible reaction (set via bounds)
+        labelled_reaction.bounds = (-100, 100)  # Make reaction reversible
+        labelled_reaction._dgibbsr = 0.0
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == labelled_reaction._RHO_MAX
+
+        # Test zero bounds
+        labelled_reaction.bounds = (0.0, 0.0)
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == 0.0
 
     def test_dgibbsr_property(self, labelled_reaction):
         labelled_reaction.dgibbsr = -10.0  # -10 kJ/mol

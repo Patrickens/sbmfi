@@ -192,11 +192,11 @@ class LabellingReaction(Reaction):
         return constraint
 
     def update_variable_bounds(self):
-        if self.model is None:
-            return
-
         # this is necessary for when we update self.bounds, but do not explcitly change rho
         self._rho_min, self._rho_max = self._check_rho_bounds(rho_min=self._rho_min, rho_max=self._rho_max)
+
+        if self.model is None:
+            return
 
         if self._rho_max > 0.0: # this is for A ==> B and A <=> B reactions
             net_lb = self._lower_bound
@@ -287,25 +287,29 @@ class LabellingReaction(Reaction):
         return self._atom_map.copy()
 
     def _check_rho_bounds(self, rho_min=None, rho_max=None):
+        # Set defaults if None
         if rho_min is None:
             rho_min = self._rho_min
         if rho_max is None:
             rho_max = self._rho_max
 
+        # Handle special cases first
+        if self.bounds == (0.0, 0.0):
+            return 0.0, 0.0
         if self.reversibility and (self._dgibbsr == 0.0):
-            # if reversible, and not in thermodynamic context, return extremes
-            rho_min, rho_max = 0.0, self._RHO_MAX
-        elif self.bounds == (0.0, 0.0):
-            rho_min, rho_max = 0.0, 0.0
-        else:
-            if rho_max > self._RHO_MAX:
-                rho_max = self._RHO_MAX
-            elif rho_max < self._RHO_MIN:
-                # this means we consider the reaction uni-directional!
-                rho_min, rho_max = 0.0, 0.0
-            if rho_min > self._RHO_MAX:
-                rho_min = self._RHO_MAX
-        self._check_bounds(rho_min, rho_max)
+            return 0.0, self._RHO_MAX
+        # Validate input ranges
+        if rho_min < 0.0 or rho_max < 0.0:
+            raise ValueError('rho values cannot be negative')
+        if rho_min > 1.0 or rho_max > 1.0:
+            raise ValueError('rho values cannot be greater than 1.0')
+        if rho_min > rho_max:
+            raise ValueError('rho_min cannot be greater than rho_max')
+
+        # Handle rho_max < _RHO_MIN case
+        if rho_max < self._RHO_MIN:
+            return 0.0, 0.0
+
         return rho_min, rho_max
 
     @property
@@ -700,8 +704,49 @@ class EMU_Reaction(LabellingReaction):
 
 
 if __name__ == "__main__":
-    from sbmfi.models.small_models import spiro, multi_modal
 
-    model, kwargs = spiro(build_simulator=True)
-    model.reactions[4].pretty_tensors(0)
+    def test_rho_bounds(labelled_reaction):
+        # Test default values
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == 0.0
 
+        # Test valid value assignments
+        labelled_reaction.rho_max = 0.5
+        assert labelled_reaction.rho_max == 0.5
+        labelled_reaction.rho_min = 0.1
+        assert labelled_reaction.rho_min == 0.1
+
+
+        # Test rho_max < _RHO_MIN
+        labelled_reaction.rho_min = 0.0  # Reset rho_min first
+        labelled_reaction.rho_max = 0.0005  # Less than _RHO_MIN (0.001)
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == 0.0
+
+        # Test reversible reaction (set via bounds)
+        labelled_reaction.bounds = (-100, 100)  # Make reaction reversible
+        print(labelled_reaction.reversibility, labelled_reaction._dgibbsr)
+        labelled_reaction._dgibbsr = 0.0
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == labelled_reaction._RHO_MAX
+
+        # Test zero bounds
+        labelled_reaction.bounds = (0.0, 0.0)
+        assert labelled_reaction.rho_min == 0.0
+        assert labelled_reaction.rho_max == 0.0
+
+
+    def basic_reaction():
+        reaction = Reaction('test_rxn')
+        reaction.add_metabolites({
+            Metabolite('A', formula='C6H12O6'): -1,
+            Metabolite('B', formula='C6H12O6'): 1
+        })
+        return reaction
+
+
+    def labelled_reaction(basic_reaction):
+        return LabellingReaction(reaction=basic_reaction)
+
+
+    test_rho_bounds(labelled_reaction(basic_reaction()))
