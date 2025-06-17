@@ -32,27 +32,84 @@ def create_full_metabolite_kwargs(
         metabolite_kwargs: dict,
         infer_formula=True,
         add_cofactors=False,
+        only_labmets=False,
+        default_compartment='c',
 ):
+    """Create a complete set of metabolite keyword arguments from reaction and metabolite information.
+    
+    This function processes reaction and metabolite information to create a complete set of metabolite
+    keyword arguments, handling atom mappings, formulas, and other metabolite properties. It can
+    optionally include cofactors and handle labelled metabolites.
+
+    Args:
+        reaction_kwargs (dict): Dictionary of reaction information, where each reaction can have:
+            - 'atom_map_str': String describing atom mappings (e.g., 'A/ab + B/cd --> P/abcd')
+            - 'reaction_str': Alternative string format for reactions without atom mappings
+        metabolite_kwargs (dict): Dictionary of existing metabolite information, containing:
+            - 'formula': Chemical formula (e.g., 'C2H4O2')
+            - 'compartment': Cellular compartment (e.g., 'c' for cytosol)
+            - 'charge': Metabolite charge
+        infer_formula (bool, optional): If True, infer formulas for metabolites without them.
+            Defaults to True.
+        add_cofactors (bool, optional): If True, include cofactors in the output. Defaults to False.
+        only_labmets (bool, optional): If True, only include metabolites with atom mappings.
+            Defaults to False.
+        default_compartment (str, optional): Default compartment for metabolites without one.
+            Defaults to 'c'.
+
+    Returns:
+        dict: Complete set of metabolite keyword arguments, with each metabolite having:
+            - 'formula': Chemical formula
+            - 'compartment': Cellular compartment
+            - 'charge': Metabolite charge (if provided)
+            - Other properties from the input metabolite_kwargs
+
+    Raises:
+        ValueError: If there's a mismatch between formula carbon count and atom mapping count.
+    """
+    # Create a copy of metabolite kwargs to avoid modifying the input
     metabolite_kwargs = metabolite_kwargs.copy()
+    
+    # Initialize result dictionary if only labelled metabolites are requested
+    result = {}
+
+    # Process each reaction
     for reac_id, kwargs in reaction_kwargs.items():
+        # Get reaction string from either atom_map_str or reaction_str
         reaction_string = kwargs.get('atom_map_str', None)
         if reaction_string is None:
             reaction_string = kwargs.get('reaction_str', None)
 
         if reaction_string is not None:
+            # Parse reaction string into reactants, arrow, and products
             rects, arrow, prods = _read_atom_map_str_rex.findall(string=reaction_string)[0]
+            # Split all metabolites and their atom mappings
             all_mets = [inter.strip().split('/') for inter in (rects + '+' + prods).split('+')]
+            
+            # Process each metabolite in the reaction
             for met_atom in all_mets:
+                # Handle metabolites without atom mappings
                 if len(met_atom) == 1:
                     met_id = met_atom[0]
-                    if met_id in ['∅', 'biomass']:
+                    # Skip special metabolites
+                    if met_id in ['∅', 'biomass'] or (met_id.strip() == ''):
+                        continue
+                    # Handle cofactors based on parameters
+                    if only_labmets:
                         continue
                     if add_cofactors:
-                        metabolite_kwargs[met_id] = metabolite_kwargs.get(met_id, {})
+                        met_kwargs = metabolite_kwargs.get(met_id, {})
+                        if 'compartment' not in met_kwargs:
+                            met_kwargs['compartment'] = default_compartment
+                        if met_id not in result:
+                            result[met_id] = met_kwargs
                     continue
+
+                # Process metabolites with atom mappings
                 met_id, atoms = met_atom
                 if met_id in metabolite_kwargs:
                     met_kwargs = metabolite_kwargs.get(met_id)
+                    # Validate formula against atom mapping if formula exists
                     if 'formula' in met_kwargs:
                         met_formula = Formula(met_kwargs.get('formula'))
                         if met_formula['C'] != len(atoms):
@@ -60,13 +117,27 @@ def create_full_metabolite_kwargs(
                                 f"Formula mismatch for metabolite {met_id}: "
                                 f"formula has {met_formula['C']} carbon atoms but atom mapping has {len(atoms)} atoms"
                             )
+                    # Infer formula if requested and not present
                     elif infer_formula:
                         met_kwargs['formula'] = f'C{len(atoms)}'
+                    # Set default compartment if not present
+                    if 'compartment' not in met_kwargs:
+                        met_kwargs['compartment'] = default_compartment
                 else:
-                    metabolite_kwargs[met_id] = {}
+                    # Create new metabolite entry with default values
+                    met_kwargs = {'compartment': default_compartment}
                     if infer_formula:
-                        metabolite_kwargs[met_id]['formula'] = f'C{len(atoms)}'
-    return metabolite_kwargs
+                        met_kwargs['formula'] = f'C{len(atoms)}'
+
+                if met_id not in result:
+                    result[met_id] = met_kwargs
+
+                # Add to result if only labelled metabolites are requested
+                if only_labmets:
+                    result[met_id] = metabolite_kwargs[met_id]
+
+    # Return appropriate result based on only_labmets parameter
+    return result
 
 
 class LabellingModel(Model):
@@ -432,9 +503,9 @@ class LabellingModel(Model):
         self._labelling_reactions = DictList()  # dynamically recomputed
         self._is_built = False
 
-        # In a first step we convert all cobra metabolites to LabellingMetabolite objecte
+        # In a first step we convert all cobra metabolites to LabellingMetabolite objects
         metabolite_kwargs = create_full_metabolite_kwargs(
-            reaction_kwargs, metabolite_kwargs, infer_formula=True, add_cofactors=False
+            reaction_kwargs, metabolite_kwargs, infer_formula=True, add_cofactors=False, only_labmets=True
         )
         for met_id, kwargs in metabolite_kwargs.items():
             if met_id not in self.metabolites:
@@ -1284,247 +1355,305 @@ if __name__ == "__main__":
 
     import pickle
 
-    pd.set_option('display.max_columns', None)
-
-    v5_reversible = True
-    v2_reversible = True
-    add_biomass = True
-    add_cofactor = True
-    C_symmetric = True
-    which_labellings = ['A','B']
-    L_12_omega = 1.0
-    measured_boundary_fluxes = ('h_out', )
-    ratios=False
-    build_simulator=True
-
-    if v5_reversible:
-        v5_atom_map_str = 'F/a + D/bcd  <== C/abcd'
-    else:
-        v5_atom_map_str = 'F/a + D/bcd  <-- C/abcd'
+    metabolite_kwargs = {
+        'A': {'formula': 'C2H4O2', 'compartment': 'c', 'charge': -1},
+        'B': {'formula': 'C2H6O', 'compartment': 'c', 'charge': 0},
+        'P': {'formula': 'C2H3O2', 'compartment': 'c', 'charge': -1},
+        'R': {'formula': 'C2H5O2', 'compartment': 'p', 'charge': -1},
+        'S': {'formula': 'C2H4O3', 'compartment': 'p', 'charge': -1}
+    }
 
     reaction_kwargs = {
-        'biomass': {
-            'reaction_str': '0.3H + 0.6B + 0.5E + 0.1C --> ∅',
-            'atom_map_str': 'biomass --> ∅',
-        },
-        'a_in': {
-            'lower_bound': 10.0, 'upper_bound': 10.0,
-            'atom_map_str': '∅ --> A/ab'
-        },
-        'd_out': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'D/abc --> ∅'
-        },
-        'f_out': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'F/a --> ∅'
-        },
-        'h_out': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'H/ab --> ∅'
-        },
-        'cof_out': {
-            'upper_bound': 100.0,
-            'reaction_str': 'cof --> ∅'
-        },
-        'v1': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/ab --> B/ab'
-        },
-        'v2': {
-            'lower_bound': 0.0, 'upper_bound': 100.0,
-            'rho_min': 0.1, 'rho_max': 0.8,
-            'atom_map_str': 'B/ab ==> E/ab'
-        },
-        'v3': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'B/ab + E/cd --> C/abcd'
-        },
-        'v4': {
-            'upper_bound': 100.0,  # 'lower_bound': -10.0,
-            'atom_map_str': 'E/ab --> H/ab'
-        },
-        'v5': {  # NB this is an always reverse reaction!
-            'lower_bound': -100.0, 'upper_bound': 0.0,
-            'atom_map_str': v5_atom_map_str,  # <--  ==>
-        },
-        'v6': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'D/abc --> E/ab + F/c'
-        },
-        'v7': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'F/a + F/b --> H/ab'
-        },
-        'vp': {
-            'lower_bound': 0.0,
-            'pseudo': True,
-            'atom_map_str': 'C/abcd + D/efg + H/hi --> L/abgih'
-        },
-    }
-    metabolite_kwargs = {
-        'A': {'formula': 'C2H4O5'},
-        'B': {'formula': 'C2HPO3'},
-        'C': {'formula': 'C4H6N4OS', 'symmetric': C_symmetric},
-        'D': {'formula': 'C3H2'},
-        'E': {'formula': 'C2H4O5'},
-        'F': {'formula': 'CH2'},
-        'G': {'formula': 'CH2'},  # unused metabolite
-        'H': {'formula': 'C2H2'},
-        'L': {'formula': 'C5KNaSH'},  # pseudo-metabolite
-        'L|[1,2]': {'formula': 'C2H2O7'},  # pseudo-metabolite
-    }
-    ratio_repo = {
-        'E|v2': {
-            'numerator': {'v2': 1},
-            'denominator': {'v2': 1, 'v6': 1}
-        },
-        'H|v4': {
-            'numerator': {'v4': 1},
-            'denominator': {'v7': 1, 'v4': 1}
-        },
-        # 'denominator': {'v6': 1, 'v4': 1}},  # make ratios correlated
-    }
-
-    if not add_biomass:
-        reaction_kwargs.pop('biomass')
-
-    if not v2_reversible:
-        reaction_kwargs['v2'] = {
-            'lower_bound': 0.0, 'upper_bound': 100.0,
-            'atom_map_str': 'B/ab --> E/ab'
+            # 'a_in': {
+            #     'atom_map_str': '--> A/ab',  # exchange reaction
+            #     'upper_bound': 100.0,
+            #     'lower_bound': 0.0
+            # },
+            'r1': {
+                'atom_map_str': 'A/ab + J --> P/ab', # has a co-factor
+                'upper_bound': 100.0,
+                'lower_bound': 0.0
+            },
+            'r2': {
+                'atom_map_str': 'A/ab + B/cd --> Q/acdb',
+                'upper_bound': 100.0,
+                'lower_bound': 0.0
+            },
+            # 'r3': {
+            #     'atom_map_str': 'Q/acdb --> R/cd + S/ba',
+            #     'upper_bound': 100.0,
+            #     'lower_bound': 0.0
+            # },
+            'bm': {
+                'atom_map_str': 'biomass --> ',  # biomass reaction
+                'reaction_str': '0.3H + 0.6P + 0.5B + 0.1Q --> ∅',
+                'upper_bound': 100.0,
+                'lower_bound': 0.0
+            },
         }
-        ratio_repo['E|v2'] = {
-            'numerator': {'v2': 1},
-            'denominator': {'v2': 1, 'v6': 1},
-        }
-    if add_cofactor:
-        reaction_kwargs['v3']['atom_map_str'] = 'B/ab + E/cd --> C/abcd + cof'
-        reaction_kwargs['cof_out'] = {'reaction_str': 'cof --> ∅', 'upper_bound': 100.0}
-
-    substrate_df = pd.DataFrame([
-        [0.2, 0.0, 0.0, 0.8],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.8, 0.0, 0.2],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.8, 0.2],
-    ], columns=['A/00', 'A/01', 'A/10', 'A/11'], index=list('ABCDE'))
-
-    if which_labellings is not None:
-        substrate_df = substrate_df.loc[which_labellings]
-
-    annotation_df = pd.DataFrame([
-        ('H', 1, 'M-H', 3.0, 1.0, 0.01, None, 3e3),
-        ('H', 0, 'M-H', 2.0, 1.0, 0.01, None, 3e3),
-
-        ('H', 1, 'M+F', 5.0, 1.0, 0.03, None, 3e3),
-        ('H', 1, 'M+Cl', 88.0, 1.0, 0.03, None, 2e3),
-        ('H', 0, 'M+F', 4.0, 1.0, 0.03, None, 3e3),  # to indicate that da_df is not yet in any order!
-        ('H', 0, 'M+Cl', 89.0, 1.0, 0.03, None, 2e3),
-
-        ('Q', 1, 'M-H', 3.7, 3.0, 0.02, None, 2e3),  # an annotated metabolite that is not in the model
-        ('Q', 2, 'M-H', 4.7, 3.0, 0.02, None, 2e3),
-        ('Q', 3, 'M-H', 5.7, 3.0, 0.02, None, 2e3),
-
-        ('C', 0, 'M-H', 1.5, 4.0, 0.02, None, 7e5),
-        ('C', 3, 'M-H', 4.5, 4.0, 0.02, None, 7e5),
-        ('C', 4, 'M-H', 5.5, 4.0, 0.02, None, 7e5),
-
-        ('D', 2, 'M-H', 12.0, 5.0, 0.01, None, 1e5),
-        ('D', 0, 'M-H', 9.0, 5.0, 0.01, None, 1e5),
-        ('D', 3, 'M-H', 13.0, 5.0, 0.01, None, 1e5),
-
-        ('L|[1,2]', 0, 'M-H', 14.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
-        ('L|[1,2]', 1, 'M-H', 15.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),
-
-        ('L', 0, 'M-H', 14.0, 6.0, 0.01, None, 4e5),
-        ('L', 1, 'M-H', 15.0, 6.0, 0.01, None, 4e5),
-        ('L', 2, 'M-H', 16.0, 6.0, 0.01, None, 4e5),
-        ('L', 5, 'M-H', 19.0, 6.0, 0.01, None, 4e5),
-    ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'rt', 'sigma', 'omega', 'total_I'])
-    formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
-    annotation_df['formula'] = annotation_df['met_id'].map(formap)
-
-    biomass_id = 'biomass' if add_biomass else None
-    if add_biomass:
-        measured_boundary_fluxes = list(measured_boundary_fluxes)
-        measured_boundary_fluxes.append(biomass_id)
-
-    model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs, model_id='spiro', name='spiralus')
-    linalg = LinAlg(
-        backend='torch', batch_size=1, solver='lu_solve', device='cpu',
-        fkwargs=None, seed=2
+    reaction_kwargs = {k: reaction_kwargs[k] for k in ['r1', 'r2']}
+    res = create_full_metabolite_kwargs(
+        reaction_kwargs,
+        metabolite_kwargs,
+        infer_formula=True,
+        add_cofactors=False,
+        only_labmets=False,
     )
-    if ratios:
-        model_type = RatioEMU_Model
-    else:
-        model_type = EMU_Model
+    print(res)
+    # model = model_builder_from_dict(
+    #     reaction_kwargs=reaction_kwargs,
+    #     metabolite_kwargs=metabolite_kwargs
+    # )
+    # model = LabellingModel(LinAlg('numpy'), model)
+    # reaction_kwargs = {'r1': reaction_kwargs['r1']}
+    # model.add_labelling_kwargs(reaction_kwargs, metabolite_kwargs)
 
-    model = model_type(linalg=linalg, model=model)
-    model.add_labelling_kwargs(
-        reaction_kwargs=reaction_kwargs,
-        metabolite_kwargs=metabolite_kwargs
-    )
-    if (ratio_repo is not None) and ratios:
-        model.set_ratio_repo(ratio_repo=ratio_repo)
-    model.set_substrate_labelling(substrate_labelling=substrate_df.iloc[0])
-    model.set_measurements(measurement_list=annotation_df['met_id'].unique())
-    # if build_simulator:
-    #     model.build_model(free_reaction_id=measured_boundary_fluxes)
 
-    if add_biomass:
-        fluxes = {
-            'a_in': 10.00,
-            'd_out': 0.00,
-            'f_out': 0.00,
-            'h_out': 7.60,
-            'v1': 10.00,
-            'v2': 1.80,
-            'v2_rev': 0.90,
-            'v3': 8.20,
-            'v4': 0.00,
-            'v5': 0.05,
-            'v5_rev': 8.10,
-            'v6': 8.05,
-            'v7': 8.05,
-            'biomass': 1.50,
-        }
-        bm = model.reactions.get_by_id('biomass')
-        model.objective = {bm: 1}
-    else:
-        fluxes = {
-            'a_in': 10.0,
-            'd_out': 1.0,
-            'f_out': 1.0,
-            'h_out': 8.0,
-            'v1': 10.0,
-            'v2': 7.0,
-            'v2_rev': 3.5,
-            'v3': 7.0,
-            'v4': 2.0,
-            'v5': 3.0,
-            'v5_rev': 10.0,
-            'v6': 6.0,
-            'v7': 6.0,
-        }
-        model.objective = {model.reactions.get_by_id('h_out'): 1}
 
-    if not v2_reversible:
-        fluxes['v2'] = fluxes['v2'] - fluxes.pop('v2_rev')
 
-    if not v5_reversible:
-        fluxes['v5_rev'] = fluxes['v5_rev'] - fluxes.pop('v5')
 
-    if add_cofactor:
-        fluxes['cof_out'] = fluxes['v3']
-    fluxes = pd.Series(fluxes, name='v')
 
-    model.build_model(free_reaction_id=measured_boundary_fluxes)
-    model.set_fluxes(labelling_fluxes=fluxes)
-    res = model.cascade(pandalize=True)
-    # print(model.labelling_reactions)
-    print('NOW COPYING')
-    mm = model.copy()
-    mm.build_model()
-    mm.set_fluxes(labelling_fluxes=fluxes)
-    res2 = mm.cascade(pandalize=True)
+    # pd.set_option('display.max_columns', None)
+    #
+    # v5_reversible = True
+    # v2_reversible = True
+    # add_biomass = True
+    # add_cofactor = True
+    # C_symmetric = True
+    # which_labellings = ['A','B']
+    # L_12_omega = 1.0
+    # measured_boundary_fluxes = ('h_out', )
+    # ratios=False
+    # build_simulator=True
+    #
+    # if v5_reversible:
+    #     v5_atom_map_str = 'F/a + D/bcd  <== C/abcd'
+    # else:
+    #     v5_atom_map_str = 'F/a + D/bcd  <-- C/abcd'
+    #
+    # reaction_kwargs = {
+    #     'biomass': {
+    #         'reaction_str': '0.3H + 0.6B + 0.5E + 0.1C --> ∅',
+    #         'atom_map_str': 'biomass --> ∅',
+    #     },
+    #     'a_in': {
+    #         'lower_bound': 10.0, 'upper_bound': 10.0,
+    #         'atom_map_str': '∅ --> A/ab'
+    #     },
+    #     'd_out': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'D/abc --> ∅'
+    #     },
+    #     'f_out': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'F/a --> ∅'
+    #     },
+    #     'h_out': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'H/ab --> ∅'
+    #     },
+    #     'cof_out': {
+    #         'upper_bound': 100.0,
+    #         'reaction_str': 'cof --> ∅'
+    #     },
+    #     'v1': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'A/ab --> B/ab'
+    #     },
+    #     'v2': {
+    #         'lower_bound': 0.0, 'upper_bound': 100.0,
+    #         'rho_min': 0.1, 'rho_max': 0.8,
+    #         'atom_map_str': 'B/ab ==> E/ab'
+    #     },
+    #     'v3': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'B/ab + E/cd --> C/abcd'
+    #     },
+    #     'v4': {
+    #         'upper_bound': 100.0,  # 'lower_bound': -10.0,
+    #         'atom_map_str': 'E/ab --> H/ab'
+    #     },
+    #     'v5': {  # NB this is an always reverse reaction!
+    #         'lower_bound': -100.0, 'upper_bound': 0.0,
+    #         'atom_map_str': v5_atom_map_str,  # <--  ==>
+    #     },
+    #     'v6': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'D/abc --> E/ab + F/c'
+    #     },
+    #     'v7': {
+    #         'upper_bound': 100.0,
+    #         'atom_map_str': 'F/a + F/b --> H/ab'
+    #     },
+    #     'vp': {
+    #         'lower_bound': 0.0,
+    #         'pseudo': True,
+    #         'atom_map_str': 'C/abcd + D/efg + H/hi --> L/abgih'
+    #     },
+    # }
+    # metabolite_kwargs = {
+    #     'A': {'formula': 'C2H4O5'},
+    #     'B': {'formula': 'C2HPO3'},
+    #     'C': {'formula': 'C4H6N4OS', 'symmetric': C_symmetric},
+    #     'D': {'formula': 'C3H2'},
+    #     'E': {'formula': 'C2H4O5'},
+    #     'F': {'formula': 'CH2'},
+    #     'G': {'formula': 'CH2'},  # unused metabolite
+    #     'H': {'formula': 'C2H2'},
+    #     'L': {'formula': 'C5KNaSH'},  # pseudo-metabolite
+    #     'L|[1,2]': {'formula': 'C2H2O7'},  # pseudo-metabolite
+    # }
+    # ratio_repo = {
+    #     'E|v2': {
+    #         'numerator': {'v2': 1},
+    #         'denominator': {'v2': 1, 'v6': 1}
+    #     },
+    #     'H|v4': {
+    #         'numerator': {'v4': 1},
+    #         'denominator': {'v7': 1, 'v4': 1}
+    #     },
+    #     # 'denominator': {'v6': 1, 'v4': 1}},  # make ratios correlated
+    # }
+    #
+    # if not add_biomass:
+    #     reaction_kwargs.pop('biomass')
+    #
+    # if not v2_reversible:
+    #     reaction_kwargs['v2'] = {
+    #         'lower_bound': 0.0, 'upper_bound': 100.0,
+    #         'atom_map_str': 'B/ab --> E/ab'
+    #     }
+    #     ratio_repo['E|v2'] = {
+    #         'numerator': {'v2': 1},
+    #         'denominator': {'v2': 1, 'v6': 1},
+    #     }
+    # if add_cofactor:
+    #     reaction_kwargs['v3']['atom_map_str'] = 'B/ab + E/cd --> C/abcd + cof'
+    #     reaction_kwargs['cof_out'] = {'reaction_str': 'cof --> ∅', 'upper_bound': 100.0}
+    #
+    # substrate_df = pd.DataFrame([
+    #     [0.2, 0.0, 0.0, 0.8],
+    #     [0.0, 1.0, 0.0, 0.0],
+    #     [0.0, 0.8, 0.0, 0.2],
+    #     [0.0, 0.0, 1.0, 0.0],
+    #     [0.0, 0.0, 0.8, 0.2],
+    # ], columns=['A/00', 'A/01', 'A/10', 'A/11'], index=list('ABCDE'))
+    #
+    # if which_labellings is not None:
+    #     substrate_df = substrate_df.loc[which_labellings]
+    #
+    # annotation_df = pd.DataFrame([
+    #     ('H', 1, 'M-H', 3.0, 1.0, 0.01, None, 3e3),
+    #     ('H', 0, 'M-H', 2.0, 1.0, 0.01, None, 3e3),
+    #
+    #     ('H', 1, 'M+F', 5.0, 1.0, 0.03, None, 3e3),
+    #     ('H', 1, 'M+Cl', 88.0, 1.0, 0.03, None, 2e3),
+    #     ('H', 0, 'M+F', 4.0, 1.0, 0.03, None, 3e3),  # to indicate that da_df is not yet in any order!
+    #     ('H', 0, 'M+Cl', 89.0, 1.0, 0.03, None, 2e3),
+    #
+    #     ('Q', 1, 'M-H', 3.7, 3.0, 0.02, None, 2e3),  # an annotated metabolite that is not in the model
+    #     ('Q', 2, 'M-H', 4.7, 3.0, 0.02, None, 2e3),
+    #     ('Q', 3, 'M-H', 5.7, 3.0, 0.02, None, 2e3),
+    #
+    #     ('C', 0, 'M-H', 1.5, 4.0, 0.02, None, 7e5),
+    #     ('C', 3, 'M-H', 4.5, 4.0, 0.02, None, 7e5),
+    #     ('C', 4, 'M-H', 5.5, 4.0, 0.02, None, 7e5),
+    #
+    #     ('D', 2, 'M-H', 12.0, 5.0, 0.01, None, 1e5),
+    #     ('D', 0, 'M-H', 9.0, 5.0, 0.01, None, 1e5),
+    #     ('D', 3, 'M-H', 13.0, 5.0, 0.01, None, 1e5),
+    #
+    #     ('L|[1,2]', 0, 'M-H', 14.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),  # a scaling factor other than 1.0
+    #     ('L|[1,2]', 1, 'M-H', 15.0, 6.0, 0.01 * L_12_omega, L_12_omega, 4e4),
+    #
+    #     ('L', 0, 'M-H', 14.0, 6.0, 0.01, None, 4e5),
+    #     ('L', 1, 'M-H', 15.0, 6.0, 0.01, None, 4e5),
+    #     ('L', 2, 'M-H', 16.0, 6.0, 0.01, None, 4e5),
+    #     ('L', 5, 'M-H', 19.0, 6.0, 0.01, None, 4e5),
+    # ], columns=['met_id', 'nC13', 'adduct_name', 'mz', 'rt', 'sigma', 'omega', 'total_I'])
+    # formap = {k: v['formula'] for k, v in metabolite_kwargs.items()}
+    # annotation_df['formula'] = annotation_df['met_id'].map(formap)
+    #
+    # biomass_id = 'biomass' if add_biomass else None
+    # if add_biomass:
+    #     measured_boundary_fluxes = list(measured_boundary_fluxes)
+    #     measured_boundary_fluxes.append(biomass_id)
+    #
+    # model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs, model_id='spiro', name='spiralus')
+    # linalg = LinAlg(
+    #     backend='torch', batch_size=1, solver='lu_solve', device='cpu',
+    #     fkwargs=None, seed=2
+    # )
+    # if ratios:
+    #     model_type = RatioEMU_Model
+    # else:
+    #     model_type = EMU_Model
+    #
+    # model = model_type(linalg=linalg, model=model)
+    # model.add_labelling_kwargs(
+    #     reaction_kwargs=reaction_kwargs,
+    #     metabolite_kwargs=metabolite_kwargs
+    # )
+    # if (ratio_repo is not None) and ratios:
+    #     model.set_ratio_repo(ratio_repo=ratio_repo)
+    # model.set_substrate_labelling(substrate_labelling=substrate_df.iloc[0])
+    # model.set_measurements(measurement_list=annotation_df['met_id'].unique())
+    # # if build_simulator:
+    # #     model.build_model(free_reaction_id=measured_boundary_fluxes)
+    #
+    # if add_biomass:
+    #     fluxes = {
+    #         'a_in': 10.00,
+    #         'd_out': 0.00,
+    #         'f_out': 0.00,
+    #         'h_out': 7.60,
+    #         'v1': 10.00,
+    #         'v2': 1.80,
+    #         'v2_rev': 0.90,
+    #         'v3': 8.20,
+    #         'v4': 0.00,
+    #         'v5': 0.05,
+    #         'v5_rev': 8.10,
+    #         'v6': 8.05,
+    #         'v7': 8.05,
+    #         'biomass': 1.50,
+    #     }
+    #     bm = model.reactions.get_by_id('biomass')
+    #     model.objective = {bm: 1}
+    # else:
+    #     fluxes = {
+    #         'a_in': 10.0,
+    #         'd_out': 1.0,
+    #         'f_out': 1.0,
+    #         'h_out': 8.0,
+    #         'v1': 10.0,
+    #         'v2': 7.0,
+    #         'v2_rev': 3.5,
+    #         'v3': 7.0,
+    #         'v4': 2.0,
+    #         'v5': 3.0,
+    #         'v5_rev': 10.0,
+    #         'v6': 6.0,
+    #         'v7': 6.0,
+    #     }
+    #     model.objective = {model.reactions.get_by_id('h_out'): 1}
+    #
+    # if not v2_reversible:
+    #     fluxes['v2'] = fluxes['v2'] - fluxes.pop('v2_rev')
+    #
+    # if not v5_reversible:
+    #     fluxes['v5_rev'] = fluxes['v5_rev'] - fluxes.pop('v5')
+    #
+    # if add_cofactor:
+    #     fluxes['cof_out'] = fluxes['v3']
+    # fluxes = pd.Series(fluxes, name='v')
+    #
+    # model.build_model(free_reaction_id=measured_boundary_fluxes)
+    # model.set_fluxes(labelling_fluxes=fluxes)
+    # res = model.cascade(pandalize=True)
+    # # print(model.labelling_reactions)
+    # print('NOW COPYING')
+    # mm = model.copy()
+    # mm.build_model()
+    # mm.set_fluxes(labelling_fluxes=fluxes)
+    # res2 = mm.cascade(pandalize=True)
