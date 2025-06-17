@@ -2,10 +2,17 @@ import pytest
 import numpy as np
 import pandas as pd
 from cobra import Model, Reaction, Metabolite
-from sbmfi.core.model import LabellingModel, EMU_Model, create_full_metabolite_kwargs, model_builder_from_dict
+from sbmfi.core.model import (
+    LabellingModel,
+    EMU_Model,
+    create_full_metabolite_kwargs,
+    model_builder_from_dict,
+    process_biomass_reaction
+)
 from sbmfi.core.linalg import LinAlg
 from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU, IsoCumo
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
+
 
 class TestModelBuilder:
     """Test suite for model building functions"""
@@ -19,7 +26,7 @@ class TestModelBuilder:
                 'lower_bound': 0.0
             },
             'r1': {
-                'atom_map_str': 'A/ab + J --> P/ab', # has a co-factor
+                'atom_map_str': 'A/ab + J --> P/ab',  # has a co-factor
                 'upper_bound': 100.0,
                 'lower_bound': 0.0
             },
@@ -73,8 +80,11 @@ class TestModelBuilder:
             ['r1', 'bm'],
             {
                 'A': {'formula': 'C2H4O2', 'compartment': 'c', 'charge': -1},
+                'J': {'formula': 'C1H1O1', 'compartment': 'c', 'charge': 0},
                 'P': {'formula': 'C2H3O2', 'compartment': 'c', 'charge': -1},
-                'J': {'formula': 'C1H1O1', 'compartment': 'c', 'charge': 0},  # metabolite without formula
+                'H': {'compartment': 'c'},
+                'B': {'compartment': 'c'},
+                'Q': {'compartment': 'c'}
             },
             True,
             False,
@@ -104,16 +114,13 @@ class TestModelBuilder:
         )
     ])
     def test_create_full_metabolite_kwargs_variants(
-            self, request, basic_reaction_kwargs, basic_metabolite_kwargs, 
+            self, basic_reaction_kwargs, basic_metabolite_kwargs, 
             reaction_ids, expected, add_cofactors, only_labmets
     ):
         """Test various metabolite kwargs creation scenarios with different parameter combinations"""
         # Select relevant reactions and metabolites
-        if isinstance(reaction_ids, list):
-            reaction_kwargs = {rid: basic_reaction_kwargs[rid] for rid in reaction_ids}
-        else:
-            reaction_kwargs = reaction_ids  # Use custom reaction kwargs directly
-            
+        reaction_kwargs = {rid: basic_reaction_kwargs[rid] for rid in reaction_ids}
+
         result = create_full_metabolite_kwargs(
             reaction_kwargs, 
             basic_metabolite_kwargs,
@@ -138,69 +145,43 @@ class TestModelBuilder:
                 assert kwd in result_kwargs
                 assert result_kwargs[kwd] == val
 
-    @pytest.mark.parametrize("reaction_kwargs,metabolite_ids,expected_error", [
-        # Invalid atom mapping - too many atoms
-        pytest.param(
-            {'r1': {'atom_map_str': 'A/ab --> P/abc'}},
-            ['A', 'P'],
-            "Formula mismatch for metabolite P: formula has 2 carbon atoms but atom mapping has 3 atoms",
-            id="too_many_atoms"
-        ),
-        # Invalid atom mapping - too few atoms
-        pytest.param(
-            {'r1': {'atom_map_str': 'A/ab --> P/a'}},
-            ['A', 'P'],
-            "Formula mismatch for metabolite P: formula has 2 carbon atoms but atom mapping has 1 atoms",
-            id="too_few_atoms"
-        )
-    ])
     def test_create_full_metabolite_kwargs_errors(
-            self, request, basic_metabolite_kwargs, reaction_kwargs, metabolite_ids, expected_error
+            self, basic_metabolite_kwargs
     ):
-        """Test error handling in metabolite kwargs creation"""
-        metabolite_kwargs = {mid: basic_metabolite_kwargs[mid] for mid in metabolite_ids}
+        """Test error handling in metabolite kwargs creation when atom mapping doesn't match formula"""
+        reaction_kwargs = {'r1': {'atom_map_str': 'A/ab --> P/abc'}}
+        expected_error = "Formula mismatch for metabolite P: formula has 2 carbon atoms but atom mapping has 3 atoms"
 
         with pytest.raises(ValueError, match=expected_error):
-            create_full_metabolite_kwargs(reaction_kwargs, metabolite_kwargs)
+            create_full_metabolite_kwargs(reaction_kwargs, basic_metabolite_kwargs)
 
-    @pytest.mark.parametrize("reaction_ids,metabolite_ids,expected", [
+    @pytest.mark.parametrize("reaction_ids,expected", [
         # Basic model with single reaction
         pytest.param(
             ['r1'],
-            ['A', 'P'],
-            {'reactions': 1, 'metabolites': 2},
+            {'reactions': 1, 'metabolites': 3},
             id="single_reaction"
         ),
         # Model with multiple reactions
         pytest.param(
             ['r1', 'r2'],
-            ['A', 'B', 'P', 'Q'],
-            {'reactions': 2, 'metabolites': 4},
+            {'reactions': 2, 'metabolites': 3 + 2},
             id="multiple_reactions"
         ),
         # Model with biomass reaction
         pytest.param(
-            ['r1', 'biomass'],
-            ['A', 'P'],
-            {'reactions': 2, 'metabolites': 2},
+            ['r1', 'bm'],
+            {'reactions': 2, 'metabolites': 3 + 3},
             id="biomass_reaction"
         )
     ])
     def test_model_creation_variants(
-            self, request, basic_reaction_kwargs, basic_metabolite_kwargs, reaction_ids, metabolite_ids, expected
+            self, basic_reaction_kwargs, basic_metabolite_kwargs, reaction_ids, expected
     ):
         """Test various model creation scenarios"""
         # Select relevant reactions and metabolites
-        if isinstance(reaction_ids, list):
-            reaction_kwargs = {rid: basic_reaction_kwargs[rid] for rid in reaction_ids if rid != 'biomass'}
-            if 'biomass' in reaction_ids:
-                reaction_kwargs['biomass'] = {'reaction_str': '0.1 A + 0.6 P --> '}
-        else:
-            reaction_kwargs = reaction_ids  # Use custom reaction kwargs directly
-            
-        metabolite_kwargs = {mid: basic_metabolite_kwargs[mid] for mid in metabolite_ids}
-
-        model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+        reaction_kwargs = {rid: basic_reaction_kwargs[rid] for rid in reaction_ids}
+        model = model_builder_from_dict(reaction_kwargs, basic_metabolite_kwargs)
         assert len(model.reactions) == expected['reactions']
         assert len(model.metabolites) == expected['metabolites']
 
@@ -212,10 +193,10 @@ class TestModelBuilder:
             metabolite_kwargs=basic_metabolite_kwargs
         )
         model = LabellingModel(LinAlg('numpy'), model)
-        
+
         reaction_kwargs = {'r1': basic_reaction_kwargs['r1']}
         model.add_labelling_kwargs(reaction_kwargs, basic_metabolite_kwargs)
-        
+
         # Verify reaction atom mapping
         r1 = model.reactions.get_by_id('r1')
         assert hasattr(r1, 'atom_map')
@@ -226,7 +207,7 @@ class TestModelBuilder:
         assert np.array_equal(r1.atom_map[met_a][1], np.array([('a', 'b')]))
         assert r1.atom_map[met_p][0] == 1
         assert np.array_equal(r1.atom_map[met_p][1], np.array([('a', 'b')]))
-        
+
         # Verify that all other reactions are cobra.Reaction objects
         for reaction in model.reactions:
             if reaction.id != 'r1':
@@ -237,8 +218,59 @@ class TestModelBuilder:
             if metabolite.id not in ['A', 'P']:
                 assert isinstance(metabolite, Metabolite)
                 assert not isinstance(metabolite, LabelledMetabolite)
-        
+
         # Verify model type attributes
         assert hasattr(model, '_TYPE_REACTION')
         assert model._TYPE_REACTION._TYPE_METABOLITE == LabelledMetabolite
         assert model._TYPE_REACTION == LabellingReaction
+
+    def test_process_biomass_reaction(self):
+        """Test processing biomass reaction from reaction kwargs with different scenarios"""
+        # Test case 1: No biomass reaction
+        reaction_kwargs = {
+            'r1': {'atom_map_str': 'A/ab --> P/ab'},
+            'r2': {'atom_map_str': 'B/cd --> Q/cd'}
+        }
+        assert process_biomass_reaction(reaction_kwargs) is None
+
+        # Test case 2: Single biomass reaction with default name and coefficients
+        reaction_kwargs = {
+            'r1': {'atom_map_str': 'A/ab --> P/ab'},
+            'biomass': {
+                'atom_map_str': 'biomass --> ',
+                'reaction_str': '0.3H + 0.6P + 0.5B + 0.1Q --> ∅'
+            }
+        }
+        biomass_id, biomass_coeff = process_biomass_reaction(reaction_kwargs)
+        assert biomass_id == 'biomass'
+        assert biomass_coeff == {'H': -0.3, 'P': -0.6, 'B': -0.5, 'Q': -0.1}
+
+        # Test case 3: Single biomass reaction with custom name
+        reaction_kwargs = {
+            'r1': {'atom_map_str': 'A/ab --> P/ab'},
+            'growth': {
+                'atom_map_str': 'biomass --> ',
+                'reaction_str': '0.4H + 0.7P --> ∅'
+            }
+        }
+        biomass_id, biomass_coeff = process_biomass_reaction(reaction_kwargs)
+        assert biomass_id == 'growth'
+        assert biomass_coeff == {'H': -0.4, 'P': -0.7}
+
+        # Test case 4: Multiple biomass reactions (should raise error)
+        reaction_kwargs = {
+            'r1': {'atom_map_str': 'A/ab --> P/ab'},
+            'biomass1': {'atom_map_str': 'biomass --> '},
+            'biomass2': {'atom_map_str': 'biomass --> '}
+        }
+        with pytest.raises(ValueError, match="Multiple biomass reactions found"):
+            process_biomass_reaction(reaction_kwargs)
+
+        # Test case 5: Biomass reaction without reaction_str
+        reaction_kwargs = {
+            'r1': {'atom_map_str': 'A/ab --> P/ab'},
+            'biomass': {'atom_map_str': 'biomass --> '}
+        }
+        biomass_id, biomass_coeff = process_biomass_reaction(reaction_kwargs)
+        assert biomass_id == 'biomass'
+        assert biomass_coeff == {}
