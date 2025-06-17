@@ -1394,7 +1394,7 @@ def model_builder_from_dict(
 
     if biomass_key is not None:
         bm_reac = Reaction(
-            'biomass', name=biomass_kwargs.get('name', None), subsystem=biomass_kwargs.get('name', None),
+            biomass_key, name=biomass_kwargs.get('name', None), subsystem=biomass_kwargs.get('name', None),
             lower_bound=biomass_kwargs.get('lower_bound', 0.0), upper_bound=biomass_kwargs.get('upper_bound', 1000.0),
         )
         biomass_coeff = {model.metabolites.get_by_id(id=met_id): coeff for met_id, coeff in biomass_coeff.items()}
@@ -1420,7 +1420,39 @@ if __name__ == "__main__":
                          'R': {},
                          'S': {'formula': 'C2H4O3', 'compartment': 'p', 'charge': -1},
                          'J': {'formula': 'C1H1O1', 'compartment': 'c', 'charge': 0}}
-    reaction_kwargs = {'r1': {'atom_map_str': 'A/ab + J --> P/ab', 'upper_bound': 100.0, 'lower_bound': 0.0},
-                       'bm': {'atom_map_str': 'biomass --> ', 'reaction_str': '0.3H + 0.6P + 0.5B + 0.1Q --> ∅', 'upper_bound': 100.0, 'lower_bound': 0.0}}
-    res = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
-    print(res)
+    reaction_kwargs = {
+            'a_in': {
+                'atom_map_str': '--> A/ab',  # exchange reaction
+                'upper_bound': 100.0,
+                'lower_bound': 0.0
+            },
+            'r1': {
+                'atom_map_str': 'A/ab + J --> P/ab',  # has a co-factor
+                'upper_bound': 100.0,
+                'lower_bound': 0.0
+            },
+            'r2': {
+                'atom_map_str': 'A/ab + B/cd --> Q/acdb',  # default bounds
+            },
+            'r3': {
+                'atom_map_str': 'Q/acdb --> R/cd + S/ba',
+                'upper_bound': 100.0,
+                'lower_bound': 0.0
+            },
+            'bm': {
+                'atom_map_str': 'biomass --> ',  # biomass reaction
+                'reaction_str': '0.3H + 0.6P + 0.5B + 0.1Q --> ∅',
+                'upper_bound': 100.0,
+                'lower_bound': 0.0
+            },
+            'rp': {
+                'atom_map_str': 'A/ab + B/cd + A/ef --> L/acf',  # pseudo-reaction
+                'pseudo': True
+            },
+        }
+    model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+    print(model.reactions)
+    model = LabellingModel(linalg=LinAlg('numpy'), model=model)
+    model.add_labelling_kwargs(reaction_kwargs, metabolite_kwargs)
+    print(model.reactions)
+    print(model)

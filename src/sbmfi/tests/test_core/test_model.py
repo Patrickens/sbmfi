@@ -31,9 +31,7 @@ class TestModelBuilder:
                 'lower_bound': 0.0
             },
             'r2': {
-                'atom_map_str': 'A/ab + B/cd --> Q/acdb',
-                'upper_bound': 100.0,
-                'lower_bound': 0.0
+                'atom_map_str': 'A/ab + B/cd --> Q/acdb',  # default bounds
             },
             'r3': {
                 'atom_map_str': 'Q/acdb --> R/cd + S/ba',
@@ -45,6 +43,10 @@ class TestModelBuilder:
                 'reaction_str': '0.3H + 0.6P + 0.5B + 0.1Q --> ∅',
                 'upper_bound': 100.0,
                 'lower_bound': 0.0
+            },
+            'rp': {
+                'atom_map_str': 'A/ab + B/cd + A/ef --> L/acf',  # pseudo-reaction
+                'pseudo': True
             },
         }
 
@@ -194,10 +196,11 @@ class TestModelBuilder:
         )
         model = LabellingModel(LinAlg('numpy'), model)
 
-        reaction_kwargs = {'r1': basic_reaction_kwargs['r1']}
+        # Include all reactions except a_in
+        reaction_kwargs = {rid: kwargs for rid, kwargs in basic_reaction_kwargs.items() if rid != 'a_in'}
         model.add_labelling_kwargs(reaction_kwargs, basic_metabolite_kwargs)
 
-        # Verify reaction atom mapping
+        # Verify reaction atom mapping for r1
         r1 = model.reactions.get_by_id('r1')
         assert hasattr(r1, 'atom_map')
         assert len(r1.atom_map) == 2
@@ -208,16 +211,42 @@ class TestModelBuilder:
         assert r1.atom_map[met_p][0] == 1
         assert np.array_equal(r1.atom_map[met_p][1], np.array([('a', 'b')]))
 
+        # Verify reaction bounds for all reactions
+        assert r1.lower_bound == 0.0  # from fixture
+        assert r1.upper_bound == 100.0  # from fixture
+        
+        r2 = model.reactions.get_by_id('r2')
+        assert r2.lower_bound == 0.0  # default
+        assert r2.upper_bound == 1000.0  # default
+        
+        r3 = model.reactions.get_by_id('r3')
+        assert r3.lower_bound == 0.0  # default
+        assert r3.upper_bound == 100.0  # default
+        
+        bm = model.reactions.get_by_id('bm')
+        assert bm.lower_bound == 0.0  # from fixture
+        assert bm.upper_bound == 100.0  # from fixture
+
+        # Verify pseudo reaction status
+        rp = model.pseudo_reactions.get_by_id('rp')
+        assert rp.pseudo is True
+        for rid in ['r1', 'r2', 'r3', 'bm']:
+            assert getattr(model.reactions.get_by_id(rid), 'pseudo', False) is False
+
         # Verify that all other reactions are cobra.Reaction objects
         for reaction in model.reactions:
-            if reaction.id != 'r1':
+            if reaction.id not in ['r1', 'r2', 'r3', 'bm', 'rp']:
                 assert isinstance(reaction, Reaction)
                 assert not isinstance(reaction, LabellingReaction)
+            else:
+                assert isinstance(reaction, LabellingReaction)
         # Verify that all other metabolites are cobra.Metabolite objects
         for metabolite in model.metabolites:
-            if metabolite.id not in ['A', 'P']:
+            if metabolite.id not in ['A', 'P', 'B', 'Q', 'R', 'S']:
                 assert isinstance(metabolite, Metabolite)
                 assert not isinstance(metabolite, LabelledMetabolite)
+            else:
+                assert isinstance(metabolite, LabelledMetabolite)
 
         # Verify model type attributes
         assert hasattr(model, '_TYPE_REACTION')
