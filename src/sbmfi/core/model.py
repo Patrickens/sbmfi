@@ -473,7 +473,8 @@ class LabellingModel(Model):
                 atom_map, is_biomass = reaction.build_atom_map_from_string(kwargs['atom_map_str'])
                 if is_biomass:
                     if self._biomass_id is not None:
-                        raise ValueError('more than 1 biomass in the atom_mapt_str of reaction_kwargs')
+                        raise ValueError(f'more than 1 biomass in the atom_map_str of reaction_kwargs; '
+                                         f'self._biomass_id {self._biomass_id} and {atom_map}.')
                     self._biomass_id = reac_id
                 reaction.set_atom_map(atom_map)
                 if reaction.pseudo:
