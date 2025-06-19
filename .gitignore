@@ -58,3 +58,7 @@ docker_pta/
 *.egg
 *.manifest
 *.spec
+
+# Ignore specific license files
+/docker_13cflux2/15_Zamboni_Zurich_Switzerland_Ubuntu_18_04_64bit/lic.txt
+/docker_13cflux2/15_Zamboni_Zurich_Switzerland_Ubuntu_18_04_64bit/packete_lic_15/License/license.dat
