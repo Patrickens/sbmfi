@@ -706,49 +706,79 @@ class EMU_Reaction(LabellingReaction):
 
 
 if __name__ == "__main__":
+    from sbmfi.core.model import model_builder_from_dict, LabellingModel
+    from sbmfi.core.linalg import LinAlg
 
-    def test_rho_bounds(labelled_reaction):
-        # Test default values
-        assert labelled_reaction.rho_min == 0.0
-        assert labelled_reaction.rho_max == 0.0
+    reaction_kwargs = {
+        # Original reactions
+        'r1': {
+            'atom_map_str': 'A/ab --> P/ab'
+        },
+        'r2': {
+            'atom_map_str': 'A/ab + B/cd --> Q/acdb'
+        },
+        'r3': {
+            'atom_map_str': 'A/ab + A/cd --> Q/acdb'
+        },
+        'r4': {
+            'atom_map_str': 'Q/acdb --> R/cd + S/ba'
+        },
+        'r5': {
+            'atom_map_str': 'Q/acdb --> R/cd + R/ba'
+        },
+        'r6': {
+            'atom_map_str': 'A/ab + B/cd --> T/ac + U/db'
+        },
 
-        # Test valid value assignments
-        labelled_reaction.rho_max = 0.5
-        assert labelled_reaction.rho_max == 0.5
-        labelled_reaction.rho_min = 0.1
-        assert labelled_reaction.rho_min == 0.1
+        # Pseudo reaction
+        'pr1': {
+            'pseudo': True,
+            'atom_map_str': 'A/ab + B/cd + P/fg --> L/acfd'  # unbalanced carbons, should not error
+        }
+    }
+    metabolite_kwargs = {
+            # Regular metabolites with different formulas
+            'A': {'formula': 'C2H4O2', 'symmetric': False},  # Acetate
+            'B': {'formula': 'C2H6O', 'symmetric': False},  # Ethanol
+            'P': {'formula': 'C2H3O2', 'symmetric': False, 'compartment': 'c', 'charge': -1},  # Pyruvate
+            'Q': {'formula': 'C4H6O4', 'symmetric': False, 'compartment': 'c'},  # Succinate
+            'R': {'formula': 'C2H5O2', 'symmetric': False},  # Glycolate
+            'S': {'formula': 'C2H4O3', 'symmetric': False},  # Glyoxylate
+            'T': {'formula': 'C2H3O3', 'symmetric': False},  # Oxaloacetate
+            'U': {'formula': 'C2H4O4', 'symmetric': False},  # Oxalate
+
+            # Symmetric metabolites
+            'SP': {'formula': 'C2H3O2', 'symmetric': True, 'compartment': 'c', 'charge': -1},  # Pyruvate
+            'SQ': {'formula': 'C4H6O4', 'symmetric': True, 'compartment': 'c'},  # Succinate
+            'SR': {'formula': 'C2H5O2', 'symmetric': True},  # Glycolate
+            'SS': {'formula': 'C2H4O3', 'symmetric': True},  # Glyoxylate
+            'ST': {'formula': 'C2H3O3', 'symmetric': True},  # Oxaloacetate
+            'SU': {'formula': 'C2H4O4', 'symmetric': True},  # Oxalate
+
+            # Edge cases
+            'E1': {'formula': 'C1H4O', 'symmetric': False},  # Single carbon
+            'E2': {'formula': 'C6H12O6', 'symmetric': False},  # Large molecule
+            'E3': {'formula': 'C0H2O', 'symmetric': False},  # No carbon
+
+            # Pseudo metabolites
+            'L': {'formula': 'C4H8O2'},  # Pseudo metabolite for testing
+            'M': {'formula': 'C2H6O'},  # Another pseudo metabolite
+        }
+    model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+    model = LabellingModel(LinAlg('numpy'), model)
+    for r_id, r_kwargs in reaction_kwargs.items():
+        single_r_kwargs = {r_id: reaction_kwargs[r_id]}
+        model.add_labelling_kwargs(single_r_kwargs, metabolite_kwargs)
+        pseudo = reaction_kwargs[r_id].get('pseudo', False)
+
+        if pseudo:
+            r = model.pseudo_reactions.get_by_id(r_id)
+        else:
+            r = model.reactions.get_by_id(r_id)
+        print(r)
+        print(r.atom_map)
+        if not pseudo:
+            print(r._rev_reaction.atom_map)
+        print()
 
 
-        # Test rho_max < _RHO_MIN
-        labelled_reaction.rho_min = 0.0  # Reset rho_min first
-        labelled_reaction.rho_max = 0.0005  # Less than _RHO_MIN (0.001)
-        assert labelled_reaction.rho_min == 0.0
-        assert labelled_reaction.rho_max == 0.0
-
-        # Test reversible reaction (set via bounds)
-        labelled_reaction.bounds = (-100, 100)  # Make reaction reversible
-        print(labelled_reaction.reversibility, labelled_reaction._dgibbsr)
-        labelled_reaction._dgibbsr = 0.0
-        assert labelled_reaction.rho_min == 0.0
-        assert labelled_reaction.rho_max == labelled_reaction._RHO_MAX
-
-        # Test zero bounds
-        labelled_reaction.bounds = (0.0, 0.0)
-        assert labelled_reaction.rho_min == 0.0
-        assert labelled_reaction.rho_max == 0.0
-
-
-    def basic_reaction():
-        reaction = Reaction('test_rxn')
-        reaction.add_metabolites({
-            Metabolite('A', formula='C6H12O6'): -1,
-            Metabolite('B', formula='C6H12O6'): 1
-        })
-        return reaction
-
-
-    def labelled_reaction(basic_reaction):
-        return LabellingReaction(reaction=basic_reaction)
-
-
-    test_rho_bounds(labelled_reaction(basic_reaction()))

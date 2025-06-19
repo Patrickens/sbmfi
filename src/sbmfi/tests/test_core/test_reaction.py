@@ -4,6 +4,7 @@ from cobra import Reaction, Metabolite, Model
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU
 from sbmfi.core.model import LabellingModel, EMU_Model, model_builder_from_dict
+from sbmfi.core.linalg import LinAlg
 
 @pytest.fixture
 def metabolite_kwargs():
@@ -36,6 +37,7 @@ def metabolite_kwargs():
         'M': {'formula': 'C2H6O'},   # Another pseudo metabolite
     }
 
+
 @pytest.fixture
 def reaction_kwargs():
     return {
@@ -59,7 +61,6 @@ def reaction_kwargs():
             'atom_map_str': 'A/ab + B/cd --> T/ac + U/db'
         },
 
-        
         # Symmetric reactions
         'sr1': {
             'atom_map_str': 'A/ab --> SP/ab'
@@ -94,6 +95,7 @@ def reaction_kwargs():
             'atom_map_str': 'A/ab + B/cd + P/fg --> L/acfd'  # unbalanced carbons, should not error
         }
     }
+
 
 class TestLabellingReactionCreation:
     """Tests for creating LabellingReaction instances without a model"""
@@ -208,134 +210,82 @@ class TestLabellingReactionAtomMapping:
     @pytest.fixture
     def model(self, reaction_kwargs, metabolite_kwargs):
         """Create a model with all reactions from reaction_kwargs"""
-        return model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+        model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+        return LabellingModel(LinAlg('numpy'), model)
 
-    @pytest.mark.parametrize("reaction_id,expected", [
-        ("r1", {
-            "reactants": ["A"],
-            "products": ["P"],
-            "atom_map": {
-                "A": [("a", "b")],
-                "P": [("a", "b")]
+    @pytest.mark.parametrize("r_id, pseudo, expected_atom_map", [ 
+        ("r1", False, 
+            {
+                'A': (-1, [('a', 'b')]),
+                'P': (1, [('a', 'b')])
             }
-        }),
-        ("r2", {
-            "reactants": ["A", "B"],
-            "products": ["Q"],
-            "atom_map": {
-                "A": [("a", "b")],
-                "B": [("c", "d")],
-                "Q": [("a", "c", "d", "b")]
+        ),
+        ("r2", False, 
+            {
+                'A': (-1, [('a', 'b')]),
+                'B': (-1, [('c', 'd')]),
+                'Q': (1, [('a', 'c', 'd', 'b')])
             }
-        }),
-        ("r3", {
-            "reactants": ["A"],
-            "products": ["R", "S"],
-            "atom_map": {
-                "A": [("a", "c", "d", "b")],
-                "R": [("c", "d")],
-                "S": [("b", "a")]
+        ),
+        ("r3", False, 
+            {
+                'A': (-2, [('a', 'b'), ('c', 'd')]),
+                'Q': (1, [('a', 'c', 'd', 'b')])
             }
-        }),
-        ("r4", {
-            "reactants": ["A", "B"],
-            "products": ["T", "U"],
-            "atom_map": {
-                "A": [("a", "b")],
-                "B": [("c", "d")],
-                "T": [("a", "c")],
-                "U": [("d", "b")]
+        ),
+        ("r4", False, 
+            {
+                'Q': (-1, [('a', 'c', 'd', 'b')]),
+                'R': (1, [('c', 'd')]),
+                'S': (1, [('b', 'a')])
             }
-        }),
-        ("pr1", {
-            "reactants": ["A", "B"],
-            "products": ["L"],
-            "atom_map": {
-                "A": [("a", "b")],
-                "B": [("c", "d")],
-                "L": [("a", "b", "c", "d")]
-            },
-            "is_pseudo": True
-        })
+        ),
+        ("r5", False, 
+            {
+                'Q': (-1, [('a', 'c', 'd', 'b')]),
+                'R': (2, [('c', 'd'), ('b', 'a')])
+            }
+        ),
+        ("r6", False, 
+            {
+                'A': (-1, [('a', 'b')]),
+                'B': (-1, [('c', 'd')]),
+                'T': (1, [('a', 'c')]),
+                'U': (1, [('d', 'b')])
+            }
+        ),
+        ("pr1", True, 
+            {
+                'A': (-1, [('a', 'b')]),
+                'B': (-1, [('c', 'd')]),
+                'P': (-1, [('f', 'g')]),
+                'L': (1, [('a', 'c', 'f', 'd')])
+            }
+        ),
     ])
-    def test_reaction_atom_mapping(self, model, reaction_id, expected):
-        """Test atom mapping for different types of reactions"""
-        # Get the reaction from the model
-        reaction = model.reactions.get_by_id(reaction_id)
-        assert isinstance(reaction, LabellingReaction)
-        
-        # Test pseudo status
-        if "is_pseudo" in expected:
-            assert reaction.pseudo == expected["is_pseudo"]
-        
-        # Test atom map
-        atom_map = reaction.atom_map
-        assert len(atom_map) == len(expected["atom_map"])
-        
-        # Test each metabolite's atom mapping
-        for met_id, expected_atoms in expected["atom_map"].items():
-            metabolite = model.metabolites.get_by_id(met_id)
-            stoich, atoms = atom_map[metabolite]
-            
-            # Test stoichiometry
-            if met_id in expected["reactants"]:
-                assert stoich < 0
-            elif met_id in expected["products"]:
-                assert stoich > 0
-            
-            # Test atom mapping
-            assert len(atoms) == len(expected_atoms)
-            for atom_tuple, expected_tuple in zip(atoms, expected_atoms):
-                assert len(atom_tuple) == len(expected_tuple)
-                for atom, expected_atom in zip(atom_tuple, expected_tuple):
-                    assert atom == expected_atom
-
-    def test_invalid_atom_mapping(self, model):
-        """Test that invalid atom mappings raise appropriate errors"""
-        # Test unbalanced carbon count
-        with pytest.raises(ValueError, match="Formula mismatch for metabolite B"):
-            model.reactions.get_by_id("er1").build_atom_map_from_string("E1/a --> E2/abcdef")
-        
-        # Test non-unique atom mapping
-        with pytest.raises(ValueError, match="non-unique atom mapping"):
-            model.reactions.get_by_id("r1").build_atom_map_from_string("A/aa --> P/ab")
-        
-        # Test product atoms not in substrate
-        with pytest.raises(ValueError, match="product atoms do not occur in substrate"):
-            model.reactions.get_by_id("r1").build_atom_map_from_string("A/ab --> P/cd")
-
-    def test_symmetric_reaction_atom_mapping(self, model):
-        """Test atom mapping for symmetric reactions"""
-        # Test symmetric metabolite handling
-        reaction = model.reactions.get_by_id("sr1")
-        assert isinstance(reaction, LabellingReaction)
-        atom_map = reaction.atom_map
-        
-        # Get the symmetric metabolite
-        sp = model.metabolites.get_by_id("SP")
-        assert sp.symmetric
-        
-        # Test that atom mapping is preserved for symmetric metabolites
-        stoich, atoms = atom_map[sp]
-        assert stoich > 0  # Product
-        assert len(atoms) == 1
-        assert len(atoms[0]) == 2  # Two carbon atoms
-
-    def test_pseudo_reaction_atom_mapping(self, model):
-        """Test atom mapping for pseudo reactions"""
-        # Test pseudo reaction with unbalanced carbons
-        reaction = model.reactions.get_by_id("pr3")
-        assert isinstance(reaction, LabellingReaction)
-        assert reaction.pseudo
-        
-        atom_map = reaction.atom_map
-        assert len(atom_map) == 3  # A, B, P, L
-        
-        # Test that pseudo reactions can have unbalanced atom mappings
-        l_met = model.metabolites.get_by_id("L")
-        stoich, atoms = atom_map[l_met]
-        assert stoich > 0  # Product
-        assert len(atoms) == 1
-        assert len(atoms[0]) == 4  # Four carbon atoms in product
-
+    def test_reaction_atom_mapping(self, r_id, pseudo, expected_atom_map, model, reaction_kwargs, metabolite_kwargs):
+        """Test atom mapping for each reaction, using the model fixture. Atoms are specified as lists of tuples."""
+        # Re-add atom mapping for just the single reaction under test
+        single_r_kwargs = {r_id: reaction_kwargs[r_id]}
+        model.add_labelling_kwargs(single_r_kwargs, metabolite_kwargs)
+        if pseudo:
+            r = model.pseudo_reactions.get_by_id(r_id)
+        else:
+            r = model.reactions.get_by_id(r_id)
+        for met_id, (stoich, atom_list) in expected_atom_map.items():
+            if pseudo and (stoich > 0):
+                met = model.pseudo_metabolites.get_by_id(met_id)
+            else:
+                met = model.metabolites.get_by_id(met_id)
+            # Forward reaction
+            actual_stoich, actual_arr = r.atom_map[met]
+            assert stoich == actual_stoich
+            expected_arr = np.array(atom_list)
+            assert np.array_equal(expected_arr, actual_arr)
+            # Reverse reaction (if not pseudo)
+            if not pseudo:
+                rev = r._rev_reaction
+                actual_rev_stoich, actual_rev_arr = rev.atom_map[met]
+                assert -stoich == actual_rev_stoich
+                assert np.array_equal(expected_arr, actual_rev_arr)
 

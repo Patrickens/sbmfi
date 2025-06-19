@@ -568,9 +568,10 @@ class LabellingModel(Model):
             #   labelling reactions; the rest of the attributes we assume to have been set in the model at instantiation
             #   of this model
             metabolite = self.metabolites.get_by_id(met_id)
-            self.metabolites._replace_on_id(new_object=self._TYPE_REACTION._TYPE_METABOLITE(
-                metabolite=metabolite, symmetric=kwargs.get('symmetric', False), formula=kwargs.get('formula', None)
-            ))
+            if not isinstance(metabolite, self._TYPE_REACTION._TYPE_METABOLITE):
+                self.metabolites._replace_on_id(new_object=self._TYPE_REACTION._TYPE_METABOLITE(
+                    metabolite=metabolite, symmetric=kwargs.get('symmetric', False), formula=kwargs.get('formula', None)
+                ))
 
         # Next, we convert cobra Reactions to LabellingReactions and do all the atom mapping and split of pseudo reactions
         for reac_id, kwargs in reaction_kwargs.items():
