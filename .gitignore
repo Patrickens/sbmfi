@@ -1,0 +1,60 @@
+# IDE and editor folders
+.idea/
+.vs/
+*.iml
+
+# Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+
+# Jupyter notebook checkpoints and temp files
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*Untitled*.ipynb
+**/*Untitled*.ipynb
+
+# Jupyter notebook checkpoints in subfolders
+arxiv_polytope/.ipynb_checkpoints/
+arxiv_sbmfi/.ipynb_checkpoints/
+doc_notebooks/.ipynb_checkpoints/
+
+# Large data/model files
+*.pt
+*.h5
+*.nc
+*.p
+*.pickle
+
+# Jupyter notebook autosaves
+*checkpoint.ipynb
+
+# Ignore shelved changes from JetBrains IDEs
+.idea/shelf/
+
+# VS Code workspace files (if you use VS Code)
+.vscode/
+
+# Misc
+*.log
+*.tmp
+
+# Ignore all files in egg-info
+sbmfi.egg-info/
+
+# Ignore pytest cache
+.pytest_cache/
+
+# Ignore Docker build folders
+docker_13cflux2/
+docker_pta/
+
+# Build/Packaging Artifacts
+*.whl
+*.egg
+*.manifest
+*.spec

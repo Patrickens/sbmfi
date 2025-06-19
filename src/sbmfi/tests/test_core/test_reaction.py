@@ -93,7 +93,14 @@ def reaction_kwargs():
         'pr1': {
             'pseudo': True,
             'atom_map_str': 'A/ab + B/cd + P/fg --> L/acfd'  # unbalanced carbons, should not error
-        }
+        },
+
+        # Biomass
+        'biomass': {
+            'lower_bound': 0.05, 'upper_bound': 1.5,
+            'reaction_str': '0.3H + 0.6B + 0.5E + 0.1C --> ∅',
+            'atom_map_str': 'biomass --> ∅',
+        },
     }
 
 
@@ -216,65 +223,105 @@ class TestLabellingReactionAtomMapping:
     def model(self, cobra_model):
         return LabellingModel(LinAlg('numpy'), cobra_model)
 
-    @pytest.mark.parametrize("r_id, pseudo, expected_atom_map", [ 
-        ("r1", False, 
-            {
-                'A': (-1, [('a', 'b')]),
-                'P': (1, [('a', 'b')])
-            }
-        ),
-        ("r2", False, 
-            {
-                'A': (-1, [('a', 'b')]),
-                'B': (-1, [('c', 'd')]),
-                'Q': (1, [('a', 'c', 'd', 'b')])
-            }
-        ),
-        ("r3", False, 
-            {
-                'A': (-2, [('a', 'b'), ('c', 'd')]),
-                'Q': (1, [('a', 'c', 'd', 'b')])
-            }
-        ),
-        ("r4", False, 
-            {
-                'Q': (-1, [('a', 'c', 'd', 'b')]),
-                'R': (1, [('c', 'd')]),
-                'S': (1, [('b', 'a')])
-            }
-        ),
-        ("r5", False, 
-            {
-                'Q': (-1, [('a', 'c', 'd', 'b')]),
-                'R': (2, [('c', 'd'), ('b', 'a')])
-            }
-        ),
-        ("r6", False, 
-            {
-                'A': (-1, [('a', 'b')]),
-                'B': (-1, [('c', 'd')]),
-                'T': (1, [('a', 'c')]),
-                'U': (1, [('d', 'b')])
-            }
-        ),
-        ("pr1", True, 
-            {
-                'A': (-1, [('a', 'b')]),
-                'B': (-1, [('c', 'd')]),
-                'P': (-1, [('f', 'g')]),
-                'L': (1, [('a', 'c', 'f', 'd')])
-            }
-        ),
-    ])
-    def test_reaction_atom_mapping(self, r_id, pseudo, expected_atom_map, model, reaction_kwargs, metabolite_kwargs):
+    @pytest.fixture
+    def expected_atom_maps(self):
+        return {
+            "r1": (
+                {
+                    'A': (-1, [('a', 'b')]),
+                    'P': (1, [('a', 'b')])
+                },
+                False
+            ),
+            "r2": (
+                {
+                    'A': (-1, [('a', 'b')]),
+                    'B': (-1, [('c', 'd')]),
+                    'Q': (1, [('a', 'c', 'd', 'b')])
+                },
+                False
+            ),
+            "r3": (
+                {
+                    'A': (-2, [('a', 'b'), ('c', 'd')]),
+                    'Q': (1, [('a', 'c', 'd', 'b')])
+                },
+                False
+            ),
+            "r4": (
+                {
+                    'Q': (-1, [('a', 'c', 'd', 'b')]),
+                    'R': (1, [('c', 'd')]),
+                    'S': (1, [('b', 'a')])
+                },
+                False
+            ),
+            "r5": (
+                {
+                    'Q': (-1, [('a', 'c', 'd', 'b')]),
+                    'R': (2, [('c', 'd'), ('b', 'a')])
+                },
+                False
+            ),
+            "r6": (
+                {
+                    'A': (-1, [('a', 'b')]),
+                    'B': (-1, [('c', 'd')]),
+                    'T': (1, [('a', 'c')]),
+                    'U': (1, [('d', 'b')])
+                },
+                False
+            ),
+            "pr1": (
+                {
+                    'A': (-1, [('a', 'b')]),
+                    'B': (-1, [('c', 'd')]),
+                    'P': (-1, [('f', 'g')]),
+                    'L': (1, [('a', 'c', 'f', 'd')])
+                },
+                False
+            ),
+            # Biomass case
+            "biomass": (
+                {
+                    'biomass': (-1, [None]),
+                },
+                True
+            ),
+        }
+
+    @pytest.mark.parametrize("r_id", ["r1", "r2", "r3", "r4", "r5", "r6", "pr1",])
+    def test_build_atom_map_from_string(self, model, reaction_kwargs, metabolite_kwargs, expected_atom_maps, r_id):
+        """Test build_atom_map_from_string for all reactions, including biomass."""
+        # For biomass, we need to add the metabolite to the model if not present
+        reaction = LabellingReaction(model.reactions.get_by_id(r_id))
+        reaction._model = model
+        atom_map_str = reaction_kwargs[r_id]['atom_map_str']
+        atom_map, is_biomass = reaction.build_atom_map_from_string(atom_map_str)
+        expected_map, expected_is_biomass = expected_atom_maps[r_id]
+        actual_map = {met.id: (stoich, [tuple(a) if a is not None else None for a in atoms]) for met, (stoich, atoms) in atom_map.items()}
+        assert set(actual_map.keys()) == set(expected_map.keys())
+        for met_id, (stoich, atoms) in expected_map.items():
+            assert met_id in actual_map
+            actual_stoich, actual_atoms = actual_map[met_id]
+            assert stoich == actual_stoich
+            assert len(atoms) == len(actual_atoms)
+            for exp_atom, act_atom in zip(atoms, actual_atoms):
+                assert exp_atom == act_atom
+        assert is_biomass == expected_is_biomass
+
+    @pytest.mark.parametrize("r_id", ["r1", "r2", "r3", "r4", "r5", "r6", "pr1",])
+    def test_reaction_atom_mapping(self, model, reaction_kwargs, metabolite_kwargs, expected_atom_maps, r_id):
         """Test atom mapping for each reaction, using the model fixture. Atoms are specified as lists of tuples."""
         # Re-add atom mapping for just the single reaction under test
         single_r_kwargs = {r_id: reaction_kwargs[r_id]}
         model.add_labelling_kwargs(single_r_kwargs, metabolite_kwargs)
+        pseudo = reaction_kwargs[r_id].get('pseudo', False)
         if pseudo:
             r = model.pseudo_reactions.get_by_id(r_id)
         else:
             r = model.reactions.get_by_id(r_id)
+        expected_atom_map, _ = expected_atom_maps[r_id]
         for met_id, (stoich, atom_list) in expected_atom_map.items():
             if pseudo and (stoich > 0):
                 met = model.pseudo_metabolites.get_by_id(met_id)
@@ -357,34 +404,18 @@ class TestLabellingReactionAtomMapping:
         with pytest.raises(ValueError, match="non-unique atom mapping r1"):
             reaction.set_atom_map(atom_map)
 
-
-
-
-
-        # 3. Stoichiometry and atom mapping inconsistent (stoich != model stoich)
-        # with pytest.raises(ValueError, match="stoichiometry and atom mapping are inconsistent"):
-        #     labelled_rxn.set_atom_map({labelled_met: (-2, [('a', 'b')]), labelled_met_B: (1, [('a', 'b')])})
-        #
-        # # 4. Metabolite object identity mismatch (same id, different object)
-        # # (already covered by #2, but test for the specific error)
-        # # To trigger the 'metabolite in atom_map is not equal to metabolite in self.metabolites'
-        # # we need to pass the correct id but a different object
-        # met_same_id = LabelledMetabolite(Metabolite('A', formula='C2H4O2'), formula='C2H4O2')
-        # # Patch model reference to avoid the previous error
-        # met_same_id._model = model
-        # with pytest.raises(ValueError, match="metabolite in atom_map is not equal to metabolite in self.metabolites"):
-        #     labelled_rxn.set_atom_map({met_same_id: (-1, [('a', 'b')]), labelled_met_B: (1, [('a', 'b')])})
-        # # 5. Atom mapping with different number of carbons than formula
-        # with pytest.raises(ValueError, match="different number of carbons in.*than atoms in atom mapping"):
-        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'b', 'c')]), labelled_met_B: (1, [('a', 'b')])})
-        # # 6. Non-unique atom mappings (duplicate atom labels in substrates)
-        # # e.g. both reactant atoms are 'a'
-        # with pytest.raises(ValueError, match="non-unique atom mapping"):
-        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'a')]), labelled_met_B: (1, [('a', 'a')])})
-        # # 7. Product atoms not present in substrates
-        # with pytest.raises(ValueError, match="product atoms do not occur in substrate"):
-        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'b')]), labelled_met_B: (1, [('a', 'c')])})
-        # # 8. Unbalanced forward/reverse reactions (different number of atoms in products vs substrates)
-        # with pytest.raises(ValueError, match="cannot have a reverse reaction for an unbalanced forward reaction"):
-        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'b')]), labelled_met_B: (1, [('a', 'b', 'c')])})
+    def test_biomass_set_atom_map(self, model, reaction_kwargs, metabolite_kwargs):
+        """Test set_atom_map for a biomass reaction: atom_map should match reaction_str coefficients and atoms=[None]."""
+        reaction = LabellingReaction(model.reactions.get_by_id('biomass'))
+        single_r_kwargs = {'biomass': reaction_kwargs['biomass']}
+        model.add_labelling_kwargs(single_r_kwargs, metabolite_kwargs)
+        expected_atom_map = { 'H': (-0.3, [None]), 'B': (-0.6, [None]), 'E': (-0.5, [None]), 'C': (-0.1, [None])}
+        expected_atom_map = {model.metabolites.get_by_id(met_id): kwargs for met_id, kwargs in expected_atom_map.items()}
+        for met_id, (stoich, atom_list) in expected_atom_map.items():
+            met = model.metabolites.get_by_id(met_id)
+            # Forward reaction
+            actual_stoich, actual_arr = reaction.atom_map[met]
+            assert stoich == actual_stoich
+            expected_arr = np.array(atom_list)
+            assert np.array_equal(expected_arr, actual_arr)
 
