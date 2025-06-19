@@ -395,23 +395,28 @@ class LabellingReaction(Reaction):
 
         map = {}
         for metabolite, (stoich, atoms) in atom_map.items():
+            if stoich == 0:
+                raise ValueError(f'0 stoichiometry for: {metabolite.id}')
+
             if not isinstance(metabolite, LabelledMetabolite):
                 raise ValueError(f'{self.id} atom_map contains non-LabelledMetabolite object: {metabolite.id}')
 
             if metabolite in self.model.metabolites:
                 model_met = self.model.metabolites.get_by_id(metabolite.id)
+            else:
+                raise ValueError(f'metabolite not in model: {metabolite.id}')
 
-            if (metabolite is not model_met) or (metabolite._model is not self._model):
+            if metabolite is not model_met:
                 raise ValueError(f'first use model.repair(), the references are messed up for: {metabolite.id}!')
 
             for met_met, stoich_met in list(self._metabolites.items()):
                 if metabolite.id == met_met.id:
                     if (stoich != stoich_met) or ((atoms[0] is not None) and (abs(stoich) != len(atoms))):
                         raise ValueError(
-                            f'{self.id}: for {metabolite.id} stoichiometry and atom mapping are inconsistent'
+                            f'for {metabolite.id} stoichiometry and atom mapping are inconsistent'
                         )
                     if metabolite is not met_met:
-                        raise ValueError('metabolite in atom_map is not equal to metabolite in self.metabolites')
+                        raise ValueError(f'first use model.repair(), the references are messed up for: {metabolite.id}!')
 
             for atom in atoms:
                 if (atom is not None) and (metabolite.elements['C'] != len(atom)):

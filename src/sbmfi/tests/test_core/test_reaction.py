@@ -206,12 +206,15 @@ class TestLabellingReactionCreation:
 
 class TestLabellingReactionAtomMapping:
     """Tests for atom mapping functionality in LabellingReaction within a model context"""
-    
+
     @pytest.fixture
-    def model(self, reaction_kwargs, metabolite_kwargs):
+    def cobra_model(self, reaction_kwargs, metabolite_kwargs):
         """Create a model with all reactions from reaction_kwargs"""
-        model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
-        return LabellingModel(LinAlg('numpy'), model)
+        return model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
+
+    @pytest.fixture
+    def model(self, cobra_model):
+        return LabellingModel(LinAlg('numpy'), cobra_model)
 
     @pytest.mark.parametrize("r_id, pseudo, expected_atom_map", [ 
         ("r1", False, 
@@ -288,4 +291,100 @@ class TestLabellingReactionAtomMapping:
                 actual_rev_stoich, actual_rev_arr = rev.atom_map[met]
                 assert -stoich == actual_rev_stoich
                 assert np.array_equal(expected_arr, actual_rev_arr)
+
+    def test_set_atom_map_errors_all_cases(self, model, cobra_model, reaction_kwargs, metabolite_kwargs):
+        """Test all error-raising conditions in LabellingReaction.set_atom_map."""
+
+        reaction = LabellingReaction(model.reactions.get_by_id('r1'))
+        other_model = LabellingModel(LinAlg('numpy'), cobra_model)
+        other_model.add_labelling_kwargs(
+            reaction_kwargs={'r1': reaction_kwargs['r1']}, metabolite_kwargs=metabolite_kwargs
+        )
+        other_reaction = other_model.reactions.get_by_id('r1')
+
+        with pytest.raises(ValueError, match="atom_map contains non-LabelledMetabolite object"):
+            reaction.set_atom_map({Metabolite('x'): (None, None)})
+
+        with pytest.raises(ValueError, match="metabolite not in model: x"):
+            reaction.set_atom_map({LabelledMetabolite(Metabolite('x')): (None, None)})
+
+        with pytest.raises(ValueError, match="first use model.repair.*references are messed up"):
+            reaction.set_atom_map(other_reaction.atom_map)
+
+        atom_map = {
+            model.metabolites.get_by_id('A'): (0, np.array([['a', 'b']])),
+            model.metabolites.get_by_id('P'): (1, np.array([['a', 'b']])),
+        }
+        with pytest.raises(ValueError, match="0 stoichiometry for: A"):
+            reaction.set_atom_map(atom_map)
+
+        atom_map = {
+            model.metabolites.get_by_id('A'): (2, np.array([['a', 'b']])),
+            model.metabolites.get_by_id('P'): (1, np.array([['a', 'b']])),
+        }
+        with pytest.raises(ValueError, match="for A stoichiometry and atom mapping are inconsistent"):
+            reaction.set_atom_map(atom_map)
+
+        atom_map = {
+            model.metabolites.get_by_id('A'): (-1, np.array([[],[]])),
+            model.metabolites.get_by_id('P'): (1, np.array([['a', 'b']])),
+        }
+        with pytest.raises(ValueError, match="for A stoichiometry and atom mapping are inconsistent"):
+            reaction.set_atom_map(atom_map)
+
+        atom_map = {
+            model.metabolites.get_by_id('A'): (-1, np.array([['a']])),
+            model.metabolites.get_by_id('P'): (1, np.array([['a', 'b']])),
+        }
+        with pytest.raises(ValueError, match="references are messed up for: A"):
+            reaction.set_atom_map(atom_map)
+
+        reaction._metabolites = {met: stoich_atoms[0] for met, stoich_atoms in atom_map.items()}
+        with pytest.raises(ValueError, match="for A different number of carbons in formula: C2H4O2, than atoms in atom mapping: C1"):
+            reaction.set_atom_map(atom_map)
+
+        atom_map = {
+            model.metabolites.get_by_id('A'): (-1, np.array([['a', 'b']])),
+            model.metabolites.get_by_id('P'): (1, np.array([['a', 'c']])),
+        }
+        with pytest.raises(ValueError, match="product atoms do not occur in substrate r1"):
+            reaction.set_atom_map(atom_map)
+
+        atom_map = {
+            model.metabolites.get_by_id('A'): (-1, np.array([['a', 'a']])),
+            model.metabolites.get_by_id('P'): (1, np.array([['a', 'b']])),
+        }
+        with pytest.raises(ValueError, match="non-unique atom mapping r1"):
+            reaction.set_atom_map(atom_map)
+
+
+
+
+
+        # 3. Stoichiometry and atom mapping inconsistent (stoich != model stoich)
+        # with pytest.raises(ValueError, match="stoichiometry and atom mapping are inconsistent"):
+        #     labelled_rxn.set_atom_map({labelled_met: (-2, [('a', 'b')]), labelled_met_B: (1, [('a', 'b')])})
+        #
+        # # 4. Metabolite object identity mismatch (same id, different object)
+        # # (already covered by #2, but test for the specific error)
+        # # To trigger the 'metabolite in atom_map is not equal to metabolite in self.metabolites'
+        # # we need to pass the correct id but a different object
+        # met_same_id = LabelledMetabolite(Metabolite('A', formula='C2H4O2'), formula='C2H4O2')
+        # # Patch model reference to avoid the previous error
+        # met_same_id._model = model
+        # with pytest.raises(ValueError, match="metabolite in atom_map is not equal to metabolite in self.metabolites"):
+        #     labelled_rxn.set_atom_map({met_same_id: (-1, [('a', 'b')]), labelled_met_B: (1, [('a', 'b')])})
+        # # 5. Atom mapping with different number of carbons than formula
+        # with pytest.raises(ValueError, match="different number of carbons in.*than atoms in atom mapping"):
+        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'b', 'c')]), labelled_met_B: (1, [('a', 'b')])})
+        # # 6. Non-unique atom mappings (duplicate atom labels in substrates)
+        # # e.g. both reactant atoms are 'a'
+        # with pytest.raises(ValueError, match="non-unique atom mapping"):
+        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'a')]), labelled_met_B: (1, [('a', 'a')])})
+        # # 7. Product atoms not present in substrates
+        # with pytest.raises(ValueError, match="product atoms do not occur in substrate"):
+        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'b')]), labelled_met_B: (1, [('a', 'c')])})
+        # # 8. Unbalanced forward/reverse reactions (different number of atoms in products vs substrates)
+        # with pytest.raises(ValueError, match="cannot have a reverse reaction for an unbalanced forward reaction"):
+        #     labelled_rxn.set_atom_map({labelled_met: (-1, [('a', 'b')]), labelled_met_B: (1, [('a', 'b', 'c')])})
 
