@@ -41,75 +41,55 @@ def reaction_kwargs():
     return {
         # Original reactions
         'r1': {
-            'upper_bound': 100.0,
             'atom_map_str': 'A/ab --> P/ab'
         },
         'r2': {
-            'upper_bound': 100.0,
             'atom_map_str': 'A/ab + B/cd --> Q/acdb'
         },
         'r3': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'Q/acdb --> R/cd + S/ba'
+            'atom_map_str': 'A/ab + A/cd --> Q/acdb'
         },
         'r4': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/ab + B/cd --> T/ac + U/db'
+            'atom_map_str': 'Q/acdb --> R/cd + S/ba'
         },
         'r5': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/ab + A/cd --> T/ac + U/db'
+            'atom_map_str': 'Q/acdb --> R/cd + R/ba'
         },
+        'r6': {
+            'atom_map_str': 'A/ab + B/cd --> T/ac + U/db'
+        },
+
         
         # Symmetric reactions
         'sr1': {
-            'upper_bound': 100.0,
             'atom_map_str': 'A/ab --> SP/ab'
         },
-        'ssr1': {
-            'upper_bound': 100.0,  # this is to test _rev_reaction is symmetric and that forward reaction is same as 'r1'
-            'atom_map_str': 'SA/ab --> P/ab'
-        },
-        'sr2': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/ab + B/cd --> SQ/acdb'
+        'sr2': { # this is to test _rev_reaction is symmetric and that forward reaction is same as 'r1'
+            'atom_map_str': 'SA/ab <=> P/ab'
         },
         'sr3': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'Q/acdb --> SR/cd + SS/ba'
+            'atom_map_str': 'A/ab + B/cd --> SQ/acdb'
         },
         'sr4': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/ab + B/cd --> ST/ac + SU/db'
+            'atom_map_str': 'Q/acdb --> SR/cd + S/ba'
         },
         'sr5': {
-            'upper_bound': 100.0,
-            'atom_map_str': 'A/ab + A/cd --> ST/ac + SU/db'
+            'atom_map_str': 'Q/acdb --> SR/cd + SS/ba'
         },
-        
+        'sr6': {
+            'atom_map_str': 'Q/acdb --> SR/cd + SR/ba'
+        },
+
         # Edge case reactions
-        'er1': {
-            'upper_bound': 100.0,  # should error due to unbalanced number of carbons
+        'er1': { # should error due to unbalanced number of carbons
             'atom_map_str': 'E1/a --> E2/abcdef'  # Single to multiple carbons
         },
-        'er2': {
-            'upper_bound': 100.0, # should error due to unbalanced number of carbons
+        'er2': { # should error due to unbalanced number of carbons
             'atom_map_str': 'E2/abcdef --> E1/a + E1/b'  # Multiple to single carbons
         },
         
-        # Pseudo reactions
+        # Pseudo reaction
         'pr1': {
-            'upper_bound': 100.0,
-            'pseudo': True,
-            'atom_map_str': 'A/ab + B/cd --> L/abcd'  # Simple combination
-        },
-        'pr2': {
-            'upper_bound': 100.0,
-            'pseudo': True,
-            'atom_map_str': 'A/ab + B/cd + A/ef + B/gh --> L/abcd + M/fg'  # Complex combination
-        },
-        'pr3': {
-            'upper_bound': 100.0,
             'pseudo': True,
             'atom_map_str': 'A/ab + B/cd + P/fg --> L/acfd'  # unbalanced carbons, should not error
         }
@@ -155,30 +135,27 @@ class TestLabellingReactionCreation:
         return LabellingReaction(pseudo_reaction, pseudo=True)
 
     @pytest.mark.parametrize("reaction,expected", [
-        ("basic_reaction", {
-            "id": "test_rxn",
-            "num_metabolites": 2,
-            "coefficients": [-1, 1],
-            "is_labelled": False,
-            "is_pseudo": False
-        }),
         ("basic_labelled_reaction", {
             "id": "test_rxn",
             "num_metabolites": 2,
             "coefficients": [-1, 1],
             "is_labelled": True,
-            "is_pseudo": False
+            "is_pseudo": False,
+            "bounds": (0.0, 1000.0),  # default cobra bounds
+            "rho_bounds": (0.0, 0.0),
         }),
         ("pseudo_labelled_reaction", {
             "id": "pseudo_rxn",
             "num_metabolites": 3,
             "coefficients": [-1, -1, 1],
             "is_labelled": True,
-            "is_pseudo": True
+            "is_pseudo": True,
+            "bounds": (0.0, 0.0),
+            "rho_bounds": (0.0, 0.0),
         })
     ])
     def test_reaction_creation(self, request, reaction, expected):
-        """Test creation of different types of reactions"""
+        """Test creation of different types of reactions, including bounds and rho_bounds"""
         # Get the reaction fixture by name
         rxn = request.getfixturevalue(reaction)
         
@@ -196,6 +173,11 @@ class TestLabellingReactionCreation:
         if expected["is_labelled"]:
             assert isinstance(rxn, LabellingReaction)
             assert rxn.pseudo == expected["is_pseudo"]
+        
+        # Test bounds
+        assert rxn.bounds == expected["bounds"]
+        # Test rho_bounds
+        assert (rxn.rho_min, rxn.rho_max) == expected["rho_bounds"]
 
     def test_invalid_reaction_creation(self):
         """Test that creating a LabellingReaction from another LabellingReaction raises error"""
@@ -203,14 +185,6 @@ class TestLabellingReactionCreation:
         labelled_rxn = LabellingReaction(rxn)
         with pytest.raises(NotImplementedError):
             LabellingReaction(labelled_rxn)
-
-    def test_reaction_bounds(self, basic_labelled_reaction):
-        """Test that reaction bounds are properly set and accessed"""
-        basic_labelled_reaction.lower_bound = -10.0
-        basic_labelled_reaction.upper_bound = 20.0
-        assert basic_labelled_reaction.lower_bound == -10.0
-        assert basic_labelled_reaction.upper_bound == 20.0
-        assert basic_labelled_reaction.bounds == (-10.0, 20.0)
 
     def test_reaction_metabolite_manipulation(self):
         """Test that metabolite manipulation after creation is not allowed"""
@@ -226,6 +200,7 @@ class TestLabellingReactionCreation:
         # Attempting to subtract metabolites should raise NotImplementedError
         with pytest.raises(NotImplementedError):
             labelled_rxn.subtract_metabolites({met: 1})
+
 
 class TestLabellingReactionAtomMapping:
     """Tests for atom mapping functionality in LabellingReaction within a model context"""

@@ -46,7 +46,9 @@ class LabellingReaction(Reaction):
         self._rho_max = 0.0
         self._dgibbsr  = 0.0  # the currently set dGr
 
-        if not self._pseudo:
+        if self._pseudo:
+            self.bounds = (0.0, 0.0)
+        else:
             # this default selection is important when initializing with a id_or_reaction=Reaction
             self.rho_max = rho_max
             self.rho_min = rho_min
