@@ -21,7 +21,7 @@ dist/
 # Jupyter notebook checkpoints in subfolders
 arxiv_polytope/.ipynb_checkpoints/
 arxiv_sbmfi/.ipynb_checkpoints/
-doc_notebooks/.ipynb_checkpoints/
+docs/notebooks/.ipynb_checkpoints/
 
 # Large data/model files
 *.pt
