@@ -9,7 +9,7 @@ from sbmfi.core.metabolite import LabelledMetabolite
 import pandas as pd
 import functools
 import traceback
-import line_profiler
+# import line_profiler
 from typing import Dict
 # poetry add git+https://github.com/GeomScale/dingo.git
 # poetry install git+https://github.com/GeomScale/dingo.git
@@ -50,14 +50,14 @@ def make_multidex(index_dict: Dict[str, pd.Index], name0='labelling_id', name1=N
         , names=[name0, name1])
 
 
-def profile(profiler: line_profiler.LineProfiler):
-    def outer(func):  # profiler.print_stats()
-        def inner(*args, **kwargs):
-            profiler.add_function(func)
-            profiler.enable_by_count()
-            return func(*args, **kwargs)
-        return inner
-    return outer
+# def profile(profiler: line_profiler.LineProfiler):
+#     def outer(func):  # profiler.print_stats()
+#         def inner(*args, **kwargs):
+#             profiler.add_function(func)
+#             profiler.enable_by_count()
+#             return func(*args, **kwargs)
+#         return inner
+#     return outer
 
 
 def stacktrace(func):
