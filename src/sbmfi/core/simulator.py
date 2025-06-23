@@ -21,7 +21,6 @@ from sbmfi.core.coordinater import make_theta_polytope
 from sbmfi.core.util import (
     hdf_opener_and_closer,
     make_multidex,
-    # profile
 )
 
 
