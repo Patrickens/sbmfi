@@ -1044,7 +1044,6 @@ class EMU_Model(LabellingModel):
             if len(self._yemus) > 0:
                 self._initialize_Y()
         else:
-            self._labelling_id = labelling_id
             self._substrate_labelling = settings['_substrate_labelling']
             Y = settings.get('_Y', None)
             if Y is None:
@@ -1053,6 +1052,7 @@ class EMU_Model(LabellingModel):
                 Y = settings.get('_Y', None)
             if (len(Y) == 0):
                 raise ValueError
+            self._labelling_id = labelling_id
             self._Y = Y
             for weight, yek in Y.items():
                 yemus = self._yemus[weight]

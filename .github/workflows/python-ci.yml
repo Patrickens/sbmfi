@@ -28,3 +28,31 @@ jobs:
     - name: Run tests with coverage
       run: |
         pytest --cov=src/sbmfi --cov-report=term-missing 
+
+  docs:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Sphinx and MyST dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install sphinx myst-parser
+          pip install .
+
+      - name: Build Sphinx docs
+        run: |
+          sphinx-build -b html docs docs/_build/html
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs/_build/html
+        continue-on-error: true 

@@ -12,7 +12,7 @@ from sbmfi.core.observation import (
 from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
 from sbmfi.settings import MODEL_DIR, SIM_DIR
-from sbmfi.lcmsanalysis.util import _strip_bigg_rex
+from sbmfi.core.util import _strip_bigg_rex
 import sys, os
 import cobra
 from cobra.io import read_sbml_model

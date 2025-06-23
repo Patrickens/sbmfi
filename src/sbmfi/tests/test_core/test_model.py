@@ -303,3 +303,142 @@ class TestModelBuilder:
         biomass_id, biomass_coeff = process_biomass_reaction(reaction_kwargs)
         assert biomass_id == 'biomass'
         assert biomass_coeff == {}
+
+
+class TestLabellingModelSubstrateLabelling:
+    @pytest.fixture
+    def model(self, basic_reaction_kwargs, basic_metabolite_kwargs):
+        cobra_model = model_builder_from_dict(basic_reaction_kwargs, basic_metabolite_kwargs)
+        model = LabellingModel(LinAlg('numpy'), cobra_model)
+        # Add labelling info for all reactions except a_in (exchange)
+        reaction_kwargs = {rid: kwargs for rid, kwargs in basic_reaction_kwargs.items() if rid != 'a_in'}
+        model.add_labelling_kwargs(reaction_kwargs, basic_metabolite_kwargs)
+        return model
+
+    @pytest.fixture
+    def valid_substrate_labelling(self):
+        # A/00 and A/11 for metabolite A (2 carbons)
+        return pd.Series({'A/00': 0.5, 'A/11': 0.5}, name='test_labelling')
+
+    def test_set_and_get_substrate_labelling(self, model, valid_substrate_labelling):
+        model.set_substrate_labelling(valid_substrate_labelling)
+        # Check property returns the same values (rounded)
+        out = model.substrate_labelling
+        assert set(out.index) == set(valid_substrate_labelling.index)
+        np.testing.assert_allclose(sorted(out.values), sorted(valid_substrate_labelling.values), atol=1e-4)
+        # Check substrate_metabolites property
+        mets = model.substrate_metabolites
+        assert len(mets) == 1
+        assert mets[0].id == 'A'
+
+    def test_set_same_labelling_twice_idempotent(self, model, valid_substrate_labelling):
+        model.set_substrate_labelling(valid_substrate_labelling)
+        # Should not error or change on second call
+        model.set_substrate_labelling(valid_substrate_labelling)
+        out = model.substrate_labelling
+        assert set(out.index) == set(valid_substrate_labelling.index)
+
+    @pytest.mark.parametrize("labelling,errmsg", [
+        (pd.Series({'A/00': -0.1, 'A/11': 1.1}, name='test_labelling'),
+         'Negative or over 1 value in substrate labelling'),
+        (pd.Series({'A/00': 0.3, 'A/11': 0.3}, name='test_labelling'),
+         r'substrate labeling fractions of metabolite A do not sum up to 1.0'),
+    ])
+    def test_set_substrate_labelling_value_errors(self, model, labelling, errmsg):
+        with pytest.raises(ValueError, match=errmsg):
+            model.set_substrate_labelling(labelling)
+
+    def test_illegally_reversible_substrate_reaction(self, model, valid_substrate_labelling):
+        # Make the substrate reaction reversible (rho_max != 0.0)
+        a_in = model.reactions.get_by_id('a_in')
+        # Patch to LabellingReaction and set rho_max
+        model.reactions._replace_on_id(LabellingReaction(a_in, rho_max=1.0))
+        with pytest.raises(ValueError, match=r'substrate reaction is illegaly reversible'):
+            model.set_substrate_labelling(valid_substrate_labelling)
+
+    def test_substrate_reaction_zero_bounds(self, model, valid_substrate_labelling):
+        # Set both bounds to zero
+        a_in = model.reactions.get_by_id('a_in')
+        model.reactions._replace_on_id(LabellingReaction(a_in, rho_max=0.0, lower_bound=0.0, upper_bound=0.0))
+        with pytest.raises(ValueError, match=r'substrate reaction a_in for metabolite A has \(0, 0\) bounds'):
+            model.set_substrate_labelling(valid_substrate_labelling)
+
+    def test_no_substrate_reaction(self, model, valid_substrate_labelling):
+        # Remove all reactions from A
+        met = model.metabolites.get_by_id('A')
+        met._reaction.clear()
+        with pytest.raises(ValueError, match=r'metabolite A has no substrate reactions'):
+            model.set_substrate_labelling(valid_substrate_labelling)
+
+
+class TestEMUModelSubstrateLabelling:
+    @pytest.fixture
+    def emu_model(self, basic_reaction_kwargs, basic_metabolite_kwargs):
+        cobra_model = model_builder_from_dict(basic_reaction_kwargs, basic_metabolite_kwargs)
+        model = EMU_Model(LinAlg('numpy'), cobra_model)
+        reaction_kwargs = {rid: kwargs for rid, kwargs in basic_reaction_kwargs.items() if rid != 'a_in'}
+        model.add_labelling_kwargs(reaction_kwargs, basic_metabolite_kwargs)
+        # Minimal setup for EMU state
+        model._xemus = {2: []}
+        model._yemus = {2: []}
+        model._emu_indices = {}
+        model._A_tot = {2: np.zeros((1, 0, 0))}
+        model._B_tot = {2: np.zeros((1, 0, 0))}
+        model._X = {2: np.zeros((1, 0, 3))}
+        model._Y = {2: np.zeros((1, 0, 3))}
+        model._dXdv = {2: np.zeros((1, 0, 3))}
+        model._dYdv = {2: np.zeros((1, 0, 3))}
+        return model
+
+    @pytest.fixture
+    def valid_substrate_labelling(self):
+        return pd.Series({'A/00': 0.5, 'A/11': 0.5}, name='emu_labelling')
+
+    def test_set_and_get_substrate_labelling(self, emu_model, valid_substrate_labelling):
+        emu_model.set_substrate_labelling(valid_substrate_labelling)
+        out = emu_model.substrate_labelling
+        assert set(out.index) == set(valid_substrate_labelling.index)
+        np.testing.assert_allclose(sorted(out.values), sorted(valid_substrate_labelling.values), atol=1e-4)
+
+    def test_set_same_labelling_twice_idempotent(self, emu_model, valid_substrate_labelling):
+        emu_model.set_substrate_labelling(valid_substrate_labelling)
+        # Should use cache, not error
+        emu_model.set_substrate_labelling(valid_substrate_labelling)
+        out = emu_model.substrate_labelling
+        assert set(out.index) == set(valid_substrate_labelling.index)
+
+    @pytest.mark.parametrize("labelling,errmsg", [
+        (pd.Series({'A/00': -0.1, 'A/11': 1.1}, name='emu_labelling'),
+         'Negative or over 1 value in substrate labelling'),
+        (pd.Series({'A/00': 0.3, 'A/11': 0.3}, name='emu_labelling'),
+         r'substrate labeling fractions of metabolite A do not sum up to 1.0'),
+    ])
+    def test_set_substrate_labelling_value_errors(self, emu_model, labelling, errmsg):
+        with pytest.raises(ValueError, match=errmsg):
+            emu_model.set_substrate_labelling(labelling)
+
+    def test_illegally_reversible_substrate_reaction(self, emu_model, valid_substrate_labelling):
+        a_in = emu_model.reactions.get_by_id('a_in')
+        emu_model.reactions._replace_on_id(EMU_Reaction(a_in, rho_max=1.0))
+        with pytest.raises(ValueError, match=r'substrate reaction is illegaly reversible'):
+            emu_model.set_substrate_labelling(valid_substrate_labelling)
+
+    def test_substrate_reaction_zero_bounds(self, emu_model, valid_substrate_labelling):
+        a_in = emu_model.reactions.get_by_id('a_in')
+        emu_model.reactions._replace_on_id(EMU_Reaction(a_in, rho_max=0.0, lower_bound=0.0, upper_bound=0.0))
+        with pytest.raises(ValueError, match=r'substrate reaction a_in for metabolite A has \(0, 0\) bounds'):
+            emu_model.set_substrate_labelling(valid_substrate_labelling)
+
+    def test_no_substrate_reaction(self, emu_model, valid_substrate_labelling):
+        met = emu_model.metabolites.get_by_id('A')
+        met._reaction.clear()
+        with pytest.raises(ValueError, match=r'metabolite A has no substrate reactions'):
+            emu_model.set_substrate_labelling(valid_substrate_labelling)
+
+    def test_empty_Y_cache_raises(self, emu_model, valid_substrate_labelling):
+        # Simulate a cache hit but with empty _Y
+        emu_model._labelling_repo['emu_labelling'] = {'_substrate_labelling': {}}
+        emu_model._Y = {}
+        emu_model._yemus = {2: []}
+        with pytest.raises(ValueError):
+            emu_model.set_substrate_labelling(valid_substrate_labelling)

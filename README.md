@@ -12,6 +12,6 @@ SBMFI is a Python package for advanced simulation-based metabolic flux inference
 
 SBMFI is designed for researchers in systems biology, metabolic engineering, and related fields who need to analyze metabolic fluxes using isotope labeling data and advanced computational methods.
 
-
 ## License
 [MIT](https://choosealicense.com/licenses/mit/)
+

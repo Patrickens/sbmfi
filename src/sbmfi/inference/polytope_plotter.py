@@ -182,12 +182,3 @@ def plot_dataframes(
                   loc=legend_loc)
 
     return fig, ax
-
-
-def barycentric_to_cartesian(samples):
-    """Convert barycentric coordinates to Cartesian coordinates."""
-    A = torch.tensor([0.0, 0.0])
-    B = torch.tensor([1.0, 0.0])
-    C = torch.tensor([0.5, 0.8660254])  # approx sqrt(3)/2
-    coords = samples[:, 0].unsqueeze(1) * A + samples[:, 1].unsqueeze(1) * B + samples[:, 2].unsqueeze(1) * C
-    return coords

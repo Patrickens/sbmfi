@@ -15,10 +15,19 @@ release = '0.1.0'
 
 # -- General configuration ---------------------------------------------------
 extensions = [
+    "myst_nb",
+    'sphinx.ext.mathjax',
     'sphinx.ext.autodoc',      # Automatically document your code.
     'sphinx.ext.napoleon',     # Support for Google and NumPy style docstrings.
     'sphinx.ext.autosummary',  # Generate summary tables.
     'sphinx.ext.viewcode',     # Add links to highlighted source code.
+    'sphinxcontrib.bibtex',    # Support for bibliography and footnotes.
+]
+
+myst_enable_extensions = [
+    "dollarmath",   # for $inline$ and $$display$$ math
+    "amsmath",      # for amsmath environments like \begin{align}…\end{align}
+    "colon_fence",
 ]
 
 # Generate autosummary pages automatically.
@@ -29,4 +38,8 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 # -- Options for HTML output -------------------------------------------------
 html_theme = 'alabaster'  # You can change this to a theme of your choice.
-html_static_path = ['_static']
+
+# -- Bibliography configuration ----------------------------------------------
+bibtex_bibfiles = ['notebooks/references.bib']
+
+master_doc = 'index'
