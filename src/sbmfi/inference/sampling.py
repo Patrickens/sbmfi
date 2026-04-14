@@ -10,6 +10,7 @@ from sbmfi.config import SBMFIConfig
 from sbmfi.core.simulfuncs import init_observer
 from sbmfi.core.util import get_tensor, tensormul_T, min_pos_max_neg, sample_unit_hyper_sphere_ball
 from sbmfi.core.distributions import sample_bounded, bounded_log_prob
+from sbmfi.core.polytopia import MarkovTransition
 import math
 import arviz as az
 import numpy as np
@@ -503,304 +504,31 @@ class _BaseBayes(_BaseSimulator):
         return log_probs
 
 
-class _BasePotential():
-    def __init__(self, model: _BaseBayes, return_data: bool=True):
-        self._m = model
-        self._device = model._config.device
-        self._return_data = return_data
+class _PosteriorDensity:
+    """Wraps _BaseBayes.log_prob as a target_density for MarkovTransition.
 
-    def _simulate_data(self, theta):
-        pass
+    Holds the current exchange-flux state so that MarkovTransition (which
+    only moves in the K-dimensional net-flux space) still evaluates the full
+    posterior including exchange fluxes.
+    """
+    def __init__(self, mcmc: '_BaseBayes'):
+        self._mcmc = mcmc
+        self.x_xch = None  # (n_chains, nx), kept in sync with the chain state
 
-    def __call__(self, theta):
-        raise NotImplementedError
-
-class Exact(_BasePotential):
-    def __init__(self, model: _BaseBayes, return_data=True):
-        for k, (labelling_id, obmod) in enumerate(model._obmods.items()):
-            model.set_input_labelling(model._substrate_df.loc[labelling_id])  # NB check whether valid susbtrate_df
-            if not hasattr(obmod, 'log_lik'):
-                raise ValueError(f'model {obmod} for labelling {labelling_id} does not have a log_lik function,'
-                                 f'exact inference not possible')
-        if (model._bom is not None) and not hasattr(model._bom, 'log_lik'):
-            raise ValueError('BoundaryObservationModel does not have log_lik method, exact inference not possible')
-        super(self, _BasePotential).__init__(model, return_data)
-
-    def log_lik(self, theta):
-        vape = theta.shape
-        if len(vape) > 2:
-            theta = theta.view(math.prod(vape[:-1]), vape[-1])
-        labelling_fluxes = self._m._fcm.map_theta_2_fluxes(theta)
-        mu_o = self._m.simulate(labelling_fluxes, n_obs=0)
-
-        n_f = self._m._model._fluxes.shape[0]
-        n_meas = self._m._x_meas.shape[0]
-        n_bom = 1 if self._m._bomsize > 0 else 0
-
-        log_lik = torch.zeros(
-            (n_f, n_meas, len(self._m._obmods) + n_bom), dtype=self._m._model._config.dtype, device=self._m._model._config.device
-        )
-
-        # FUCKING AROOND
-        # difff = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
-        # truedist = ((theta - self._true_theta) ** 2).mean(1)
-
-        if self._m._bomsize > 0:
-            bo_meas = self._m._x_meas[:, -self._m._bomsize:]
-            mu_bo = mu_o[:, 0, -self._m._bomsize:]
-            log_lik[..., -1] = self._m._bom.log_lik(bo_meas=bo_meas, mu_bo=mu_bo)
-
-            # FUCKING AROOND
-            # mu_bo = self._la.atleast_2d(mu_bo)  # shape = batch x n_bo
-            # bo_meas = self._la.atleast_2d(bo_meas)  # shape = n_obs x n_bo
-            # diff_bo = mu_bo[:, None, :] - bo_meas[:, None, :]  # shape = batch x n_obs x n_bo
-            # difff[..., -1] = (diff_bo ** 2).sum(-1)
-
-        for i, (labelling_id, obmod) in enumerate(self._m._obmods.items()):
-            j, k = self._m._obsize[labelling_id]
-            x_meas_o = self._m._x_meas[..., j:k]
-            mu_o_i = mu_o[:, 0, j:k]
-            ll = obmod.log_lik(x_meas_o, mu_o_i)
-            log_lik[..., i] = ll
-
-            # FUCKING AROOND
-            # x_meas = self._la.atleast_2d(x_meas_o)  # shape = n_meas x n_mdv
-            # mu_oo = self._la.atleast_2d(mu_o_i)  # shape = batch x n_d
-            # diff = mu_oo[:, None, :] - x_meas[:, None, :]  # shape = n_obs x batch x n_d
-            # difff[..., i] = (diff ** 2).sum(-1)
-
-        if sum:  # summing over observation models and over
-            log_lik = log_lik.sum((1, 2))
-
-        if self._return_data:
-            return log_lik, mu_o
-        return log_lik
-
-    def log_prob(self, theta):
-        vape = theta.shape
-        if len(vape) > 2:
-            theta = theta.view(math.prod(vape[:-1]), vape[-1])
-
-        n_f = theta.shape[0]
-        k = len(self._m._obmods) + (1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
-        n_meas = self._m._x_meas.shape[0]
-        log_prob = torch.zeros((n_f, n_meas, k), dtype=self._m._model._config.dtype, device=self._m._model._config.device)
-
-        # if evaluate_prior:
-        #     # NB not necessary for uniform prior
-        #     # NB this also checks support! the hr is guaranteed to sample within the support
-        #     # NB since priors are currently torch objects, this will not work with numpy backend
-        #     #   which has proven the faster option for the hr-sampler
-        #     log_prob[..., -1] = self._prior.log_prob(theta)
-
-        log_lik = self.log_lik(theta, False)
-        if self._return_data:
-            log_lik, mu_o = log_lik
-
-        log_prob[..., :-1] = log_lik
-        log_prob = log_prob.sum((1, 2)).view(vape[:-1])
-        if self._return_data:
-            return log_prob, mu_o.view(*vape[:-1], len(self._did))
-        return log_prob
-
-    def __call__(self, theta):
-        pass
-
-class DistanceKernel(_BasePotential):
-    def __call__(
-            self,
-            theta,
-            epsilon,
-            n_obs=5,
-            metric='rmse',
-            return_data=False,
-            **kwargs
-    ):
-        if self._x_meas is None:
-            raise ValueError('set an observation first')
-        # NB we do not evaluate the log_prob of the measured boundary fluxes, since it is a constant for _x_meas
-
-        vape = theta.shape
-        if len(vape) > 2:
-            theta = theta.view(math.prod(vape[:-1]), vape[-1])
-        labelling_fluxes = self._fcm.map_theta_2_fluxes(theta)
-        data = self.__call__(labelling_fluxes, n_obs=n_obs, **kwargs)
-
-        time = None
-        if isinstance(data, tuple):
-            data, time = data
-
-        data = data.unsqueeze(0)  # artificially add a chains dimension!
-        if metric == 'rmse':
-            fobmod = next(iter(self._obmods.values()))
-            distances = fobmod.rmse(data, self._x_meas).squeeze(0)
+    def log_prob(self, x_net):
+        # x_net: (..., K) — (n_chains, K) or (n_cdf, n_chains, K)
+        if self._mcmc._nx > 0 and self.x_xch is not None:
+            xch = self.x_xch
+            for _ in range(x_net.ndim - 2):
+                xch = xch.unsqueeze(0)
+            xch = xch.expand(*x_net.shape[:-1], -1)
+            theta = torch.cat([x_net, xch], dim=-1)
         else:
-            # TODO think of other distance metrics
-            raise ValueError
-
-        n_obshape = max(1, n_obs)
-        distances = distances.view(vape[:-1])
-        if epsilon > -float('inf'):
-            distances[distances > epsilon] = float('nan')  # this indicates we reject samples with a large distance!
-        data = data.view(*vape[:-1], n_obshape, len(self._did))
-        if return_data:
-            distances = distances, data
-        if time is not None:
-            return distances, time
-        return distances
-
-class Arbitrary():
-    def __init__(
-            self,
-            density: torch.distributions.Distribution,
-    ):
-        self.density = density
-
-    def __call__(self, theta, x_meas, return_data=False):
-        if return_data:
-            raise NotImplementedError
-        return self.density.log_prob(theta, context=x_meas)
-
-
-
-class Proposal():
-    def __init__(self):
-        pass
-
-
-class PerturbParticle():
-    pass
-
-
-class Transition(object):
-    def __init__(
-            self,
-            n_cdf: int,
-    ):
-        pass  # transition kernel G
-
-    def barker(self):
-        pass
-
-    def peskun(self):
-        pass
+            theta = x_net
+        return self._mcmc.log_prob(theta)
 
 
 class MCMC(_BaseBayes):
-    SYMMETRIC_PROPOSALS = ['gauss', 'unif']
-    def accept_reject(self, i, post_probs, prop_probs=None, pre_sample_batch=5000, peskunize=True):
-        # based on: https://www.math.ntnu.no/preprint/statistics/2004/S4-2004.pdf
-        # other notation: https://ntnuopen.ntnu.no/ntnu-xmlui/bitstream/handle/11250/258340/348197_FULLTEXT01.pdf?sequence=2&isAllowed=y
-
-        if prop_probs is not None:
-            prop_probs = prop_probs.sum(1)  # sum transition probs over all proposals
-            if post_probs.shape != prop_probs.shape:
-                raise ValueError(f'post shape: {post_probs.shape}, proposal shape: {prop_probs.shape}')
-            n_cdf_1, n_chains = post_probs.shape
-            P_l = post_probs + prop_probs
-        else:
-            P_l = post_probs
-
-        if (n_cdf_1 == 2) and peskunize:
-            # this is the single proposal Metropolis-Hastings acceptance ratio!
-            ii = i % pre_sample_batch
-            if ii == 0:
-                if i == 0:
-                    self._accept_index = torch.zeros((n_chains, ), dtype=torch.int64, device=self._device)
-                self._rnd = torch.log(torch.rand((pre_sample_batch,), dtype=torch.float64, device=self._device))
-            self._accept_index[:] = 0
-            rnd = self._rnd[ii]
-            log_mh_ratio = P_l[1] - P_l[0]
-            self._accept_index[rnd <= log_mh_ratio] = 1
-            return self._accept_index
-
-        P_l -= P_l.max(0).values
-        P_l = torch.exp(P_l)
-        P_l = P_l / P_l.sum(0)
-        if not peskunize:
-            # this corresponds to Barkers acceptance probability, which is sub-optimal, thus longer ESS
-            return torch.multinomial(P_l.T, num_samples=1).T[0]
-
-        if i == 0:
-            self._didx = torch.arange(n_cdf_1, device=self._device)
-            self._where = torch.zeros(n_cdf_1, dtype=torch.float64, device=self._device)
-            self._ut = torch.zeros(n_cdf_1, dtype=torch.float64, device=self._device)
-
-            self._non_diag = torch.ones((n_cdf_1, n_cdf_1), dtype=torch.float64, device=self._device) - torch.eye(n_cdf_1, dtype=torch.float64, device=self._device)
-
-        P_kl = torch.tile(P_l, (n_cdf_1, 1, 1))
-        for chain_i in range(n_chains):
-            P_j = P_kl[..., chain_i]
-            for j in range(n_cdf_1):
-                diags = P_j[self._didx, self._didx]
-                diag_idxs = torch.where(diags > 0.0)[0]
-
-                if diag_idxs.shape[0] < 2:
-                    print('mah mann')
-                    break
-
-                self._ut[:] = float('inf')
-
-                wheres = []
-                wheres2 = []
-                for k in diag_idxs:
-                    self._where[:] = 1
-                    self._where[k] = 0
-                    numerator = 1 - self._where @ P_j[k]
-                    wheres.append(self._where.clone())
-
-                    self._where[:] = 0
-                    self._where[diag_idxs] = 1
-                    self._where[k] = 0
-                    denominor = self._where @ P_j[k]
-                    wheres2.append(self._where.clone())
-
-                    self._ut[k] = numerator / denominor
-                ut = self._ut.min()
-
-                print(torch.stack(wheres))
-                print(torch.stack(wheres2))
-
-                for k in diag_idxs:
-                    for l in diag_idxs:
-                        if k == l:
-                            continue
-                        P_j[k, l] *= ut
-
-                P_j[diag_idxs, diag_idxs] = (1 - self._non_diag @ P_j)[diag_idxs]
-                print(P_j)
-                # P_j[]
-
-                # non_diag = self._la.vecopy(self._non_diag)
-
-
-                # self._where[:] = 0
-                # num_select = self._didx != j
-                # self._where[num_select] = 1
-                # numerator = 1 - self._where @ P_j[j, :]
-                #
-                # self._where[:] = 0
-                # self._where[diag_idxs] = 1
-                # self._where[j] = 0
-                # denominor = self._where @ P_j[j, :]
-                #
-                # self._ut[j] = numerator / denominor
-
-            # ut = self._la.min(self._ut)
-            # P_j_1 = self._la.vecopy(P_j)
-            # for diag_k in diag_idxs:
-            #     for diag_l in diag_idxs:
-            #         if diag_l != diag_k:
-            #             P_j_1[diag_k, diag_l] = ut * P_j[diag_k, diag_l]
-            #     self._where[:] = 1
-            #     self._where[diag_k] = 0
-            #     P_j_1[diag_k, diag_k] = 1 - self._where @ P_j_1[diag_k]
-            #
-            # print(P_j_1)
-
-        raise NotImplementedError('we should finish this after handing in the thesis')
-
-    # @profile(profiler=profile2)
     def run(
             self,
             initial_points=None,
@@ -820,143 +548,100 @@ class MCMC(_BaseBayes):
             return_az=True,
             peskunize=True,
             pre_sample_batch=5000,
-            debug=True,
     ) -> az.InferenceData:
-        # TODO: this publication talks about this algo, but has a different acceptance procedure:
-        #  doi:10.1080/01621459.2000.10473908
-        #  doi:10.1007/BF02591694  Rinooy Kan article
+        if potentype != 'exact':
+            raise NotImplementedError('MCMC only supports potentype="exact"')
 
-        chord_std = get_tensor(values=np.array([chord_std]), config=self._model._config)
-        xch_std = get_tensor(values=np.array([xch_std]), config=self._model._config)
+        chord_std_t = get_tensor(values=np.array([chord_std]), config=self._model._config)
+        xch_std_t = get_tensor(values=np.array([xch_std]), config=self._model._config)
 
         batch_size = n_chains * n_cdf
         if self._model._config.batch_size != batch_size:
-            # this way the batch processing is corrected
             cfg = self._model._config
             self._model._config = SBMFIConfig(
-                device=cfg.device,
-                dtype=cfg.dtype,
-                batch_size=batch_size,
-                cobra_solver=cfg.cobra_solver,
-                cvxpy_solver=cfg.cvxpy_solver,
+                device=cfg.device, dtype=cfg.dtype, batch_size=batch_size,
+                cobra_solver=cfg.cobra_solver, cvxpy_solver=cfg.cvxpy_solver,
             )
             self._model.build_model(free_reaction_id=self._model._free_reaction_id)
 
-        chains = torch.zeros((n, n_chains, len(self.theta_id)), dtype=self._model._config.dtype, device=self._model._config.device)  # TODO this should be the number of dimensions in rounded coord system!
-        post_probs = torch.zeros((n, n_chains), dtype=self._model._config.dtype, device=self._model._config.device)
-        accept_rate = torch.zeros((n_chains,), dtype=torch.int64, device=self._model._config.device)
+        theta_dim = len(self.theta_id)
+        chains = torch.zeros((n, n_chains, theta_dim), dtype=self._model._config.dtype, device=self._device)
+        post_probs = torch.zeros((n, n_chains), dtype=self._model._config.dtype, device=self._device)
 
         if return_data:
-            sim_data = torch.zeros((n, n_chains, len(self.data_id)), dtype=self._model._config.dtype, device=self._model._config.device)
+            sim_data = torch.zeros((n, n_chains, len(self.data_id)), dtype=self._model._config.dtype, device=self._device)
 
         if initial_points is None:
-            y = self._prior.sample((max(6, n_chains), ))[:n_chains, :]  # this is necessary since rsample in the prior has 6 chains
+            y = self._prior.sample((max(6, n_chains),))[:n_chains]
         else:
             y = initial_points
 
-        y = torch.tile(y, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
+        y_net = y[:, :self._K]
+        y_xch = y[:, self._K:] if self._nx > 0 else None
 
-        self._set_potential(potentype, **dict(return_data=return_data, evaluate_prior=evaluate_prior, **potential_kwargs))
-        if (self._potentype == 'approx'):
-            # https://www.biorxiv.org/content/10.1101/106450v1.full.pdf
-            # TODO for approx, the MH acceptance is just the ratio between prior probabilities and proposal (which is symmetric, so falls out)
-            if n_chains > 1:
-                raise ValueError(
-                    'currently not possible to simulate multiple chains at once '
-                    'due to skipping distance under epsilon simulations'
-                )
-            raise NotImplementedError('this is complicated, since we need to weight samples by the prior somehow')
-
-        chord_ys = torch.zeros((1 + n_cdf, n_chains, len(self.true_theta)), dtype=self._model._config.dtype, device=self._model._config.device)
-        chord_post_probs = torch.zeros((1 + n_cdf, n_chains), dtype=self._model._config.dtype, device=self._model._config.device)
-        chord_prop_probs = torch.zeros((1 + n_cdf, 1 + n_cdf, n_chains), dtype=self._model._config.dtype, device=self._model._config.device)
-        pert_post_probs = self.potential(y)
-
-        if return_data:
-            chord_data = torch.zeros((1 + n_cdf, n_chains, len(self.data_id)), dtype=self._model._config.dtype, device=self._model._config.device)
-            pert_post_probs, data = pert_post_probs
-            chord_data[0] = data[:n_chains]
-
-        chord_post_probs[0] = pert_post_probs[:n_chains]  # ordering of the samples from the PDF does not matter for inverse sampling
-        chain_selector = torch.arange(n_chains, device=self._device)
-
-        y = y[: n_chains, :]
-        chord_ys[0] = y
+        posterior = _PosteriorDensity(self)
+        posterior.x_xch = y_xch
+        transition = MarkovTransition(
+            self._sampler, posterior, n_cdf=n_cdf,
+            proposal_id=chord_proposal, chord_std=chord_std_t.item(),
+            transition_id='peskun' if peskunize else 'barker',
+            return_log_prob_pi=True,
+        )
 
         n_tot = n_burn + n * thinning_factor
-        pre_sample_batch = min(pre_sample_batch, n_tot)
-        return_what = (n_cdf == 1) and (chord_proposal in self.SYMMETRIC_PROPOSALS)  # only useful for symmetrical proposals and n_cdf==1
-        # TODO I think for n_cdf and symmetrical proposals, we dont need to compute anything
-        perturb_kwargs = dict(
-            batch_shape=(pre_sample_batch, n_chains),
-            n_cdf=n_cdf,
-            chord_proposal=chord_proposal,
-            chord_std=chord_std,
-            xch_proposal=xch_proposal,
-            xch_std=xch_std,
-            return_what=return_what,
-        )
+        biatch = min(pre_sample_batch, n_tot)
         pbar = tqdm.tqdm(total=n_tot, ncols=100)
+
+        lp_current = posterior.log_prob(y_net)  # (n_chains,)
+
         i = 0
         try:
             while i < n_tot:
-                pert_ys = self.perturb_particles(y, i, **perturb_kwargs)
-                if return_what:
-                    pert_ys, pert_prop_probs = pert_ys
-                    # two lines below only hold for symmetric proposals, otherwise we need to compute exactly
-                    chord_prop_probs[0, 1] = pert_prop_probs
-                    chord_prop_probs[1, 0] = pert_prop_probs
+                if i % biatch == 0:
+                    sphere_samples = sample_unit_hyper_sphere_ball((biatch, n_chains, self._K))
+                    A_dist = tensormul_T(self._sampler._G, sphere_samples)
 
-                chord_ys[1:] = pert_ys
-                pert_post_probs = self.potential(pert_ys)
+                sphere_sample = sphere_samples[i % biatch]
+                ar = A_dist[i % biatch]
+                dist_h = self._sampler._h.T - tensormul_T(self._sampler._G, y_net)
+                dist_h[dist_h < 0.0] = 0.0
+                allpha = dist_h / ar
+                alpha_min, alpha_max = min_pos_max_neg(allpha, return_what=0)
 
-                if self.potentype == 'approx':
-                    raise NotImplementedError('reject ABC proposals if all are too distant!')
+                y_net, lp_current = transition(y_net, sphere_sample, alpha_min, alpha_max)
 
-                if return_data:
-                    pert_post_probs, data = pert_post_probs
-                    chord_data[1:] = data
-
-                chord_post_probs[1:] = pert_post_probs
-
-                if not return_what:
-                    chord_prop_probs = self.compute_proposal_prob(
-                        old_particles=chord_ys,
-                        new_particles=chord_ys,
-                        chord_proposal=chord_proposal,
-                        chord_std=chord_std,
-                        xch_proposal=xch_proposal,
-                        xch_std=xch_std,
-                        old_is_new=True,
+                if self._nx > 0:
+                    lo = self._fcm._rho_bounds[:, 0]
+                    hi = self._fcm._rho_bounds[:, 1]
+                    y_xch_prop = sample_bounded(
+                        shape=(n_chains,), lo=lo, hi=hi,
+                        mu=y_xch, which=xch_proposal, sigma=xch_std_t,
+                        return_log_prob=False,
                     )
-                accept_idx = self.accept_reject(i, chord_post_probs, chord_prop_probs, pre_sample_batch, peskunize)
-                accepted_probs = chord_post_probs[accept_idx, chain_selector]
-                chord_post_probs[0] = accepted_probs  # set the log-probs of the current sample
-                y = chord_ys[accept_idx, chain_selector]
-                chord_ys[0] = y  # set the log-probs of the current sample
-                if return_data:
-                    data = chord_data[accept_idx, chain_selector]
-                    chord_data[0] = data
+                    lp_prop = self.log_prob(torch.cat([y_net, y_xch_prop], dim=-1))
+                    accept = torch.log(torch.rand(n_chains, device=self._device, dtype=lp_current.dtype)) < (lp_prop - lp_current)
+                    y_xch = torch.where(accept.unsqueeze(-1), y_xch_prop, y_xch)
+                    lp_current = torch.where(accept, lp_prop, lp_current)
+                    posterior.x_xch = y_xch
 
                 j = i - n_burn
                 pbar.update(1)
-                if j > 0:
-                    if n_cdf > 1:
-                        accept_idx[accept_idx > 0] = 1
-                    accept_rate += accept_idx
-                    avg_rate = (accept_rate / j).mean()
-                    if j % 50 == 0:
-                        pbar.set_postfix(avg_acc=avg_rate.item())
+                if j > 0 and j % 50 == 0:
+                    avg_acc = (transition._axept.float() / transition._tot).mean()
+                    pbar.set_postfix(avg_acc=avg_acc.item())
 
-                if (j % thinning_factor == 0) and (j > -1):
+                if (j % thinning_factor == 0) and (j >= 0):
                     k = j // thinning_factor
-                    post_probs[k] = accepted_probs
+                    post_probs[k] = lp_current
+                    y = y_net if self._nx == 0 else torch.cat([y_net, y_xch], dim=-1)
                     chains[k] = y
                     if return_data:
-                        sim_data[k] = data
+                        labelling_fluxes = self._fcm.map_theta_2_fluxes(y)
+                        sim_data[k] = self.simulate(labelling_fluxes, n_obs=0)[:, 0, :]
+
                 i += 1
         except Exception as e:
-            if e is not KeyboardInterrupt:
+            if not isinstance(e, KeyboardInterrupt):
                 raise
         finally:
             pbar.close()
@@ -966,22 +651,21 @@ class MCMC(_BaseBayes):
 
             posterior_predictive = None
             if return_data:
-                posterior_predictive = {
-                    'data': sim_data.transpose(1, 0)
-                }
+                posterior_predictive = {'data': sim_data.transpose(1, 0)}
 
+            accept_frac = (transition._axept.float() / max(1, transition._tot)).detach().cpu().numpy()
             attrs = {
                 'potentype': potentype,
                 'evaluate_prior': str(evaluate_prior),
                 'potential_kwargs': [(k, v if not isinstance(v, bool) else str(v)) for k, v in potential_kwargs.items()],
                 'n_burn': n_burn,
-                'acceptance_rate': accept_rate.detach().cpu().numpy() / j,
+                'acceptance_rate': accept_frac,
                 'thinning_factor': thinning_factor,
                 'n_cdf': n_cdf,
                 'line_kernel': chord_proposal,
-                'line_variance': chord_std.detach().cpu().numpy(),
+                'line_variance': chord_std_t.detach().cpu().numpy(),
                 'xch_kernel': xch_proposal,
-                'xch_variance': xch_std.detach().cpu().numpy(),
+                'xch_variance': xch_std_t.detach().cpu().numpy(),
                 'running_time': pbar.format_dict['elapsed'],
                 'pbar_n': pbar.format_dict['n'],
                 'peskunize': int(peskunize),
@@ -990,22 +674,15 @@ class MCMC(_BaseBayes):
                 attrs['true_theta'] = self._true_theta.detach().cpu().numpy()
                 attrs['true_theta_id'] = self._true_theta_id
 
-            n_obs = potential_kwargs.get('n_obs', 0)
-            dims, coords = self._format_dims_coords(n_obs=n_obs if self.potentype == 'approx' else 0)
+            dims, coords = self._format_dims_coords(n_obs=0)
             return az.from_dict(
-                posterior={
-                    'theta': chains.transpose(1, 0)  # chains x draws x param
-                },
+                posterior={'theta': chains.transpose(1, 0)},
                 dims=dims,
                 coords=coords,
-                observed_data={
-                    'observed_data': self.measurements.values
-                },
-                sample_stats={
-                    'lp': post_probs.T  # chains x draws
-                },
+                observed_data={'observed_data': self.measurements.values},
+                sample_stats={'lp': post_probs.T},
                 posterior_predictive=posterior_predictive,
-                attrs=attrs
+                attrs=attrs,
             )
 
 

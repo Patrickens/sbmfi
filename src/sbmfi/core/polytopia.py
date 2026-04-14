@@ -11,7 +11,7 @@ from sympy import nsimplify, Matrix
 from sympy.core.numbers import One
 import cvxpy as cp
 import cdd
-from sbmfi.config import SBMFIConfig
+from sbmfi.config import SBMFIConfig, polyround_backend_from_cobra_solver
 import cdd.gmp
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
     _rev_reactions_rex, _xch_reactions_rex, get_tensor, tensormul_T, min_pos_max_neg, \
@@ -601,18 +601,28 @@ def svd_null_space(S: pd.DataFrame, tolerance=1e-10):
 
 def simplify_polytope(
         polytope: Polytope,
-        settings = PolyRoundSettings(),
+        settings=None,
         normalize = True
 ):
+    if settings is None:
+        config = SBMFIConfig.from_env()
+        settings = PolyRoundSettings(
+            backend=polyround_backend_from_cobra_solver(config.cobra_solver),
+        )
     return PolyRoundApi.simplify_polytope(polytope, settings, normalize)
 
 
 def transform_polytope_keep_transform(
     polytope: Polytope,
-    settings: PolyRoundSettings = PolyRoundSettings(),
+    settings: PolyRoundSettings = None,
     kernel_id ='svd',
 ) -> (Polytope, pd.DataFrame, pd.DataFrame, pd.Series):
     # PolyRoundApi.transform_polytope()
+    if settings is None:
+        config = SBMFIConfig.from_env()
+        settings = PolyRoundSettings(
+            backend=polyround_backend_from_cobra_solver(config.cobra_solver),
+        )
     if polytope.inequality_only:
         raise ValueError("Polytope already transformed (only contains inequality constraints)")
 
@@ -676,8 +686,13 @@ def transform_polytope_keep_transform(
 
 def round_polytope_keep_ellipsoid(
         polytope: Polytope,
-        settings: PolyRoundSettings = PolyRoundSettings()
+        settings: PolyRoundSettings = None
 ) -> (Polytope, pd.DataFrame, pd.DataFrame, pd.Series):
+    if settings is None:
+        config = SBMFIConfig.from_env()
+        settings = PolyRoundSettings(
+            backend=polyround_backend_from_cobra_solver(config.cobra_solver),
+        )
     polytope = polytope.copy()
     cols = polytope.A.columns
     bool = False
@@ -776,7 +791,13 @@ class PolytopeSamplingModel(object):
                 '~20 dimensions such as labelling polytopes due to the algorithm implementation'
             )
 
-        self._pr_settings = PolyRoundSettings(**{'verbose': pr_verbose, **kwargs})
+        self._config = SBMFIConfig.from_env() if config is None else config
+        polyround_kwargs = {
+            'backend': polyround_backend_from_cobra_solver(self._config.cobra_solver),
+            'verbose': pr_verbose,
+            **kwargs,
+        }
+        self._pr_settings = PolyRoundSettings(**polyround_kwargs)
         self._ker_id = kernel_id # if transform_type in ['svd', 'rref']
 
         normalize = kernel_id != 'rref'
@@ -800,7 +821,6 @@ class PolytopeSamplingModel(object):
         self._transformed_id = self._T_1.index
         self._reaction_id = polytope.A.columns.tolist()
 
-        self._config = SBMFIConfig.from_env() if config is None else config
         self._device = self._config.device
         self._G = F_round.A.values
         self._h = F_round.b.values[:, np.newaxis]
@@ -1180,7 +1200,7 @@ def sample_polytope(
             result['rounded'] = chains
 
         if return_what in ('fluxes', 'all'):
-            result['fluxes'] = model.map_rounded_2_fluxes(chains)
+            result['fluxes'] = model.map_rounded_2_fluxes(chains, jacobian=False)
     else:
         result['chains'] = chains
         if markov_transition is not None:

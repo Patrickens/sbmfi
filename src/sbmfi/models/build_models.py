@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import torch
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
-from sbmfi.config import SBMFIConfig
+from sbmfi.config import SBMFIConfig, polyround_backend_from_cobra_solver
 from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservationModel, ClassicalObservationModel, MDV_ObservationModel
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.util import make_multidex
@@ -1630,7 +1630,14 @@ def _parse_anton_fluxes():
 
     # thermo_pol = pickle.load(open('tp.p', 'rb'))
     # net_pol = thermo_2_net_polytope(thermo_pol, verbose=True)
-    simplified_net_pol = simplify_polytope(net_pol, settings=PolyRoundSettings(verbose=False), normalize=False)
+    simplified_net_pol = simplify_polytope(
+        net_pol,
+        settings=PolyRoundSettings(
+            backend=polyround_backend_from_cobra_solver(model._config.cobra_solver),
+            verbose=False,
+        ),
+        normalize=False,
+    )
     trans_pol, T, T_1, tau = transform_polytope_keep_transform(simplified_net_pol, kernel_id='rref')
     full_net_fluxes = T @ net_fluxes.loc[T.columns] + tau.values
 

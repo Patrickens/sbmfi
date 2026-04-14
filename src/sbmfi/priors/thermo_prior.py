@@ -1,13 +1,16 @@
 from sbmfi.priors.uniform import BaseRoundedPrior
-import contextlib
-import io
 import numpy as np
 import pandas as pd
 import torch
-import random
 import scipy
 from sbmfi.core.reaction import LabellingReaction
-from sbmfi.core.coordinater import FluxCoordinateMapper
+from sbmfi.core.polytopia import sample_polytope
+from sbmfi.core.coordinater import (
+    FluxCoordinateMapper,
+    map_gibbs_2_xch_fluxes,
+    map_thermo_2_gibbs,
+    make_net_theta_id,
+)
 from sbmfi.priors.uniform import sampling_tasks
 from sbmfi.core.util import get_tensor
 from sbmfi.core.distributions import sample_bounded
@@ -19,67 +22,21 @@ from sbmfi.priors.thermo_sampler import (
 from collections import OrderedDict
 from torch.distributions import Distribution
 try:
-    from pta.sampling.tfs import (
-        FreeEnergiesSamplingResult, sample_drg,
-        TFSModel, _find_point,
-        PmoProblemPool
-    )
-    from pta.constants import R
+    from pta.sampling.tfs import TFSModel
 except ImportError:
     TFSModel = None
-    FreeEnergiesSamplingResult = DRGSamplingResult
-    R = R_GAS
+FreeEnergiesSamplingResult = DRGSamplingResult
+R = R_GAS
 
-def get_initial_points(self: TFSModel, num_points: int) -> np.ndarray:
 
-    # NB this has to be called with processes = 1 due to memory errors
-    pool = PmoProblemPool(1, *self._pmo_args)
+def compute_xch_fluxes(self: FluxCoordinateMapper, dgibbsr: pd.DataFrame) -> pd.DataFrame:
+    return map_gibbs_2_xch_fluxes(self, dgibbsr)
 
-    # Find candidate optimization direactions.
-    reaction_idxs_T = list(range(len(self.T.reaction_ids)))
-    reaction_idxs_F = [self.F.reaction_ids.index(id) for id in self.T.reaction_ids]
-    only_forward_ids_T = [
-        i for i in reaction_idxs_T if self.F.lb[reaction_idxs_F[i]] >= 0
-    ]
-    only_backward_ids_T = [
-        i for i in reaction_idxs_T if self.F.ub[reaction_idxs_F[i]] <= 0
-    ]
-    reversible_ids_T = [
-        i
-        for i in reaction_idxs_T
-        if self.F.lb[reaction_idxs_F[i]] < 0 and self.F.ub[reaction_idxs_F[i]] > 0
-    ]
 
-    reversible_dirs = [(i, -1) for i in reversible_ids_T] + [
-        (i, 1) for i in reversible_ids_T
-    ]
-    irreversible_dirs = [(i, -1) for i in only_backward_ids_T] + [
-        (i, 1) for i in only_forward_ids_T
-    ]
-
-    # Select optimization directions, giving precedence to the reversible reactions.
-    if num_points >= len(reversible_dirs):
-        directions = reversible_dirs
-        directions_pool = irreversible_dirs
-        to_sample = min(num_points - len(reversible_dirs), len(irreversible_dirs))
-    else:
-        directions = []
-        directions_pool = reversible_dirs
-        to_sample = min(num_points, len(reversible_dirs))
-    optimization_directions = directions + random.sample(directions_pool, to_sample)
-
-    # Run the optimizations in the pool.
-    initial_points = pool.map(_find_point, optimization_directions)
-    assert all(p is not None for p in initial_points), (
-        "One or more initial points could not be found. This could be due to "
-        "an overconstrained model or numerical inaccuracies."
-    )
-    points_array = np.hstack(initial_points)
-    pool.close()
-
-    return points_array
-if TFSModel is not None:
-    TFSModel.get_initial_points = get_initial_points
+def compute_dgibbsr(self: FluxCoordinateMapper, thermo_fluxes) -> pd.DataFrame:
+    dgibbsr = map_thermo_2_gibbs(self, thermo_fluxes, pandalize=True)
+    dgibbsr.columns = self._fwd_id
+    return dgibbsr
 
 
 def append_xch_flux_samples(  # TODO make this work without things being dataframes
@@ -93,7 +50,7 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
         net_fluxes = get_tensor(values=net_fluxes.loc[:, self._Fn.A.columns].values)
     if isinstance(net_basis_samples, pd.DataFrame):
         index = net_basis_samples.index
-        net_basis_samples = get_tensor(values=net_basis_samples.loc[:, self.make_net_theta_id].values)
+        net_basis_samples = get_tensor(values=net_basis_samples.loc[:, make_net_theta_id(self._sampler)].values)
 
     if net_fluxes is None:
         n = net_basis_samples.shape[0]
@@ -106,7 +63,7 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
     else:
         n = net_fluxes.shape[0]
 
-    if self._fcm._nx > 0:
+    if self._nx > 0:
         if xch_fluxes is None:
             xch_fluxes = sample_bounded(
                 shape=(n,), lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1]
@@ -126,19 +83,22 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
     if return_type == 'fluxes':
         return fluxes
 
-    if self._fcm._nx > 0:
-        if self._logxch:
-            xch_fluxes = self.logit_xch(xch_fluxes)
+    if self._nx > 0:
         theta = torch.cat([net_basis_samples, xch_fluxes], dim=-1)
     else:
         theta = net_basis_samples
 
     if pandalize:
-        theta = pd.DataFrame(theta.detach().cpu().numpy(), index=index, columns=self.theta_id)
+        theta = pd.DataFrame(theta.detach().cpu().numpy(), index=index, columns=self.theta_id())
     if return_type == 'theta':
         return theta
     elif return_type == 'both':
         return theta, fluxes
+
+
+FluxCoordinateMapper.append_xch_flux_samples = append_xch_flux_samples
+FluxCoordinateMapper.compute_xch_fluxes = compute_xch_fluxes
+FluxCoordinateMapper.compute_dgibbsr = compute_dgibbsr
 
 class ThermoPrior(BaseRoundedPrior):
     def __init__(
@@ -149,13 +109,21 @@ class ThermoPrior(BaseRoundedPrior):
             cache_size: int = 20000,
             num_processes: int = 0,
     ):
-        super(ThermoPrior, self).__init__(model, cache_size, num_processes=num_processes)
+        super(ThermoPrior, self).__init__(model, num_processes=num_processes)
+        self._cache_size = cache_size
         self._coords = coordinates
         self._tfs_model = tfs_model
         self._fulabel_pol = None
         self._drg_mvn = self.extract_drg_mvn(tfs_model)
         self._thermo_basis_points = None
         self._orthant_volumes = {}
+        self._orthant_log_probs = {}
+
+    @staticmethod
+    def _coerce_sampling_data(tfs_model) -> ThermoSamplingData:
+        if isinstance(tfs_model, ThermoSamplingData):
+            return tfs_model
+        return ThermoSamplingData.from_tfs_model(tfs_model)
 
     @staticmethod
     def reset_rhos(model):
@@ -171,44 +139,13 @@ class ThermoPrior(BaseRoundedPrior):
         return model
 
     def extract_drg_mvn(self, tfs_model, epsilon=1e-12, as_tensor=False) -> Distribution:
-        """Extract the marginal dG MVN, dispatching on TFSModel vs ThermoSamplingData."""
-        if isinstance(tfs_model, ThermoSamplingData):
-            drg_mean, drg_cov = tfs_model.drg_mvn_params(epsilon=epsilon)
-            # Subset to reactions in self._fcm.fwd_id
-            T_ids = list(tfs_model.T_reaction_ids)
-            indices = np.array([T_ids.index(rid) for rid in self._fcm.fwd_id])
-            drg_prime_mean = drg_mean[indices]
-            drg_prime_cov  = drg_cov[np.ix_(indices, indices)]
-        else:
-            # Legacy pta TFSModel path
-            tfs_reaction_ids = pd.Index(tfs_model.T.reaction_ids)
-            indices = np.array([tfs_reaction_ids.get_loc(rid) for rid in self._fcm.fwd_id])
-
-            T = tfs_model.T.parameters.T().model
-            R_val = R.model if hasattr(R, 'model') else R
-
-            dfg0_prime_mean = tfs_model.T.dfg0_prime_mean.model
-            log_conc_mean   = tfs_model.T.log_conc_mean.model
-            dfg_prime_mean  = dfg0_prime_mean + log_conc_mean * R_val * T
-            S_constraints   = tfs_model.T.S_constraints
-            drg_prime_mean  = (S_constraints.T @ dfg_prime_mean)[indices]
-
-            dfg0_cov_sqrt  = tfs_model.T._dfg0_prime_cov_sqrt.model
-            dfg0_cov       = dfg0_cov_sqrt @ dfg0_cov_sqrt.T
-            dfg_prime_cov  = dfg0_cov + tfs_model.T.log_conc_cov.model * (R_val * T) ** 2
-            drg_prime_cov  = (S_constraints.T @ dfg_prime_cov @ S_constraints)[:, indices][indices, :]
-
-            eye = np.eye(drg_prime_cov.shape[0])
-            tot_eps = 0.0
-            while True:
-                try:
-                    np.linalg.cholesky(drg_prime_cov)
-                    if self._fcm._pr_settings.verbose:
-                        print(f'total correction epsilon to make matrix PSD: {tot_eps}')
-                    break
-                except np.linalg.LinAlgError:
-                    tot_eps += epsilon
-                    drg_prime_cov += epsilon * eye
+        """Extract the marginal dG MVN for the reactions used by the FCM."""
+        data = self._coerce_sampling_data(tfs_model)
+        drg_mean, drg_cov = data.drg_mvn_params(epsilon=epsilon)
+        tfs_reaction_ids = pd.Index(data.T_reaction_ids)
+        indices = np.array([tfs_reaction_ids.get_loc(rid) for rid in self._fcm.fwd_id])
+        drg_prime_mean = drg_mean[indices]
+        drg_prime_cov = drg_cov[np.ix_(indices, indices)]
 
         if as_tensor:
             return torch.distributions.MultivariateNormal(
@@ -218,9 +155,26 @@ class ThermoPrior(BaseRoundedPrior):
         return scipy.stats.multivariate_normal(mean=drg_prime_mean.squeeze(), cov=drg_prime_cov)
 
     def _compute_orthant_volume(self, thermo_fluxes):
-        pass
-        # orthants = thermo_fluxes.loc[:, fcm.fwd_id] > 0
-        # orthants.index = orthants.apply(lambda row: hash(tuple(row)), raw=True, axis=1)
+        if isinstance(thermo_fluxes, pd.DataFrame):
+            net_fluxes = thermo_fluxes.loc[:, self._fcm.fwd_id]
+        else:
+            net_fluxes = pd.DataFrame(
+                thermo_fluxes[..., :len(self._fcm.fwd_id)].detach().cpu().numpy(),
+                columns=self._fcm.fwd_id,
+            )
+        orthant_keys = net_fluxes.gt(0.0).apply(lambda row: hash(tuple(row)), raw=True, axis=1)
+        values = np.array([self._orthant_volumes.get(key, 0.0) for key in orthant_keys], dtype=float)
+        return torch.as_tensor(values[:, None], dtype=torch.double)
+
+    def _estimate_orthant_log_prob(self, orthant, n_samples=50_000):
+        key = hash(tuple(orthant))
+        if key not in self._orthant_log_probs:
+            draws = self._drg_mvn.rvs(size=n_samples)
+            draws = np.atleast_2d(draws)
+            draws_orthants = draws < 0.0
+            match = np.all(draws_orthants == np.asarray(orthant, dtype=bool), axis=1).mean()
+            self._orthant_log_probs[key] = np.log(max(match, 1.0 / n_samples))
+        return self._orthant_log_probs[key]
 
     def log_prob(self, value):
         if self._validate_args:
@@ -230,10 +184,17 @@ class ThermoPrior(BaseRoundedPrior):
             raise NotImplementedError(
                 'this would mean that we need to compute the volume of a thermo_constrained_label_pol, '
                 'which is a biatch due to large number of dimensions')
-        # this one will be very difficult to implement, since we need to convert exchange fluxes to dG and evaluate those
-        thermo_fluxes = self.map_theta_2_fluxes(value, return_thermo=True)
+        thermo_fluxes = self._fcm.map_theta_2_fluxes(value, return_thermo=True, pandalize=True)
         drg = self._fcm.compute_dgibbsr(thermo_fluxes)
-        orhtant_vols = self._compute_orthant_volume(thermo_fluxes)
+        orthant_vols = self._compute_orthant_volume(thermo_fluxes)
+        orthants = drg.lt(0.0)
+        orthant_log_probs = orthants.apply(
+            lambda row: self._estimate_orthant_log_prob(tuple(row.values)),
+            axis=1,
+        ).to_numpy(dtype=float)
+        log_prob = self._drg_mvn.logpdf(drg.loc[:, self._fcm.fwd_id].values)
+        log_prob = np.atleast_1d(log_prob) - orthant_log_probs - orthant_vols[:, 0].detach().cpu().numpy()
+        return torch.as_tensor(log_prob[:, None], dtype=torch.double)
 
     def _generate_thermo_constrained_label_pol(self, abs_xch_flux_tol=0.0):
         pol = self._fcm._F.copy()
@@ -284,35 +245,32 @@ class ThermoPrior(BaseRoundedPrior):
             num_chains: int = 4,
             thermo_basis_points: np.ndarray | None = None,
     ):
-        if isinstance(tfs_model, ThermoSamplingData):
-            if thermo_basis_points is None:
-                thermo_basis_points = find_initial_points(tfs_model, num_chains)
-            num_chains = thermo_basis_points.shape[1]
-            result = _sample_drg_pure(
-                tfs_model,
-                initial_points=thermo_basis_points,
-                num_samples=n,
-                num_chains=num_chains,
-                num_initial_steps=n * 2,
-            )
-        else:
-            if thermo_basis_points is None:
-                thermo_basis_points = tfs_model.get_initial_points(num_chains)
-            num_chains = thermo_basis_points.shape[1]
-            with contextlib.redirect_stdout(io.StringIO()):
-                result = sample_drg(
-                    tfs_model,
-                    initial_points=thermo_basis_points,
-                    num_direction_samples=n,
-                    num_samples=n,
-                    max_psrf=1.0 + 1e-12,
-                    num_chains=num_chains,
-                    max_steps=32 * n,
-                    num_initial_steps=n * 2,
-                )
+        sampling_data = ThermoPrior._coerce_sampling_data(tfs_model)
+        if thermo_basis_points is None:
+            thermo_basis_points = find_initial_points(sampling_data, num_chains)
+        num_chains = thermo_basis_points.shape[1]
+        result = _sample_drg_pure(
+            sampling_data,
+            initial_points=thermo_basis_points,
+            num_samples=n,
+            num_chains=num_chains,
+            num_initial_steps=n * 2,
+        )
         new_points_idx = np.random.choice(n, num_chains)
         new_thermo_basis_points = result.basis_samples.values[new_points_idx, :].T
         return result, new_thermo_basis_points
+
+    def _run_tasks(self, tasks, fn=sample_polytope, break_i=-1, close_pool=True):
+        del close_pool
+        if self._num_processes > 0:
+            return self._mp_pool.starmap(fn, tasks)
+
+        results = []
+        for i, task in enumerate(tasks):
+            if (break_i >= 0) and (i > break_i):
+                break
+            results.append(fn(*task))
+        return results
 
     def _make_b_constraint_df(self, orthants):
         forward = orthants.astype(int)
@@ -333,15 +291,17 @@ class ThermoPrior(BaseRoundedPrior):
         drg_xch_fluxes = self._fcm.compute_xch_fluxes(dgibbsr=drg_samples)
         drg_orthants = drg_samples < 0.0
 
-        orthants = (drg_orthants).value_counts().reset_index().rename({0: 'counts'}, axis=1).set_index('counts')
+        orthants = drg_orthants.value_counts().rename_axis(index=list(drg_orthants.columns)).reset_index(name='counts')
+        orthants = orthants.set_index('counts')
         orthants = orthants.loc[orthants.index > 1]
         orthants.index *= n_flux  # this means we take subsamples of the net space
 
         b_constraint_df = self._make_b_constraint_df(orthants)
-        task_generator = sampling_tasks(  # transform_type=self._fcm.transform_type, basis_coordinates=self._fcm.basis_coordinates
-            self._fcm._Fn, counts=None, to_basis_fn=self._fcm.to_basis_fn,
-            b_constraint_df=b_constraint_df, return_basis_samples=True,
-            return_kwargs=self._num_processes == 0,
+        task_generator = sampling_tasks(
+            self._fcm._Fn,
+            counts=None,
+            b_constraint_df=b_constraint_df,
+            return_what='all',
         )
         return dict(
             orthants=orthants, drg_orthants=drg_orthants, b_constraint_df=b_constraint_df,
@@ -423,8 +383,10 @@ class ThermoPrior(BaseRoundedPrior):
             kwargs['A_constraint_df'] = self._make_A_constraint_df(drg_result, pol.A, abs_xch_flux_tol)
 
         return sampling_tasks(
-            pol, counts=n_flux, to_basis_fn=None, return_basis_samples=False,
-            return_kwargs=self._num_processes == 0, **kwargs
+            pol,
+            counts=n_flux,
+            return_what='fluxes',
+            **kwargs,
         )
 
     def _fill_caches(
@@ -447,7 +409,10 @@ class ThermoPrior(BaseRoundedPrior):
             sampling_task_generator = tasks_dct['sampling_task_generator']
 
             results = self._run_tasks(sampling_task_generator, break_i=break_i, close_pool=close_pool)
-            net_fluxes = pd.concat([r['fluxes'] for r in results], ignore_index=True).loc[:, self._fcm._Fn.A.columns]
+            net_fluxes = pd.DataFrame(
+                torch.cat([r['fluxes'] for r in results], dim=0).detach().cpu().numpy(),
+                columns=self._fcm._Fn.A.columns,
+            )
             xch_cols = self._fcm.fwd_id + '_xch'
             xch_fluxes = pd.DataFrame(np.nan, index=net_fluxes.index, columns=xch_cols)
 
@@ -468,8 +433,16 @@ class ThermoPrior(BaseRoundedPrior):
                     [drg_xch_fluxes.loc[which_drg, :], ] * n_flux, axis=0
                 ).values
 
-            net_basis_samples = pd.concat([r['basis_samples'] for r in results], ignore_index=True).loc[:, self._fcm.net_theta_id]
-            theta, fluxes = self._fcm.append_xch_flux_samples(net_fluxes, net_basis_samples, xch_fluxes)
+            net_basis_samples = pd.DataFrame(
+                torch.cat([r['rounded'] for r in results], dim=0).detach().cpu().numpy(),
+                columns=make_net_theta_id(self._fcm._sampler),
+            )
+            theta, fluxes = self._fcm.append_xch_flux_samples(
+                net_fluxes,
+                net_basis_samples,
+                xch_fluxes,
+                pandalize=True,
+            )
             # self.ding = self._fcm.map_theta_2_fluxes(self.theta)
 
         elif self._coords == 'labelling':
@@ -477,11 +450,19 @@ class ThermoPrior(BaseRoundedPrior):
                 raise ValueError('mapping from fluxes to thermo wont work if cofactors are included')
             sampling_task_generator = self._make_F_tasks(drg_result, n_flux, abs_xch_flux_tol)
             results = self._run_tasks(sampling_task_generator, break_i=break_i, close_pool=close_pool)
-            fluxes = pd.concat([r['fluxes'] for r in results], ignore_index=True)
-            theta = self._fcm.map_fluxes_2_theta(fluxes)
+            fluxes = pd.DataFrame(
+                torch.cat([r['fluxes'] for r in results], dim=0).detach().cpu().numpy(),
+                columns=self._fcm._F.A.columns,
+            )
+            theta = self._fcm.map_fluxes_2_theta(fluxes, pandalize=True)
 
-        self._flux_cache  = torch.as_tensor(fluxes.values, dtype=torch.double)
-        self._theta_cache = torch.as_tensor(theta.values, dtype=torch.double)
+        if isinstance(fluxes, pd.DataFrame):
+            fluxes = fluxes.values
+        if isinstance(theta, pd.DataFrame):
+            theta = theta.values
+
+        self._flux_cache  = torch.as_tensor(fluxes, dtype=torch.double)
+        self._theta_cache = torch.as_tensor(theta, dtype=torch.double)
 
 if __name__ == "__main__":
     pass
