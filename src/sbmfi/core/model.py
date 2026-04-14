@@ -1,10 +1,11 @@
 from cobra import Model, Reaction, Metabolite, DictList
+import cobra.core.configuration as _cobra_cfg
 import numpy as np
 import math
-import sys
 import operator
 import pandas as pd
 import torch
+from sbmfi.config import SBMFIConfig
 from sbmfi.core.util   import (
     _read_atom_map_str_rex,
     _find_biomass_rex,
@@ -12,7 +13,6 @@ from sbmfi.core.util   import (
     _biomass_coeff_rex,
     get_tensor,
     convolve,
-    tonp,
 )
 from sbmfi.core.polytopia import (
     extract_labelling_polytope,
@@ -51,32 +51,32 @@ def process_biomass_reaction(reaction_kwargs: dict) -> Optional[tuple[str, dict]
         If multiple biomass reactions are found.
     """
     biomass_reactions = []
-    
+
     for reac_id, kwargs in reaction_kwargs.items():
         # Check if reaction has atom_map_str
         if 'atom_map_str' not in kwargs:
             continue
-            
+
         # Check if biomass is in the reactants
         if _find_biomass_rex.search(kwargs['atom_map_str']):
             biomass_reactions.append(reac_id)
-            
+
     if len(biomass_reactions) > 1:
         raise ValueError(f"Multiple biomass reactions found: {biomass_reactions}")
-        
+
     if not biomass_reactions:
         return None
-        
+
     biomass_id = biomass_reactions[0]
     biomass_kwargs = reaction_kwargs[biomass_id]
-    
+
     # Extract biomass coefficients from reaction string
     if 'reaction_str' not in biomass_kwargs:
         return biomass_id, {}
-        
+
     biomass_coeff = _biomass_coeff_rex.findall(biomass_kwargs['reaction_str'])
     biomass_coeff = {k: -float(v) for v, k in biomass_coeff}
-    
+
     return biomass_id, biomass_coeff
 
 
@@ -122,7 +122,7 @@ def create_full_metabolite_kwargs(
     """
     # Create a copy of metabolite kwargs to avoid modifying the input
     metabolite_kwargs = metabolite_kwargs.copy()
-    
+
     # Initialize result dictionary if only labelled metabolites are requested
     result = {}
 
@@ -231,16 +231,16 @@ class LabellingModel(Model):
     def __init__(
             self,
             model: Model,
-            batch_size: int = 1,
-            device=None,
+            config: Optional[SBMFIConfig] = None,
     ):
         if isinstance(model, LabellingModel):
             raise NotImplementedError('Cannot instantiate LabellingModel with another LabellingModel')
         elif not isinstance(model, Model):
             raise ValueError('Need to instantiate with an existing cobra model')
         super(LabellingModel, self).__init__(id_or_model=model)
-        self._batch_size = batch_size
-        self._device = device if device is not None else torch.device('cpu')
+        self._config = SBMFIConfig.from_env() if config is None else config
+        _cobra_cfg.Configuration().solver = self._config.cobra_solver
+        self.solver = self._config.cobra_solver
 
         # flags
         self._is_built = False  # signals that the all the variables and matrices have not been built yet
@@ -279,6 +279,13 @@ class LabellingModel(Model):
 
         super(LabellingModel, self).__setstate__(state)
 
+        config = state.get('_config', None)
+        if config is None:
+            config = SBMFIConfig.from_env()
+        self._config = config
+        _cobra_cfg.Configuration().solver = self._config.cobra_solver
+        self.solver = self._config.cobra_solver
+
         for r in self.reactions:
             # not sure why, but pickling messes up the whole solver...
             r.update_variable_bounds()
@@ -292,7 +299,7 @@ class LabellingModel(Model):
             self._measurements = DictList()
             self.set_measurements(measurement_list=measurements)
         self._labelling_reactions = DictList()  # gets set in metabolites_in_state; which calls labelling_fluxes_id
-        if state.get('_batch_size') is not None:
+        if state.get('_config') is not None:
             self._initialize_state()
 
     def __getstate__(self):
@@ -318,10 +325,10 @@ class LabellingModel(Model):
 
     def _initialize_state(self):
         # state and jacobian variables
-        self._s = get_tensor(shape=(0,), device=self._device)  # state vector
-        self._sum = get_tensor(shape=(0,), device=self._device)  # sums metabolites to 1
-        self._dsdv = get_tensor(shape=(0,), device=self._device)  # ds / dvi
-        self._jacobian = get_tensor(shape=(0,), device=self._device)  # dim(reaction x output variables)
+        self._s = torch.zeros((0,), dtype=self._config.dtype, device=self._config.device)  # state vector
+        self._sum = torch.zeros((0,), dtype=self._config.dtype, device=self._config.device)  # sums metabolites to 1
+        self._dsdv = torch.zeros((0,), dtype=self._config.dtype, device=self._config.device)  # ds / dvi
+        self._jacobian = torch.zeros((0,), dtype=self._config.dtype, device=self._config.device)  # dim(reaction x output variables)
 
     @property
     def is_built(self):
@@ -406,9 +413,10 @@ class LabellingModel(Model):
                             metabolite._reaction.remove(reaction)
                         metabolite._reaction.add(reaction._rev_reaction)
 
-        self._jacobian = get_tensor(
-            shape=(self._batch_size, len(self._labelling_reactions), self.state_id.shape[0]),
-            device=self._device,
+        self._jacobian = torch.zeros(
+            (self._config.batch_size, len(self._labelling_reactions), self.state_id.shape[0]),
+            dtype=self._config.dtype,
+            device=self._config.device,
         )
         return self._labelling_reactions
 
@@ -424,8 +432,8 @@ class LabellingModel(Model):
         labelling_fluxes = self._fcm.frame_fluxes(labelling_fluxes, samples_id, trim)
         if len(labelling_fluxes.shape) > 2:
             raise ValueError('can only deal with 2D stratified fluxes!')
-        if labelling_fluxes.shape[0] != self._batch_size:
-            raise ValueError(f'batch_size = {self._batch_size}; fluxes.shape[0] = {labelling_fluxes.shape[0]}')
+        if labelling_fluxes.shape[0] != self._config.batch_size:
+            raise ValueError(f'batch_size = {self._config.batch_size}; fluxes.shape[0] = {labelling_fluxes.shape[0]}')
         self._fluxes = labelling_fluxes
 
     def set_substrate_labelling(self, substrate_labelling: pd.Series):
@@ -461,9 +469,9 @@ class LabellingModel(Model):
                 if reaction.boundary and isinstance(reaction, LabellingReaction) and not reaction.pseudo:
                     if not reaction.rho_max == 0.0:
                         raise ValueError(f'substrate reaction is illegaly reversible {reaction.id}')
-                    if reaction.lower_bound > 0.0:
+                    if reaction.upper_bound > 0.0:
                         substrate_reactions.append(reaction)
-                    elif reaction.upper_bound < 0.0:
+                    elif reaction.lower_bound < 0.0:
                         substrate_reactions.append(reaction._rev_reaction)
                     else:
                         raise ValueError(f'substrate reaction {reaction.id} '
@@ -808,7 +816,7 @@ class RatioMixin(LabellingModel):
     This is a mixin that defines all the stuff to do with flux-ratios
     """
     _RATIO_ATOL = 1e-3  # if the difference between lb and ub for a ratio is below this; we consider it an equality
-    
+
     def __getstate__(self):
         odict = super(RatioMixin, self).__getstate__()
         odict['_ratio_repo'] = self.ratio_repo
@@ -840,7 +848,10 @@ class RatioMixin(LabellingModel):
         index = None
         if isinstance(fluxes, pd.DataFrame):
             index = fluxes.index
-            fluxes = get_tensor(values=fluxes.loc[:, self.labelling_reactions.list_attr('id')].values, device=self._device)
+            fluxes = get_tensor(
+                values=fluxes.loc[:, self.labelling_reactions.list_attr('id')].values,
+                config=self._config,
+            )
 
         num = self._ratio_num_sum @ fluxes.T
         den = self._ratio_den_sum @ fluxes.T
@@ -854,15 +865,15 @@ class RatioMixin(LabellingModel):
 
     def _initialize_state(self):
         super(RatioMixin, self)._initialize_state()
-        self._ratio_num_sum = get_tensor(shape=(0,), device=self._device)
-        self._ratio_den_sum = get_tensor(shape=(0,), device=self._device)
+        self._ratio_num_sum = torch.zeros((0,), dtype=self._config.dtype, device=self._config.device)
+        self._ratio_den_sum = torch.zeros((0,), dtype=self._config.dtype, device=self._config.device)
         self._ratio_repo = {}  # repository of all flux-ratios (with names as keys) that we are interested in
 
     @staticmethod
-    def _sum_getter(key, ratio_repo: dict, index: pd.Index, device=None):
+    def _sum_getter(key, ratio_repo: dict, index: pd.Index, config: Optional[SBMFIConfig] = None):
         # TODO THIS FUNCTION IS CURRENTLY WRONG!
         if not ratio_repo:
-            return get_tensor(shape=(0,), device=device)
+            return torch.zeros((0,), dtype=config.dtype, device=config.device)
         indices = []
         coeffs = []
         # essential to be ratio_repo because _ratio_repo is condensed
@@ -876,7 +887,7 @@ class RatioMixin(LabellingModel):
                     coeffs.append(coeff)
         return get_tensor(
             shape=(i + 1, len(index)), indices=np.array(indices), values=np.array(coeffs, dtype=np.double),
-            device=device,
+            config=config,
         )
 
     @property
@@ -936,8 +947,8 @@ class RatioMixin(LabellingModel):
             repo[ratio_id] = {'numerator': numerator, 'denominator': denominator}
 
         self._ratio_repo = repo  # condensed representation!
-        self._ratio_num_sum = self._sum_getter('numerator', repo, self.labelling_fluxes_id, self._device)
-        self._ratio_den_sum = self._sum_getter('denominator', repo, self.labelling_fluxes_id, self._device)
+        self._ratio_num_sum = self._sum_getter('numerator', repo, self.labelling_fluxes_id, self._config)
+        self._ratio_den_sum = self._sum_getter('denominator', repo, self.labelling_fluxes_id, self._config)
 
     def prepare_polytopes(self, free_reaction_id=None, verbose=False):
         if free_reaction_id is None:
@@ -952,7 +963,10 @@ class RatioMixin(LabellingModel):
         ratio_NS = self._fcm.null_space.loc[
             self.ratio_reactions.list_attr('id')]  # null-space that contributes to ratio reactions
         # _free_idx are the reactions that contribute to ratio_reactions
-        self._ratio_free_idx = get_tensor(values=np.where(~(ratio_NS == 0.0).all(0))[0], device=self._device)
+        self._ratio_free_idx = get_tensor(
+            values=np.where(~(ratio_NS == 0.0).all(0))[0],
+            config=self._config,
+        )
         # _dept_idx are dependent reactions that contrubute to the free reactions that contribute to the ratio reactions
         self._ratio_dept_idx = np.where(
             abs(self._fcm._NS[:, self._ratio_free_idx]).sum(1).detach().cpu().numpy() > 0.0
@@ -982,7 +996,7 @@ class EMU_Model(LabellingModel):
 
     def _initialize_state(self):
         super(EMU_Model, self)._initialize_state()
-        
+
         # state-objects
         self._xemus = {}  # the EMUs that make up the X matrices ordered by weight
         self._yemus = {}  # the EMUs that make up the Y matrices ordered by weight
@@ -1022,13 +1036,13 @@ class EMU_Model(LabellingModel):
                 self._xemus.setdefault(i, DictList())
                 self._yemus.setdefault(i, DictList())
             emus[met_weight].append(met_emu)
-        self._s    = get_tensor(shape=(self._batch_size, num_el_s), device=self._device)
-        self._dsdv = get_tensor(shape=(self._batch_size, num_el_s), device=self._device)
+        self._s = torch.zeros((self._config.batch_size, num_el_s), dtype=self._config.dtype, device=self._config.device)
+        self._dsdv = torch.zeros((self._config.batch_size, num_el_s), dtype=self._config.dtype, device=self._config.device)
         self._sum  = get_tensor(
             shape=(len(self.measurements), len(self.state_id)),
             indices=np.array(sum_indices, dtype=np.int64),
             values=np.ones(len(sum_indices), dtype=np.double),
-            device=self._device,
+            config=self._config,
         )
 
     def reset_state(self):
@@ -1120,14 +1134,19 @@ class EMU_Model(LabellingModel):
                     if isocumo.metabolite == yemu.metabolite:
                         emu_label = isocumo._label[yemu.positions]
                         M_plus = emu_label.sum()
-                        for j in range(self._batch_size):
+                        for j in range(self._config.batch_size):
                             Y_values.append(fraction)
                             Y_indices.append((j, i, M_plus))
 
             Y_indices = np.array(Y_indices, dtype=np.int64)
             Y_values = np.array(Y_values, dtype=np.double)
             # TODO we can also create this via tiling!
-            Y = get_tensor(shape=(self._batch_size, len(yemus), weight + 1), indices=Y_indices, values=Y_values, device=self._device)
+            Y = get_tensor(
+                shape=(self._config.batch_size, len(yemus), weight + 1),
+                indices=Y_indices,
+                values=Y_values,
+                config=self._config,
+            )
             self._Y[weight] = Y
 
             for yemu in yemus:
@@ -1144,11 +1163,21 @@ class EMU_Model(LabellingModel):
 
     def _initialize_tensors(self):
         for (weight, xemus), yemus in zip(self._xemus.items(), self._yemus.values()):
-            self._A_tot[weight] = get_tensor(shape=(self._batch_size, len(xemus), len(xemus)), device=self._device)
-            self._B_tot[weight] = get_tensor(shape=(self._batch_size, len(xemus), len(yemus)), device=self._device)
-            self._X[weight]     = get_tensor(shape=(self._batch_size, len(xemus), weight + 1), device=self._device)
-            self._dXdv[weight]  = get_tensor(shape=(self._batch_size, len(xemus), weight + 1), device=self._device)
-            self._dYdv[weight]  = get_tensor(shape=(self._batch_size, len(yemus), weight + 1), device=self._device)
+            self._A_tot[weight] = torch.zeros(
+                (self._config.batch_size, len(xemus), len(xemus)), dtype=self._config.dtype, device=self._config.device
+            )
+            self._B_tot[weight] = torch.zeros(
+                (self._config.batch_size, len(xemus), len(yemus)), dtype=self._config.dtype, device=self._config.device
+            )
+            self._X[weight] = torch.zeros(
+                (self._config.batch_size, len(xemus), weight + 1), dtype=self._config.dtype, device=self._config.device
+            )
+            self._dXdv[weight] = torch.zeros(
+                (self._config.batch_size, len(xemus), weight + 1), dtype=self._config.dtype, device=self._config.device
+            )
+            self._dYdv[weight] = torch.zeros(
+                (self._config.batch_size, len(yemus), weight + 1), dtype=self._config.dtype, device=self._config.device
+            )
         self._initialize_Y()
 
     def _initialize_emu_indices(self):
@@ -1324,7 +1353,7 @@ class EMU_Model(LabellingModel):
             Y = self._Y[weight]
 
             if dBdvi is None:
-                dBdv_Y = get_tensor(shape=X.shape, device=self._device)
+                dBdv_Y = torch.zeros(X.shape, dtype=self._config.dtype, device=self._config.device)
             else:
                 dBdv_Y = dBdvi @ Y
 
@@ -1352,8 +1381,11 @@ def model_builder_from_dict(
         metabolite_kwargs: dict,
         model_id='model',
         name=None,
+        config: Optional[SBMFIConfig] = None,
 ) -> Model:
     reaction_kwargs = reaction_kwargs.copy()
+    config = SBMFIConfig.from_env() if config is None else config
+    _cobra_cfg.Configuration().solver = config.cobra_solver
     model = Model(id_or_model=model_id, name=name)
 
     metabolite_kwargs = create_full_metabolite_kwargs(reaction_kwargs, metabolite_kwargs, add_cofactors=True)
@@ -1416,7 +1448,6 @@ def model_builder_from_dict(
 
 if __name__ == "__main__":
     # from pta.sampling.tfs import sample_drg
-    from sbmfi.settings import BASE_DIR
     # from sbmfi.priors.uniform import *
     # from sbmfi.models.build_models import build_e_coli_tomek, build_e_coli_anton_glc
     # from sbmfi.models.small_models import spiro

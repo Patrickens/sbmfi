@@ -28,8 +28,8 @@ class MDV_ObservationModel(object):
             clip_min=750.0,
             **kwargs,
     ):
-        self._device = model._device
-        self._batch_size = model._batch_size
+        self._device = model._config.device
+        self._batch_size = model._config.batch_size
         self._annotation_df = annotation_df
         if labelling_id == 'BOM':
             raise ValueError('BOM is not a valid labelling_id')
@@ -41,9 +41,9 @@ class MDV_ObservationModel(object):
             self._natab = self._set_natural_abundance_correction() # TODO this currently sucks
         self._state_id = model.state_id
 
-        self._scaling = get_tensor(shape=(self._n_o, ), device=self._device)
+        self._scaling = torch.zeros((self._n_o,), dtype=model._config.dtype, device=self._device)
         self._scaled = True
-        self._mdv_scaling = get_tensor(shape=(len(model.state_id),), device=self._device)
+        self._mdv_scaling = torch.zeros((len(model.state_id),), dtype=model._config.dtype, device=self._device)
 
         self._cmin = clip_min
 
@@ -309,8 +309,8 @@ class MDV_LogRatioTransform():
 
         if transformation == 'ilr':
             if ilr_basis == 'helmert':
-                self._ilr_basis = get_tensor(shape=(n_o, self._n_t), device=self._device)
-                self._sumatrix  = get_tensor(shape=(n_o, n_o), device=self._device)
+                self._ilr_basis = torch.zeros((n_o, self._n_t), dtype=torch.double, device=self._device)
+                self._sumatrix = torch.zeros((n_o, n_o), dtype=torch.double, device=self._device)
                 i, j = 0, 0
                 for ion_id, df in observation_df.groupby('ion_id', sort=False):
                     # basis = self._gramm_schmidt_basis(df.shape[0])
@@ -388,8 +388,8 @@ class MDV_LogRatioTransform():
 
     def _gramm_schmidt_basis(self, n):
         if n == 1:
-            return get_tensor(shape=(1, 1), device=self._device)
-        basis = get_tensor(shape=(n, n - 1), device=self._device)
+            return torch.zeros((1, 1), dtype=torch.double, device=self._device)
+        basis = torch.zeros((n, n - 1), dtype=torch.double, device=self._device)
         for j in range(n - 1):
             i = j + 1
             e = get_tensor(
@@ -470,10 +470,10 @@ class _BlockDiagGaussian(object):
             device=self._device,
         )  # needs to be distributed with either self._denomi or self._denom!
 
-        self._sigma = get_tensor(shape=(batch_size, self._no, self._no), device=self._device)
-        self._sigma_1 = get_tensor(shape=(batch_size, self._no, self._no), device=self._device)
+        self._sigma = torch.zeros((batch_size, self._no, self._no), dtype=torch.double, device=self._device)
+        self._sigma_1 = torch.zeros((batch_size, self._no, self._no), dtype=torch.double, device=self._device)
         self._chol = None
-        self._bias = get_tensor(shape=(batch_size, self._no,), device=self._device)
+        self._bias = torch.zeros((batch_size, self._no,), dtype=torch.double, device=self._device)
 
     @property
     def sigma_1(self):
@@ -656,7 +656,7 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             values=np.array(num_sum_values, dtype=np.double),
             device=self._device,
         )  # does not need to be distributed
-        self._J_xs = get_tensor(shape=(self._batch_size, len(self._state_id), self._n_o), device=self._device)
+        self._J_xs = torch.zeros((self._batch_size, len(self._state_id), self._n_o), dtype=torch.double, device=self._device)
 
     def J_xs(self, mdv):
         mdv = torch.atleast_2d(mdv)
@@ -686,8 +686,8 @@ class ClassicalObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
             self._selector = get_tensor(values=np.zeros(len(model._fcm.theta_id), dtype=np.bool_), device=self._device)
         J_xv = self.J_xv(mdv=mdv, J_sv=J_sv)
         FIM = (J_xv @ self.sigma_1.unsqueeze(0) @ J_xv.transpose(-2, -1)).squeeze(0)  # Fisher Information Matrix
-        sigma_v = get_tensor(shape=FIM.shape, device=self._device)
-        summary_v = get_tensor(shape=(mdv.shape[0], 3), device=self._device)
+        sigma_v = torch.zeros(FIM.shape, dtype=torch.double, device=self._device)
+        summary_v = torch.zeros((mdv.shape[0], 3), dtype=torch.double, device=self._device)
         for i in range(mdv.shape[0]):
             # TODO make this actually batched computation (difficult for different ranks in same batch...)
             invertible = False
@@ -875,7 +875,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         if self._p is None:
             raise ValueError('set parameters to compute sigma elements')
 
-        sigma = get_tensor(shape=(logI.shape[0], self._n_o, self._n_o), device=self._device)
+        sigma = torch.zeros((logI.shape[0], self._n_o, self._n_o), dtype=torch.double, device=self._device)
 
         std = self._p.std(I=logI) / 2
         sigma[:, self._indices[self._diag, 0], self._indices[self._diag, 1]] = std**2 / 2
@@ -891,7 +891,7 @@ class LCMS_ObservationModel(MDV_ObservationModel, _BlockDiagGaussian):
         if self._cmin == 0.0:
             raise ValueError('need to clip brohh')
         if self._total_intensities is None:
-            raise ValueError(f'set total intensities')
+            raise ValueError('set total intensities')
 
         mdv = torch.atleast_2d(mdv)  # shape = batch x n_mdv
         intensities = mdv * self._mdv_scaling  #
@@ -928,7 +928,7 @@ class BoundaryObservationModel(object):
             biomass_id: str = None,  # 'bm', 'BIOMASS_Ecoli_core_w_GAM'
             check_noise_support: bool = False,
     ):
-        self._device = model._device
+        self._device = model._config.device
         self._call_kwargs = {}
         self._fcm = model._fcm
         boundary_rxns = (self._fcm._Fn.S >= 0.0).all(0) | (self._fcm._Fn.S <= 0.0).all(0)
@@ -936,7 +936,7 @@ class BoundaryObservationModel(object):
 
         boundary_ids = self._fcm._Fn.S.columns[boundary_rxns]
         if biomass_id is not None:
-            if not (biomass_id in self._fcm.fluxes_id):
+            if biomass_id not in self._fcm.fluxes_id:
                 raise ValueError
             boundary_ids = boundary_ids.union([biomass_id])
         if not self._bound_id.isin(boundary_ids).all():
@@ -1004,7 +1004,7 @@ class MVN_BoundaryObservationModel(BoundaryObservationModel):
             noise = torch.randn(n, n_obs, len(self._bound_id), dtype=torch.double, device=self._device) @ self._sigma_o
             return abs(mu_bo + noise)  # .squeeze(0)
 
-        output = get_tensor(shape=(n, n_obs, n_b), device=self._device)
+        output = torch.zeros((n, n_obs, n_b), dtype=torch.double, device=self._device)
         for i in range(n):
             mean = mu_bo[i, 0, :]
             j = 0

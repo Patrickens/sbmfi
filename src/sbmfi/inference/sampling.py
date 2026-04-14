@@ -6,6 +6,7 @@ from sbmfi.core.simulator import _BaseSimulator, DataSetSim
 from sbmfi.priors.uniform import _BasePrior, BaseRoundedPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
 from sbmfi.core.model import LabellingModel
+from sbmfi.config import SBMFIConfig
 from sbmfi.core.simulfuncs import init_observer
 from sbmfi.core.util import get_tensor, tensormul_T, min_pos_max_neg, sample_unit_hyper_sphere_ball
 from sbmfi.core.distributions import sample_bounded, bounded_log_prob
@@ -38,7 +39,7 @@ class _BaseBayes(_BaseSimulator):
     ):
         super(_BaseBayes, self).__init__(model, substrate_df, mdv_observation_models, boundary_observation_model)
 
-        self._device = model._device
+        self._device = model._config.device
         self._prior = prior
         if prior is not None:
             if not prior._fcm.labelling_fluxes_id.equals(model.labelling_fluxes_id):
@@ -89,7 +90,7 @@ class _BaseBayes(_BaseSimulator):
             x_meas_index = pd.RangeIndex(x_meas.shape[0])
         elif isinstance(x_meas_index, pd.MultiIndex):
             raise ValueError
-        self._x_meas = torch.atleast_2d(get_tensor(values=x_meas, device=self._device))
+        self._x_meas = torch.atleast_2d(get_tensor(values=x_meas, config=self._model._config))
         self._x_meas_id = x_meas_index
         if (self._bomsize > 0) and self._bom._check:
             if not (self._bom._A @ self._x_meas[:, -self._bomsize].T <= self._bom._b).T.all():
@@ -105,7 +106,7 @@ class _BaseBayes(_BaseSimulator):
             if theta.shape[0] > 1:
                 raise ValueError
             theta = theta.iloc[0]
-        true_theta = torch.atleast_2d(get_tensor(values=theta.loc[self.theta_id].values, device=self._device))
+        true_theta = torch.atleast_2d(get_tensor(values=theta.loc[self.theta_id].values, config=self._model._config))
         prior_support = self._prior.support
         prior_support.to(true_theta.device)
         within_bounds = prior_support.check(true_theta)
@@ -117,7 +118,7 @@ class _BaseBayes(_BaseSimulator):
     def simulate_true_data(self, n_obs=0, pandalize=True):
         if self._true_theta is None:
             raise ValueError('set true_theta')
-        tt = torch.tile(self._true_theta.T, (self._model._batch_size, )).T
+        tt = torch.tile(self._true_theta.T, (self._model._config.batch_size, )).T
         true_labelling_fluxes = self._fcm.map_theta_2_fluxes(tt, return_thermo=False)
         true_data = self.simulate(true_labelling_fluxes, n_obs, pandalize=pandalize)
         if not pandalize:
@@ -150,7 +151,9 @@ class _BaseBayes(_BaseSimulator):
         n_meas = self._x_meas.shape[0]
         n_bom = 1 if self._bomsize > 0 else 0
 
-        log_lik = get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom), device=self._device)
+        log_lik = torch.zeros(
+            (n_f, n_meas, len(self._obmods) + n_bom), dtype=self._model._config.dtype, device=self._model._config.device
+        )
 
         # FUCKING AROOND
         # difff = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
@@ -205,7 +208,7 @@ class _BaseBayes(_BaseSimulator):
         n_f = theta.shape[0]
         k = len(self._obmods) + (1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
         n_meas = self._x_meas.shape[0]
-        log_prob = get_tensor(shape=(n_f, n_meas, k), device=self._device)
+        log_prob = torch.zeros((n_f, n_meas, k), dtype=self._model._config.dtype, device=self._model._config.device)
 
         if evaluate_prior:
             # NB not necessary for uniform prior
@@ -503,7 +506,7 @@ class _BaseBayes(_BaseSimulator):
 class _BasePotential():
     def __init__(self, model: _BaseBayes, return_data: bool=True):
         self._m = model
-        self._device = model._device
+        self._device = model._config.device
         self._return_data = return_data
 
     def _simulate_data(self, theta):
@@ -534,7 +537,9 @@ class Exact(_BasePotential):
         n_meas = self._m._x_meas.shape[0]
         n_bom = 1 if self._m._bomsize > 0 else 0
 
-        log_lik = get_tensor(shape=(n_f, n_meas, len(self._m._obmods) + n_bom), device=self._device)
+        log_lik = torch.zeros(
+            (n_f, n_meas, len(self._m._obmods) + n_bom), dtype=self._m._model._config.dtype, device=self._m._model._config.device
+        )
 
         # FUCKING AROOND
         # difff = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
@@ -579,7 +584,7 @@ class Exact(_BasePotential):
         n_f = theta.shape[0]
         k = len(self._m._obmods) + (1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
         n_meas = self._m._x_meas.shape[0]
-        log_prob = get_tensor(shape=(n_f, n_meas, k), device=self._device)
+        log_prob = torch.zeros((n_f, n_meas, k), dtype=self._m._model._config.dtype, device=self._m._model._config.device)
 
         # if evaluate_prior:
         #     # NB not necessary for uniform prior
@@ -821,21 +826,28 @@ class MCMC(_BaseBayes):
         #  doi:10.1080/01621459.2000.10473908
         #  doi:10.1007/BF02591694  Rinooy Kan article
 
-        chord_std = get_tensor(values=np.array([chord_std]), device=self._device)
-        xch_std = get_tensor(values=np.array([xch_std]), device=self._device)
+        chord_std = get_tensor(values=np.array([chord_std]), config=self._model._config)
+        xch_std = get_tensor(values=np.array([xch_std]), config=self._model._config)
 
         batch_size = n_chains * n_cdf
-        if self._model._batch_size != batch_size:
+        if self._model._config.batch_size != batch_size:
             # this way the batch processing is corrected
-            self._model._batch_size = batch_size
+            cfg = self._model._config
+            self._model._config = SBMFIConfig(
+                device=cfg.device,
+                dtype=cfg.dtype,
+                batch_size=batch_size,
+                cobra_solver=cfg.cobra_solver,
+                cvxpy_solver=cfg.cvxpy_solver,
+            )
             self._model.build_model(free_reaction_id=self._model._free_reaction_id)
 
-        chains = get_tensor(shape=(n, n_chains, len(self.theta_id)), device=self._device)  # TODO this should be the number of dimensions in rounded coord system!
-        post_probs = get_tensor(shape=(n, n_chains), device=self._device)
-        accept_rate = get_tensor(shape=(n_chains,), dtype=np.int64, device=self._device)
+        chains = torch.zeros((n, n_chains, len(self.theta_id)), dtype=self._model._config.dtype, device=self._model._config.device)  # TODO this should be the number of dimensions in rounded coord system!
+        post_probs = torch.zeros((n, n_chains), dtype=self._model._config.dtype, device=self._model._config.device)
+        accept_rate = torch.zeros((n_chains,), dtype=torch.int64, device=self._model._config.device)
 
         if return_data:
-            sim_data = get_tensor(shape=(n, n_chains, len(self.data_id)), device=self._device)
+            sim_data = torch.zeros((n, n_chains, len(self.data_id)), dtype=self._model._config.dtype, device=self._model._config.device)
 
         if initial_points is None:
             y = self._prior.sample((max(6, n_chains), ))[:n_chains, :]  # this is necessary since rsample in the prior has 6 chains
@@ -855,13 +867,13 @@ class MCMC(_BaseBayes):
                 )
             raise NotImplementedError('this is complicated, since we need to weight samples by the prior somehow')
 
-        chord_ys = get_tensor(shape=(1 + n_cdf, n_chains, len(self.true_theta)), device=self._device)
-        chord_post_probs = get_tensor(shape=(1 + n_cdf, n_chains), device=self._device)
-        chord_prop_probs = get_tensor(shape=(1 + n_cdf, 1 + n_cdf, n_chains), device=self._device)
+        chord_ys = torch.zeros((1 + n_cdf, n_chains, len(self.true_theta)), dtype=self._model._config.dtype, device=self._model._config.device)
+        chord_post_probs = torch.zeros((1 + n_cdf, n_chains), dtype=self._model._config.dtype, device=self._model._config.device)
+        chord_prop_probs = torch.zeros((1 + n_cdf, 1 + n_cdf, n_chains), dtype=self._model._config.dtype, device=self._model._config.device)
         pert_post_probs = self.potential(y)
 
         if return_data:
-            chord_data = get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)), device=self._device)
+            chord_data = torch.zeros((1 + n_cdf, n_chains, len(self.data_id)), dtype=self._model._config.dtype, device=self._model._config.device)
             pert_post_probs, data = pert_post_probs
             chord_data[0] = data[:n_chains]
 
@@ -1045,7 +1057,9 @@ class SMC(_BaseBayes, DataSetSim):
 
     ):
         population_batch = min(old_particles.shape[0], population_batch)
-        prop_probs = get_tensor(shape=(*old_particles.shape[:-1], *new_particles.shape[:-1]), device=self._device)
+        prop_probs = torch.zeros(
+            (*old_particles.shape[:-1], *new_particles.shape[:-1]), dtype=old_log_weights.dtype, device=self._device
+        )
 
         for i in range(0, old_particles.shape[0], population_batch):
             prop_probs[i: i + population_batch] = self.compute_proposal_prob(
@@ -1417,7 +1431,6 @@ if __name__ == "__main__":
 
     from sbmfi.models.small_models import spiro
     from sbmfi.priors.uniform import UniformRoundedFleXchPrior
-    from sbmfi.core.polytopia import FluxCoordinateMapper
 
     model, kwargs = spiro(
         auto_diff=False,

@@ -1,9 +1,8 @@
 import numpy as np
 import pandas as pd
 import torch
-import multiprocessing as mp
-from typing import Iterable, Union, Dict, Tuple
-from sbmfi.core.model import LabellingModel, RatioMixin, EMU_Model
+from typing import Dict, Tuple
+from sbmfi.core.model import LabellingModel, RatioMixin
 from sbmfi.core.observation import MDV_ObservationModel, MDV_LogRatioTransform
 from sbmfi.core.util import get_tensor
 
@@ -40,7 +39,7 @@ def simulator_worker(task: dict, model=None) -> dict:
 
     mdv_chunk = get_tensor(  # by making this a tensor with -np.inf values, we can filter failed simulations
         values=np.full(shape=(fluxes_chunk.shape[0], n_state), fill_value=-np.inf, dtype=np.double),
-        device=MODEL._device,
+        config=MODEL._config,
     )
 
     if type_jacobian is not None:
@@ -51,9 +50,9 @@ def simulator_worker(task: dict, model=None) -> dict:
             shape=(fluxes_chunk.shape[0], n, n_state),
             fill_value=-np.inf,
             dtype=np.double
-        ), device=MODEL._device)
+        ), config=MODEL._config)
 
-    step = MODEL._batch_size
+    step = MODEL._config.batch_size
     stop = max(fluxes_chunk.shape[0], step)
 
     for i in range(0, stop, step, ):
@@ -80,7 +79,7 @@ def simulator_worker(task: dict, model=None) -> dict:
     # NB filter failed simulations (metabolite not summing to 1 or values outside of [0, 1]
     sum_1 = torch.isclose(
         MODEL._sum @ mdv_chunk.T,
-        torch.ones(fluxes_chunk.shape[0], dtype=mdv_chunk.dtype, device=MODEL._device), atol=_EPSILON
+        torch.ones(fluxes_chunk.shape[0], dtype=mdv_chunk.dtype, device=MODEL._config.device), atol=_EPSILON
     ).T.all(1)
     bounds = (mdv_chunk < 1.0 + _EPSILON).all(1) & (mdv_chunk > 0.0 - _EPSILON).all(1)
     # valid_idx = la.where(sum_1 & bounds)[0]
@@ -117,8 +116,10 @@ def obervervator_worker(task: dict, model=None):
     observation_model = _OBSMODS[task['input_labelling'].name]
     n_obshape = max(1, n_obs)
     slicer = 0 if n_obs == 0 else slice(None)
-    data_chunk = get_tensor(shape=(mdv_chunk.shape[0], n_obshape, observation_model._nd), device=MODEL._device)
-    bs = MODEL._batch_size
+    data_chunk = torch.zeros(
+        (mdv_chunk.shape[0], n_obshape, observation_model._nd), dtype=MODEL._config.dtype, device=MODEL._config.device
+    )
+    bs = MODEL._config.batch_size
 
     for i in range(0, mdv_chunk.shape[0], bs):
         data_slice = observation_model(mdv=mdv_chunk[i: i + bs, :], n_obs=n_obs)  # TODO sizing!
@@ -145,16 +146,16 @@ def designer_worker(task):
 
     if x_coordinate_sys in ('sigma_v', 'all'):
         n_free = len(_MODEL._fcm.theta_id)
-        summary_v_chunk = get_tensor(shape=(mdv_chunk.shape[0], 3), device=_MODEL._device)  # TODO
-        sigma_v_chunk = get_tensor(shape=(mdv_chunk.shape[0], n_free, n_free), device=_MODEL._device)  # TODO
+        summary_v_chunk = torch.zeros((mdv_chunk.shape[0], 3), dtype=_MODEL._config.dtype, device=_MODEL._config.device)  # TODO
+        sigma_v_chunk = torch.zeros((mdv_chunk.shape[0], n_free, n_free), dtype=_MODEL._config.dtype, device=_MODEL._config.device)  # TODO
     if x_coordinate_sys in ('sigma_r', 'all') and isinstance(_MODEL, RatioMixin):
         validx = result_chunk['validx_chunk']
         fluxes_chunk = simulator_task['fluxes_chunk'][validx]
         n_ratio = len(_MODEL.ratios_id)
-        summary_r_chunk = get_tensor(shape=(mdv_chunk.shape[0], 2 * n_ratio), device=_MODEL._device)
-        sigma_r_chunk = get_tensor(shape=(mdv_chunk.shape[0], n_ratio, n_ratio), device=_MODEL._device)
+        summary_r_chunk = torch.zeros((mdv_chunk.shape[0], 2 * n_ratio), dtype=_MODEL._config.dtype, device=_MODEL._config.device)
+        sigma_r_chunk = torch.zeros((mdv_chunk.shape[0], n_ratio, n_ratio), dtype=_MODEL._config.dtype, device=_MODEL._config.device)
 
-    bs = _MODEL._batch_size
+    bs = _MODEL._config.batch_size
     for i in range(0, mdv_chunk.shape[0], bs):
         sigma_v, summary_v = observation_model.sigma_v(mdv=mdv_chunk[i: i + bs], J_sv=jacobian_chunk[i: i + bs])
         if x_coordinate_sys in ('sigma_v', 'all'):

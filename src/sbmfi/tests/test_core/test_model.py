@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from cobra import Model, Reaction, Metabolite
+from cobra import Reaction, Metabolite
 from sbmfi.core.model import (
     LabellingModel,
     EMU_Model,
@@ -9,8 +9,8 @@ from sbmfi.core.model import (
     model_builder_from_dict,
     process_biomass_reaction
 )
-from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU, IsoCumo
-from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
+from sbmfi.core.metabolite import LabelledMetabolite
+from sbmfi.core.reaction import LabellingReaction
 
 
 class TestModelBuilder:
@@ -73,7 +73,7 @@ class TestModelBuilder:
         )
     ])
     def test_create_full_metabolite_kwargs_variants(
-            self, basic_reaction_kwargs, basic_metabolite_kwargs, 
+            self, basic_reaction_kwargs, basic_metabolite_kwargs,
             reaction_ids, expected, add_cofactors, only_labmets
     ):
         """Test various metabolite kwargs creation scenarios with different parameter combinations"""
@@ -81,7 +81,7 @@ class TestModelBuilder:
         reaction_kwargs = {rid: basic_reaction_kwargs[rid] for rid in reaction_ids}
 
         result = create_full_metabolite_kwargs(
-            reaction_kwargs, 
+            reaction_kwargs,
             basic_metabolite_kwargs,
             infer_formula=True,
             add_cofactors=add_cofactors,
@@ -171,15 +171,15 @@ class TestModelBuilder:
         # Verify reaction bounds for all reactions
         assert r1.lower_bound == 0.0  # from fixture
         assert r1.upper_bound == 100.0  # from fixture
-        
+
         r2 = model.reactions.get_by_id('r2')
         assert r2.lower_bound == 0.0  # default
         assert r2.upper_bound == 1000.0  # default
-        
+
         r3 = model.reactions.get_by_id('r3')
         assert r3.lower_bound == 0.0  # default
         assert r3.upper_bound == 100.0  # default
-        
+
         bm = model.reactions.get_by_id('bm')
         assert bm.lower_bound == 0.0  # from fixture
         assert bm.upper_bound == 100.0  # from fixture
@@ -269,7 +269,6 @@ class TestLabellingModelSubstrateLabelling:
         # A/00 and A/11 for metabolite A (2 carbons)
         return pd.Series({'A/00': 0.5, 'A/11': 0.5}, name='test_labelling')
 
-    @pytest.mark.parametrize('labelling_model', ['numpy'], indirect=True)
     def test_set_and_get_substrate_labelling(self, labelling_model, valid_substrate_labelling):
         model = labelling_model
         model.set_substrate_labelling(valid_substrate_labelling)
@@ -282,7 +281,6 @@ class TestLabellingModelSubstrateLabelling:
         assert len(mets) == 1
         assert mets[0].id == 'A'
 
-    @pytest.mark.parametrize('labelling_model', ['numpy'], indirect=True)
     def test_set_same_labelling_twice_idempotent(self, labelling_model, valid_substrate_labelling):
         model = labelling_model
         model.set_substrate_labelling(valid_substrate_labelling)
@@ -291,7 +289,6 @@ class TestLabellingModelSubstrateLabelling:
         out = model.substrate_labelling
         assert set(out.index) == set(valid_substrate_labelling.index)
 
-    @pytest.mark.parametrize('labelling_model', ['numpy'], indirect=True)
     @pytest.mark.parametrize("labelling,errmsg", [
         (pd.Series({'A/00': -0.1, 'A/11': 1.1}, name='test_labelling'),
          'Negative or over 1 value in substrate labelling'),
@@ -303,7 +300,6 @@ class TestLabellingModelSubstrateLabelling:
         with pytest.raises(ValueError, match=errmsg):
             model.set_substrate_labelling(labelling)
 
-    @pytest.mark.parametrize('labelling_model', ['numpy'], indirect=True)
     def test_illegally_reversible_substrate_reaction(self, labelling_model, valid_substrate_labelling):
         model = labelling_model
         # Make the substrate reaction reversible (rho_max != 0.0)
@@ -313,7 +309,6 @@ class TestLabellingModelSubstrateLabelling:
         with pytest.raises(ValueError, match=r'substrate reaction is illegaly reversible'):
             model.set_substrate_labelling(valid_substrate_labelling)
 
-    @pytest.mark.parametrize('labelling_model', ['numpy'], indirect=True)
     def test_substrate_reaction_zero_bounds(self, labelling_model, valid_substrate_labelling):
         model = labelling_model
         # Set both bounds to zero
@@ -322,7 +317,6 @@ class TestLabellingModelSubstrateLabelling:
         with pytest.raises(ValueError, match=r'substrate reaction a_in for metabolite A has \(0, 0\) bounds'):
             model.set_substrate_labelling(valid_substrate_labelling)
 
-    @pytest.mark.parametrize('labelling_model', ['numpy'], indirect=True)
     def test_no_substrate_reaction(self, labelling_model, valid_substrate_labelling):
         model = labelling_model
         # Remove all reactions from A
@@ -337,8 +331,7 @@ class TestEMUModelSubstrateLabelling:
     def emu_model(self, basic_reaction_kwargs, basic_metabolite_kwargs):
         cobra_model = model_builder_from_dict(basic_reaction_kwargs, basic_metabolite_kwargs)
         model = EMU_Model(cobra_model)
-        reaction_kwargs = {rid: kwargs for rid, kwargs in basic_reaction_kwargs.items() if rid != 'a_in'}
-        model.add_labelling_kwargs(reaction_kwargs, basic_metabolite_kwargs)
+        model.add_labelling_kwargs(basic_reaction_kwargs, basic_metabolite_kwargs)
         # Minimal setup for EMU state
         model._xemus = {2: []}
         model._yemus = {2: []}
@@ -380,16 +373,13 @@ class TestEMUModelSubstrateLabelling:
 
     def test_illegally_reversible_substrate_reaction(self, emu_model, valid_substrate_labelling):
         a_in = emu_model.reactions.get_by_id('a_in')
-        emu_model.reactions._replace_on_id(EMU_Reaction(a_in, rho_max=1.0))
+        a_in._rho_max = 0.5  # bypass setter; rho_max > 0 is enough to trigger the check
         with pytest.raises(ValueError, match=r'substrate reaction is illegaly reversible'):
             emu_model.set_substrate_labelling(valid_substrate_labelling)
 
     def test_substrate_reaction_zero_bounds(self, emu_model, valid_substrate_labelling):
         a_in = emu_model.reactions.get_by_id('a_in')
-        rxn = EMU_Reaction(a_in, rho_max=0.0)
-        rxn.lower_bound = 0.0
-        rxn.upper_bound = 0.0
-        emu_model.reactions._replace_on_id(rxn)
+        a_in.upper_bound = 0.0
         with pytest.raises(ValueError, match=r'substrate reaction a_in for metabolite A has \(0, 0\) bounds'):
             emu_model.set_substrate_labelling(valid_substrate_labelling)
 
@@ -401,8 +391,7 @@ class TestEMUModelSubstrateLabelling:
 
     def test_empty_Y_cache_raises(self, emu_model, valid_substrate_labelling):
         # Simulate a cache hit but with empty _Y
-        emu_model._labelling_repo['emu_labelling'] = {'_substrate_labelling': {}}
-        emu_model._Y = {}
-        emu_model._yemus = {2: []}
+        # Simulate a cache hit where _Y was stored as empty (e.g. from a different batch_size)
+        emu_model._labelling_repo['emu_labelling'] = {'_substrate_labelling': {}, '_Y': {}}
         with pytest.raises(ValueError):
             emu_model.set_substrate_labelling(valid_substrate_labelling)

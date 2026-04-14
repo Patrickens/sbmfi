@@ -1,13 +1,13 @@
-from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU, ConvolutedEMU
-from sbmfi.core.util import _get_dictlist_idxs, _read_atom_map_str_rex, _find_biomass_rex, _strip_bigg_rex, get_tensor
+from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU
+from sbmfi.core.util import _get_dictlist_idxs, _read_atom_map_str_rex, _find_biomass_rex, get_tensor
 import numpy as np
 import pandas as pd
-from cobra import Reaction, DictList, Metabolite
+from cobra import Reaction, DictList
 from math import isinf
 from collections.abc import Iterable
 from abc import abstractmethod
 import operator
-from copy import copy, deepcopy
+from copy import deepcopy
 
 
 class LabellingReaction(Reaction):
@@ -585,7 +585,7 @@ class EMU_Reaction(LabellingReaction):
         return state
 
     def _find_reactant_emus(self, product_emu: EMU, substrate_metabolites: Iterable, n_eq_EMU=1, eq_EMU=None) -> list:
-        if not product_emu.metabolite in self.gettants(reactant=False):
+        if product_emu.metabolite not in self.gettants(reactant=False):
             raise ValueError('pjurre kenss')
         prod_stoich, all_prod_atoms = self._atom_map[product_emu.metabolite]
         if eq_EMU is None:
@@ -674,7 +674,7 @@ class EMU_Reaction(LabellingReaction):
             A_values = A_elem[:, 0].astype(np.double)
             self.A_tensors[weight] = get_tensor(
                 shape=(len(xemus[weight]), len(xemus[weight])),
-                indices=A_indices, values=A_values, device=self.model._device,
+                indices=A_indices, values=A_values, config=self.model._config,
             )
 
             B_elem = self.B_elements.get(weight, None)
@@ -686,7 +686,7 @@ class EMU_Reaction(LabellingReaction):
                 B_values = B_elem[:, 0].astype(np.double)
                 self.B_tensors[weight] = get_tensor(
                     shape=(len(xemus[weight]), len(yemus[weight])),
-                    indices=B_indices, values=B_values, device=self.model._device,
+                    indices=B_indices, values=B_values, config=self.model._config,
                 )
 
     def pretty_tensors(self, weight: int):

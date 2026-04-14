@@ -3,7 +3,6 @@ import numpy as np
 import pickle
 from cobra import Metabolite
 from sbmfi.core.metabolite import LabelledMetabolite, IsoCumo, EMU_Metabolite, EMU, ConvolutedEMU
-from sbmfi.compound.formula import Formula
 
 @pytest.fixture
 def basic_metabolite():
@@ -149,7 +148,7 @@ class TestPickling:
         # Pickle and unpickle
         pickled = pickle.dumps(labelled_metabolite)
         unpickled = pickle.loads(pickled)
-        
+
         # Check attributes are preserved
         assert unpickled.id == labelled_metabolite.id
         assert unpickled.formula == labelled_metabolite.formula
@@ -160,11 +159,11 @@ class TestPickling:
     def test_pickle_isocumo(self, labelled_metabolite):
         # Create an IsoCumo
         iso = IsoCumo(metabolite=labelled_metabolite, label='000000', name='test_iso')
-        
+
         # Pickle and unpickle
         pickled = pickle.dumps(iso)
         unpickled = pickle.loads(pickled)
-        
+
         # Check attributes are preserved
         assert unpickled.id == iso.id
         assert unpickled.name == iso.name
@@ -179,19 +178,19 @@ class TestPickling:
         emu1 = emu_metabolite.get_emu(np.array([0, 1]))
         emu2 = emu_metabolite.get_emu(np.array([2, 3]))
         conv_emu = emu_metabolite.get_convolved_emu([emu1, emu2])
-        
+
         # Pickle and unpickle
         pickled = pickle.dumps(emu_metabolite)
         unpickled = pickle.loads(pickled)
-        
+
         # Check basic attributes
         assert unpickled.id == emu_metabolite.id
         assert unpickled.formula == emu_metabolite.formula
         assert unpickled.symmetric == emu_metabolite.symmetric
-        
+
         # Check EMUs structure is recreated
         assert len(unpickled.emus) == len(emu_metabolite.emus)
-        
+
         # Check all EMU lists are empty except for the full metabolite EMU
         full_weight = emu_metabolite.elements['C']
         for weight in unpickled.emus:
@@ -200,7 +199,7 @@ class TestPickling:
                 assert unpickled.emus[weight][0].id == f"{unpickled.id}|[0,1,2,3,4,5]"  # Full carbon positions
             else:
                 assert len(unpickled.emus[weight]) == 0  # Other EMUs should be empty
-        
+
         # Check convolvers are cleared
         assert len(unpickled.convolvers) == 0
 
@@ -208,11 +207,11 @@ class TestPickling:
         # Create an EMU
         positions = np.array([0, 1, 2])
         emu = EMU(metabolite=emu_metabolite, positions=positions)
-        
+
         # Pickle and unpickle
         pickled = pickle.dumps(emu)
         unpickled = pickle.loads(pickled)
-        
+
         # Check attributes are preserved
         assert unpickled.id == emu.id
         assert unpickled.weight == emu.weight
@@ -225,11 +224,11 @@ class TestPickling:
         emu1 = EMU(metabolite=emu_metabolite, positions=np.array([0, 1]))
         emu2 = EMU(metabolite=emu_metabolite, positions=np.array([2, 3]))
         conv_emu = ConvolutedEMU(emus=[emu1, emu2])
-        
+
         # Pickle and unpickle
         pickled = pickle.dumps(conv_emu)
         unpickled = pickle.loads(pickled)
-        
+
         # Check attributes are preserved
         assert unpickled.id == conv_emu.id
         assert unpickled.weight == conv_emu.weight
@@ -237,4 +236,4 @@ class TestPickling:
         assert len(unpickled._emus) == len(conv_emu._emus)
         for e1, e2 in zip(unpickled._emus, conv_emu._emus):
             assert e1.id == e2.id
-            assert e1.weight == e2.weight 
+            assert e1.weight == e2.weight

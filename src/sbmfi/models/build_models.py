@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
+import torch
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
+from sbmfi.config import SBMFIConfig
 from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservationModel, ClassicalObservationModel, MDV_ObservationModel
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.util import make_multidex
@@ -14,10 +16,8 @@ import cobra
 from cobra.io import read_sbml_model
 from cobra import Reaction, Metabolite, DictList, Model
 # from pta import ConcentrationsPrior
-import pickle
 from sbmfi.core.polytopia import (
     extract_labelling_polytope,
-    rref_null_space,
     thermo_2_net_polytope
 )
 from sbmfi.core.coordinater import FluxCoordinateMapper
@@ -2239,7 +2239,15 @@ def simulator_factory(
     else:
         model_type = EMU_Model
 
-    model = model_type(model=id_or_file_or_model, batch_size=batch_size, device=device)
+    base_config = SBMFIConfig.from_env()
+    model_config = SBMFIConfig(
+        device=torch.device(device),
+        dtype=base_config.dtype,
+        batch_size=int(batch_size),
+        cobra_solver=base_config.cobra_solver,
+        cvxpy_solver=base_config.cvxpy_solver,
+    )
+    model = model_type(model=id_or_file_or_model, config=model_config)
     model.add_reactions(
         reaction_list=reaction_list,
         reaction_kwargs=reaction_kwargs,

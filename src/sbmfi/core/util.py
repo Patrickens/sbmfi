@@ -1,7 +1,8 @@
 import numpy as np
 import tables as pt
-import sys, gc
-import math, re
+import sys
+import gc
+import re
 # np.seterr(all='raise')
 from cobra.io import save_json_model
 from PolyRound.api import Polytope
@@ -13,6 +14,7 @@ import traceback
 from typing import Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
+from sbmfi.config import SBMFIConfig
 # poetry add git+https://github.com/GeomScale/dingo.git
 # poetry install git+https://github.com/GeomScale/dingo.git
 # TODO mail this dude for postdoc in Barca: https://torres-sanchez.xyz/
@@ -99,7 +101,8 @@ def get_tensor(
     indices: Optional[np.ndarray] = None,
     values: Optional[np.ndarray] = None,
     dtype=None,
-    device: Optional[torch.device] = None,
+    config: Optional[SBMFIConfig] = None,
+    **kwargs,
 ) -> torch.Tensor:
     """
     Build a torch tensor, optionally scatter-filling from sparse (indices, values).
@@ -117,13 +120,22 @@ def get_tensor(
         ``indices`` is provided.
     dtype :
         numpy or torch dtype.  Inferred from ``values`` when omitted.
-    device :
-        torch device (default: CPU).
+    config :
+        SBMFI runtime config carrying default device and dtype.
 
     Returns
     -------
     torch.Tensor
     """
+    device = kwargs.pop('device', None)
+    if kwargs:
+        raise TypeError(f'unexpected keyword arguments: {list(kwargs.keys())}')
+
+    if config is None:
+        config = SBMFIConfig.from_env()
+    if device is None:
+        device = config.device
+
     # Resolve dtype → torch.dtype
     _NP_TORCH = {
         np.bool_: torch.bool,
@@ -144,6 +156,8 @@ def get_tensor(
     if dtype is None:
         if values is not None and np.asarray(values).size:
             dtype = np.asarray(values).dtype.type
+        elif config is not None:
+            dtype = config.dtype
         else:
             dtype = np.double
     if not isinstance(dtype, torch.dtype):
@@ -472,5 +486,4 @@ def generate_nat_labelled_isotop_state(metabolite: 'LabelledMetabolite', min_abu
 
 
 if __name__ == "__main__":
-    import pickle, os
-    from sbmfi.models.small_models import spiro
+    import os

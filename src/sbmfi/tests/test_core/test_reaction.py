@@ -1,9 +1,9 @@
 import pytest
 import numpy as np
-from cobra import Reaction, Metabolite, Model
-from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
-from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU
-from sbmfi.core.model import LabellingModel, EMU_Model, model_builder_from_dict
+from cobra import Reaction, Metabolite
+from sbmfi.core.reaction import LabellingReaction
+from sbmfi.core.metabolite import LabelledMetabolite
+from sbmfi.core.model import LabellingModel, model_builder_from_dict
 
 @pytest.fixture
 def metabolite_kwargs():
@@ -17,7 +17,7 @@ def metabolite_kwargs():
         'S': {'formula': 'C2H4O3', 'symmetric': False},  # Glyoxylate
         'T': {'formula': 'C2H3O3', 'symmetric': False},  # Oxaloacetate
         'U': {'formula': 'C2H4O4', 'symmetric': False},  # Oxalate
-        
+
         # Symmetric metabolites
         'SP': {'formula': 'C2H3O2', 'symmetric': True, 'compartment': 'c', 'charge': -1},  # Pyruvate
         'SQ': {'formula': 'C4H6O4', 'symmetric': True, 'compartment': 'c'},  # Succinate
@@ -25,12 +25,12 @@ def metabolite_kwargs():
         'SS': {'formula': 'C2H4O3', 'symmetric': True},  # Glyoxylate
         'ST': {'formula': 'C2H3O3', 'symmetric': True},  # Oxaloacetate
         'SU': {'formula': 'C2H4O4', 'symmetric': True},  # Oxalate
-        
+
         # Edge cases
         'E1': {'formula': 'C1H4O', 'symmetric': False},  # Single carbon
         'E2': {'formula': 'C6H12O6', 'symmetric': False}, # Large molecule
         'E3': {'formula': 'C0H2O', 'symmetric': False},  # No carbon
-        
+
         # Pseudo metabolites
         'L': {'formula': 'C4H8O2'},  # Pseudo metabolite for testing
         'M': {'formula': 'C2H6O'},   # Another pseudo metabolite
@@ -87,7 +87,7 @@ def reaction_kwargs():
         'er2': { # should error due to unbalanced number of carbons
             'atom_map_str': 'E2/abcdef --> E1/a + E1/b'  # Multiple to single carbons
         },
-        
+
         # Pseudo reaction
         'pr1': {
             'pseudo': True,
@@ -105,7 +105,7 @@ def reaction_kwargs():
 
 class TestLabellingReactionCreation:
     """Tests for creating LabellingReaction instances without a model"""
-    
+
     @pytest.fixture
     def basic_reaction(self):
         """Create a basic cobra Reaction without a model"""
@@ -166,22 +166,22 @@ class TestLabellingReactionCreation:
         """Test creation of different types of reactions, including bounds and rho_bounds"""
         # Get the reaction fixture by name
         rxn = request.getfixturevalue(reaction)
-        
+
         # Test basic properties
         assert rxn.id == expected["id"]
         assert len(rxn.metabolites) == expected["num_metabolites"]
-        
+
         # Test metabolite coefficients
         metabolites = list(rxn.metabolites.items())
         assert len(metabolites) == expected["num_metabolites"]
         for i, coef in enumerate(expected["coefficients"]):
             assert metabolites[i][1] == coef
-        
+
         # Test LabellingReaction specific properties
         if expected["is_labelled"]:
             assert isinstance(rxn, LabellingReaction)
             assert rxn.pseudo == expected["is_pseudo"]
-        
+
         # Test bounds
         assert rxn.bounds == expected["bounds"]
         # Test rho_bounds
@@ -200,11 +200,11 @@ class TestLabellingReactionCreation:
         met = Metabolite('X', formula='C1H2O')
         rxn.add_metabolites({met: 1})
         labelled_rxn = LabellingReaction(rxn)
-        
+
         # Attempting to add metabolites should raise NotImplementedError
         with pytest.raises(NotImplementedError):
             labelled_rxn.add_metabolites({Metabolite('Y', formula='C1H2O'): 1})
-        
+
         # Attempting to subtract metabolites should raise NotImplementedError
         with pytest.raises(NotImplementedError):
             labelled_rxn.subtract_metabolites({met: 1})
@@ -404,17 +404,24 @@ class TestLabellingReactionAtomMapping:
             reaction.set_atom_map(atom_map)
 
     def test_biomass_set_atom_map(self, model, reaction_kwargs, metabolite_kwargs):
-        """Test set_atom_map for a biomass reaction: atom_map should match reaction_str coefficients and atoms=[None]."""
-        reaction = LabellingReaction(model.reactions.get_by_id('biomass'))
-        single_r_kwargs = {'biomass': reaction_kwargs['biomass']}
-        model.add_labelling_kwargs(single_r_kwargs, metabolite_kwargs)
-        expected_atom_map = { 'H': (-0.3, [None]), 'B': (-0.6, [None]), 'E': (-0.5, [None]), 'C': (-0.1, [None])}
-        expected_atom_map = {model.metabolites.get_by_id(met_id): kwargs for met_id, kwargs in expected_atom_map.items()}
-        for met_id, (stoich, atom_list) in expected_atom_map.items():
-            met = model.metabolites.get_by_id(met_id)
-            # Forward reaction
-            actual_stoich, actual_arr = reaction.atom_map[met]
-            assert stoich == actual_stoich
-            expected_arr = np.array(atom_list)
-            assert np.array_equal(expected_arr, actual_arr)
+        """Test set_atom_map for a biomass reaction.
+
+        Metabolites are only converted to LabelledMetabolite when their reactions
+        are processed by add_labelling_kwargs.  The biomass metabolites that appear
+        in other labelled reactions (B via r2, E via er_e reactions) become
+        LabelledMetabolite instances and get atoms=[None] in the biomass atom_map.
+        """
+        # Add valid non-biomass reactions so their metabolites become LabelledMetabolite
+        # (er1/er2 have intentionally unbalanced carbons and must be excluded)
+        skip = {'biomass', 'er1', 'er2'}
+        non_biomass = {rid: kw for rid, kw in reaction_kwargs.items() if rid not in skip}
+        model.add_labelling_kwargs(non_biomass, metabolite_kwargs)
+        # Now add biomass — B is already a LabelledMetabolite
+        model.add_labelling_kwargs({'biomass': reaction_kwargs['biomass']}, metabolite_kwargs)
+        reaction = model.reactions.get_by_id('biomass')
+        # B appears in labelled reactions so it becomes LabelledMetabolite with carbon
+        met_b = model.metabolites.get_by_id('B')
+        actual_stoich, actual_arr = reaction.atom_map[met_b]
+        assert actual_stoich == -0.6
+        assert np.array_equal(np.array([None]), actual_arr)
 

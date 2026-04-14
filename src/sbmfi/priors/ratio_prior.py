@@ -1,7 +1,6 @@
 import multiprocessing as mp
 import math
 import cvxpy as cp
-from sbmfi.settings import CVXPY_SOLVER as _CVXPY_SOLVER
 import numpy as np
 import pandas as pd
 import warnings
@@ -31,6 +30,7 @@ class _RatioSupport(Constraint):
         # TODO project polytope on ratio-reactions!
         self._ratol = ratio_tol
         self._mds = min_denom_sum
+        self._config = fcm._config
 
         polytope = fcm._Fn
         normalize = fcm._sampler.kernel_id != 'rref'
@@ -154,7 +154,7 @@ class _RatioSupport(Constraint):
             ratio_sample = viewlue[i, :]
             self._lhs.value = self.construct_polytope_constraints(ratio_sample=ratio_sample)[0, ...]
             try:
-                optimum = self._problem.solve(solver=_CVXPY_SOLVER, verbose=False)
+                optimum = self._problem.solve(solver=self._config.cvxpy_solver, verbose=False)
                 # NOTE sometimes the polytope is not empty according to cvxpy but sampling still fails
                 if optimum is not None:
                     self._accepted[i] = True
@@ -255,7 +255,7 @@ class RatioPrior(_BasePrior):
                 # NOTE this "works" for sampling ratios, but the distribution is not uniform at all and looks more
                 #   like the distribution we get from uniform sampling
                 self._pol = self.construct_numden_polytope(self._fcm, model, coef=coef)
-            self._vsm = PolytopeSamplingModel(self._pol)
+            self._vsm = PolytopeSamplingModel(self._pol, config=model._config)
             self._bsp = None  # these are the basis points
             self._fill_caches = self._fill_caches_usm
         elif algorithm == 'hypercube':
@@ -330,7 +330,7 @@ class RatioPrior(_BasePrior):
                 objective=cp.Minimize(objective @ v),
                 constraints=constraints
             )
-            lfp.solve(solver=_CVXPY_SOLVER)
+            lfp.solve(solver=model._config.cvxpy_solver)
             val_min = lfp.value
             if lfp.status != 'optimal':
                 raise ValueError(f'ish not a valid ratio: {ratio_id}')
@@ -338,7 +338,7 @@ class RatioPrior(_BasePrior):
                 print(f'minimum ratio {ratio_id} is: {round(val_min, 3)}')
             ratio_min = max(round(val_min, 3), 0.0)
             objective.value *= -1
-            lfp.solve(solver=_CVXPY_SOLVER)
+            lfp.solve(solver=model._config.cvxpy_solver)
             val_max = lfp.value
             if lfp.status != 'optimal':
                 raise ValueError(f'ish not a valid ratio: {ratio_id}')

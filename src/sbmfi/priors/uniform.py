@@ -1,10 +1,9 @@
 import psutil
 import multiprocessing as mp
-import numpy as np
 import pandas as pd
 import torch
 import inspect
-from torch.distributions.constraints import Constraint, _Dependent, _Interval
+from torch.distributions.constraints import _Dependent
 from torch.types import _size
 
 from sbmfi.core.model import LabellingModel
@@ -17,11 +16,10 @@ from sbmfi.core.polytopia import (
 )
 from sbmfi.core.coordinater import FluxCoordinateMapper, make_theta_polytope
 from sbmfi.core.distributions import sample_bounded, trunc_norm_log_pdf
-from typing import Iterable, Union, List, Dict
+from typing import Union, Dict
 from torch.distributions import constraints
 from torch.distributions import Distribution
 import math
-import tqdm
 import functools
 #   https://math.stackexchange.com/questions/4484178/computing-barycentric-coordinates-for-convex-n-dimensional-polytope-that-is-not
 
@@ -182,7 +180,7 @@ class _BasePrior(Distribution):
             model = model.flux_coordinate_mapper
 
         self._fcm = model
-        self._device = model._device
+        self._device = model._config.device
 
         if num_processes < 0:
             num_processes = psutil.cpu_count(logical=False)
@@ -279,14 +277,14 @@ class _BaseXchFluxPrior(Distribution):
             raise ValueError('no boundary fluxes')
 
         self._fcm = model
-        self._device = model._device
+        self._device = model._config.device
         self._rho_bounds = model._rho_bounds
         super().__init__(event_shape=torch.Size((model._nx, )), validate_args={})
 
     @property
     def theta_id(self) -> pd.Index:
         return self._fcm.xch_theta_id()
-    
+
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
         raise NotImplementedError
 
@@ -379,9 +377,6 @@ class UniformRoundedFleXchPrior(BaseRoundedPrior):
 
 
 if __name__ == "__main__":
-    import pickle, os
-    from sbmfi.settings import MODEL_DIR, BASE_DIR
-    from sbmfi.models.build_models import build_e_coli_anton_glc, build_e_coli_tomek
     from sbmfi.models.small_models import spiro
     # from equilibrator_api import *
 

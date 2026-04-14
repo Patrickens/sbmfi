@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Sequence, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 from torchdiffeq import odeint
 from tqdm import tqdm
 from flow_matching.solver.riemannian_ode_solver import (
@@ -354,7 +354,6 @@ def riem_sample_and_div(
 
 if __name__ == "__main__":
     device='cpu'
-    from flow_matching.path import GeodesicProbPath
     # import numpy as np
     # from manifolds import BallManifold
     # from scipy.special import gammaln

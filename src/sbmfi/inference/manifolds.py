@@ -1,7 +1,4 @@
-import abc
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from flow_matching.utils.manifolds import Manifold
 import math
@@ -703,5 +700,4 @@ class Simplex(Manifold):
 
 
 if __name__ == "__main__":
-    from flow_matching.path import GeodesicProbPath,  CondOTProbPath
-    from flow_matching.solver import ODESolver, RiemannianODESolver
+    pass

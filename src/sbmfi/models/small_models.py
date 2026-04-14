@@ -1,6 +1,7 @@
-import pickle
 import pandas as pd
-from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model, model_builder_from_dict
+import torch
+from sbmfi.core.model import EMU_Model, RatioEMU_Model, model_builder_from_dict
+from sbmfi.config import SBMFIConfig
 from sbmfi.inference.sampling import _BaseBayes
 from sbmfi.priors.uniform import UniformRoundedFleXchPrior
 from sbmfi.core.observation import (
@@ -9,13 +10,9 @@ from sbmfi.core.observation import (
     MVN_BoundaryObservationModel,
     MDV_ObservationModel
 )
-from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
-from sbmfi.settings import MODEL_DIR, SIM_DIR
-from sbmfi.core.util import _strip_bigg_rex
-import sys, os
-import cobra
-from cobra.io import read_sbml_model
-from cobra import Reaction, Metabolite, DictList, Model
+from sbmfi.models.build_models import _correct_base_bayes_lcms
+from sbmfi.settings import SIM_DIR
+import os
 from sbmfi.compound import Formula
 
 def spiro(
@@ -207,7 +204,15 @@ def spiro(
     else:
         model_type = EMU_Model
 
-    model = model_type(model=model, batch_size=batch_size, device=device)
+    base_config = SBMFIConfig.from_env()
+    model_config = SBMFIConfig(
+        device=torch.device(device),
+        dtype=base_config.dtype,
+        batch_size=int(batch_size),
+        cobra_solver=base_config.cobra_solver,
+        cvxpy_solver=base_config.cvxpy_solver,
+    )
+    model = model_type(model=model, config=model_config)
     model.add_labelling_kwargs(
         reaction_kwargs=reaction_kwargs,
         metabolite_kwargs=metabolite_kwargs

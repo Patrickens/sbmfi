@@ -1,4 +1,3 @@
-from torch.types import _size
 
 from sbmfi.priors.uniform import *
 from sbmfi.priors.uniform import _BaseXchFluxPrior, BaseRoundedPrior
@@ -36,9 +35,9 @@ class ProjectionPrior(BaseRoundedPrior):
         self._xch_prior = xch_prior
 
         self._volumes = None
-        self._boundary_psm = PolytopeSamplingModel(self._projection_pol)
+        self._boundary_psm = PolytopeSamplingModel(self._projection_pol, config=self._fcm._config)
         self._projection_initial_points = None
-        self._projection_fva = fast_FVA(self._projection_pol)
+        self._projection_fva = fast_FVA(self._projection_pol, solver=self._fcm._config.cvxpy_solver)
 
     def _run_tasks(
             self, tasks, fn=sample_polytope, scramble=True,

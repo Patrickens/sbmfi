@@ -1,9 +1,8 @@
 import pandas as pd
 import numpy as np
 import torch
-from typing import Union, List
+from typing import Union
 import math
-import copy
 from PolyRound.api import Polytope
 from scipy.spatial import Delaunay
 from scipy.optimize import root
@@ -12,7 +11,6 @@ from sbmfi.core.polytopia import (
     PolytopeSamplingModel,
     extract_labelling_polytope,
     thermo_2_net_polytope,
-    LabellingPolytope,
     get_rounded_polytope,
 )
 from sbmfi.core.util import get_tensor, tensormul_T, scale, min_pos_max_neg
@@ -123,7 +121,7 @@ def map_rounded_2_ball(
     index = None
     if isinstance(rounded, pd.DataFrame):
         index = rounded.index
-        rounded = get_tensor(values=rounded.loc[:, psm.rounded_id].values, device=psm._device)
+        rounded = get_tensor(values=rounded.loc[:, psm.rounded_id].values, config=psm._config)
 
     # Ensure rounded is 2D. If it's 1D, add a batch dimension.
     if len(rounded.shape) == 1:
@@ -132,7 +130,7 @@ def map_rounded_2_ball(
     K = psm.dimensionality  # expected input dimension
     if jacobian:
         out_dim = K + 1 if sep_radius else K
-        J = get_tensor(shape=(*rounded.shape[:-1], out_dim, K), device=psm._device)
+        J = torch.zeros((*rounded.shape[:-1], out_dim, K), dtype=psm._config.dtype, device=psm._config.device)
         if hemi:
             raise NotImplementedError("Jacobian for hemi=True is not implemented.")
         if len(rounded.shape) > 2:
@@ -242,7 +240,7 @@ def map_ball_2_rounded(
     if isinstance(ball, pd.DataFrame):
         index = ball.index
         columns = make_net_theta_id(psm, coordinate_id='ball', hemi=hemi, sep_radius=sep_radius)
-        ball = get_tensor(values=ball.loc[:, columns].values, device=psm._device)
+        ball = get_tensor(values=ball.loc[:, columns].values, config=psm._config)
 
     # Ensure ball is 2D; if 1D, add a batch dimension.
     if ball.dim() == 1:
@@ -261,9 +259,9 @@ def map_ball_2_rounded(
     if jacobian:
         # For sep_radius=True, ball is assumed to have sampler.dimensionality+1 columns.
         # For sep_radius=False, we require ball.shape[-1] to match sampler.dimensionality.
-        diags = torch.arange(K, device=psm._device)
+        diags = torch.arange(K, device=psm._config.device)
         # Preallocate a tensor for J in the sep_radius==True branch.
-        J = get_tensor(shape=(*ball.shape[:-1], K, Kk), device=psm._device)
+        J = torch.zeros((*ball.shape[:-1], K, Kk), dtype=psm._config.dtype, device=psm._config.device)
         J[..., diags, diags] = 1  # insert identity block
         if hemi:
             raise NotImplementedError("Jacobian for hemi=True is not implemented.")
@@ -393,15 +391,19 @@ def map_cylinder_2_ball(
     if isinstance(cylinder, pd.DataFrame):
         index = cylinder.index
         net_theta_id = make_net_theta_id(psm, coordinate_id='cylinder', hemi=hemi)
-        cylinder = get_tensor(values=cylinder.loc[:, net_theta_id].values, device=psm._device)
+        cylinder = get_tensor(values=cylinder.loc[:, net_theta_id].values, config=psm._config)
 
     cylinder = cylinder + 0.0  # copy data, since we modify in-place
 
     K = psm.dimensionality
     if jacobian:
-        J_polar_rescale = get_tensor(shape=(*cylinder.shape[:-1], K + 1, K), device=psm._device)
-        J_ball_cylinder = get_tensor(shape=(*cylinder.shape[:-1], K + 1, K + 1), device=psm._device)
-        diags = torch.arange(K + 1, device=psm._device)
+        J_polar_rescale = torch.zeros(
+            (*cylinder.shape[:-1], K + 1, K), dtype=psm._config.dtype, device=psm._config.device
+        )
+        J_ball_cylinder = torch.zeros(
+            (*cylinder.shape[:-1], K + 1, K + 1), dtype=psm._config.dtype, device=psm._config.device
+        )
+        diags = torch.arange(K + 1, device=psm._config.device)
         J_ball_cylinder[..., diags, diags] = 1
 
         cyl_rescale = 1
@@ -492,14 +494,17 @@ class FluxCoordinateMapper(object):
         if not model._is_built:
             raise ValueError('build the model first')
 
-        self._device = model._device
+        self._device = model._config.device
+        self._config = model._config
 
         self._F  = extract_labelling_polytope(model, 'labelling')
         self._Ft = extract_labelling_polytope(model, 'thermo')
         self._Fn = thermo_2_net_polytope(self._Ft, pr_verbose)
         self._n_lr = len(self.labelling_fluxes_id)
 
-        self._sampler = PolytopeSamplingModel(self._Fn, pr_verbose, kernel_id, device=self._device, **kwargs)
+        self._sampler = PolytopeSamplingModel(
+            self._Fn, pr_verbose, kernel_id, config=self._config, **kwargs
+        )
         self._tsampler = None
 
         self._fwd_id = pd.Index(self._Ft.mapper.keys())
@@ -507,26 +512,26 @@ class FluxCoordinateMapper(object):
         self._fwd_idx = get_tensor(
             values=np.array([self._Ft.A.columns.get_loc(rid) for rid in self._fwd_id]),
             dtype=np.int64,
-            device=self._device,
+            config=self._config,
         )
         self._rev_idx = get_tensor(
             values=np.array([self._Ft.A.columns.get_loc(rid) for rid in self._Ft.mapper.values()]),
             dtype=np.int64,
-            device=self._device,
+            config=self._config,
         )
         self._only_rev_idx = get_tensor(
             values=np.array([self._F.A.columns.get_loc(rid) for rid in self._only_rev.keys()]),
             dtype=np.int64,
-            device=self._device,
+            config=self._config,
         )
         self._nx = len(self._fwd_id)
-        self._rho_bounds = torch.zeros((self._nx, 2), dtype=torch.double, device=self._device)
+        self._rho_bounds = torch.zeros((self._nx, 2), dtype=self._config.dtype, device=self._config.device)
         for i, rid in enumerate(self._fwd_id):
             reaction = model.labelling_reactions.get_by_id(rid)
             self._rho_bounds[i, 0] = reaction.rho_min
             self._rho_bounds[i, 1] = reaction.rho_max
 
-        self._samples_id = model._batch_size
+        self._samples_id = model._config.batch_size
 
     @property
     def sampler(self):
@@ -573,7 +578,9 @@ class FluxCoordinateMapper(object):
             return map_rounded_2_ball(self._sampler, rounded_xch, sep_radius=False)
         if self._tsampler is None:
             theta_pol = make_theta_polytope(self)
-            self._tsampler = PolytopeSamplingModel(self._Ft, False, kernel_id, device=self._device)
+            self._tsampler = PolytopeSamplingModel(
+                self._Ft, False, kernel_id, config=self._config
+            )
         print(self._tsampler.rounded_id, rounded_xch.shape)
         return map_rounded_2_ball(self._tsampler, rounded_xch, sep_radius=False)
 
@@ -584,7 +591,7 @@ class FluxCoordinateMapper(object):
         if isinstance(net_theta, pd.DataFrame):
             index = net_theta.index
             net_theta_id = make_net_theta_id(self._sampler, coordinate_id)
-            net_theta = get_tensor(values=net_theta.loc[:, net_theta_id].values, device=self._device)
+            net_theta = get_tensor(values=net_theta.loc[:, net_theta_id].values, config=self._config)
 
         J_rb, J_bc = None, None
         if coordinate_id != 'transformed':
@@ -624,7 +631,7 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(net_fluxes, pd.DataFrame):
             index = net_fluxes.index
-            net_fluxes = get_tensor(values=net_fluxes.loc[:, self._sampler.reaction_id].values, device=self._device)
+            net_fluxes = get_tensor(values=net_fluxes.loc[:, self._sampler.reaction_id].values, config=self._config)
 
         net_theta = tensormul_T(self._sampler._T_1, net_fluxes - self._sampler._tau.T)  # = transformed
 
@@ -660,7 +667,7 @@ class FluxCoordinateMapper(object):
 
         if isinstance(labelling_fluxes, pd.DataFrame):
             samples_id = labelling_fluxes.index  # this means that the passed samples_id is ignored!
-            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._F.A.columns].values, device=self._device)
+            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._F.A.columns].values, config=self._config)
 
         labelling_fluxes = torch.atleast_2d(labelling_fluxes)
 
@@ -682,7 +689,7 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(thermo_fluxes, pd.DataFrame):
             index = thermo_fluxes.index
-            thermo_fluxes = get_tensor(values=thermo_fluxes.loc[:, self.thermo_fluxes_id].values, device=self._device)
+            thermo_fluxes = get_tensor(values=thermo_fluxes.loc[:, self.thermo_fluxes_id].values, config=self._config)
 
         fluxes = thermo_fluxes.clone()
 
@@ -714,7 +721,7 @@ class FluxCoordinateMapper(object):
             raise NotImplementedError
         if isinstance(fluxes, pd.DataFrame):
             index = fluxes.index
-            fluxes = get_tensor(values=fluxes.loc[:, self._F.A.columns].values, device=self._device)
+            fluxes = get_tensor(values=fluxes.loc[:, self._F.A.columns].values, config=self._config)
 
         thermo_fluxes = fluxes.clone()
 
@@ -742,7 +749,7 @@ class FluxCoordinateMapper(object):
         index = None
         if isinstance(theta, pd.DataFrame):
             index = theta.index
-            theta = get_tensor(values=theta.loc[:, self.theta_id(coordinate_id)].values, device=self._device)
+            theta = get_tensor(values=theta.loc[:, self.theta_id(coordinate_id)].values, config=self._config)
         else:
             theta = theta.clone()  # theta is modified in-place in some map function, so we need to copy here
         if self._nx > 0:
@@ -782,7 +789,7 @@ class FluxCoordinateMapper(object):
                 cols = self._Ft.A.columns
             else:
                 cols = self._F.A.columns
-            fluxes = get_tensor(values=fluxes.loc[:, cols].values, device=self._device)
+            fluxes = get_tensor(values=fluxes.loc[:, cols].values, config=self._config)
 
         thermo_fluxes = fluxes
         if not is_thermo:
@@ -808,7 +815,7 @@ class FluxCoordinateMapper(object):
         """Re-initialize index tensors on the current device (called after unpickling)."""
         for kwarg in ['_fwd_idx', '_rev_idx', '_only_rev_idx', '_rho_bounds']:
             value = self.__dict__[kwarg]
-            self.__dict__[kwarg] = get_tensor(values=value, device=self._device)
+            self.__dict__[kwarg] = get_tensor(values=value, config=self._config)
 
 
 def expit_xch(fcm: FluxCoordinateMapper, xch_fluxes):
@@ -834,7 +841,7 @@ def map_thermo_2_gibbs(
     index = None
     if isinstance(thermo_fluxes, pd.DataFrame):
         index = thermo_fluxes.index
-        thermo_fluxes = get_tensor(values=thermo_fluxes.loc[:, fcm._Ft.A.columns].values, device=fcm._device)
+        thermo_fluxes = get_tensor(values=thermo_fluxes.loc[:, fcm._Ft.A.columns].values, config=fcm._config)
 
     xch = thermo_fluxes[..., fcm._rev_idx]
     net = thermo_fluxes[..., fcm._fwd_idx]
@@ -890,8 +897,8 @@ def map_labelling_jac_2_rounded_jac(
     if fcm._J_lt is None:
         # labelling fluxes w.r.t. thermo fluxes
         n = len(fcm.thermo_fluxes_id)
-        fcm._J_lt = get_tensor(shape=(thermo_fluxes.shape[0], n, n), device=fcm._device)
-        fcm._J_lt[...] = torch.eye(n, dtype=torch.double, device=fcm._device)[None, :, :]
+        fcm._J_lt = torch.zeros((thermo_fluxes.shape[0], n, n), dtype=fcm._config.dtype, device=fcm._config.device)
+        fcm._J_lt[...] = torch.eye(n, dtype=fcm._config.dtype, device=fcm._config.device)[None, :, :]
         if len(fcm._only_rev) > 0:
             fcm._J_lt[..., fcm._only_rev_idx, fcm._only_rev_idx] = -1.0
 
@@ -912,10 +919,12 @@ def map_labelling_jac_2_rounded_jac(
         n = 1
         if fcm._logxch:
             n = thermo_fluxes.shape[0]
-        fcm._J_tt = get_tensor(shape=(n, len(fcm.theta_id), len(fcm.labelling_fluxes_id)), device=fcm._device)
+        fcm._J_tt = torch.zeros(
+            (n, len(fcm.theta_id), len(fcm.labelling_fluxes_id)), dtype=fcm._config.dtype, device=fcm._config.device
+        )
         fcm._J_tt[:, :len(fcm.make_net_theta_id), :-fcm._nx] = fcm._mapper.to_fluxes_transform[0].T[None, :, :]
         if not fcm._logxch and (fcm._nx > 0):
-            fcm._J_tt[:, -fcm._nx, -fcm._nx] = torch.ones(fcm._nx, dtype=torch.double, device=fcm._device)
+            fcm._J_tt[:, -fcm._nx, -fcm._nx] = torch.ones(fcm._nx, dtype=fcm._config.dtype, device=fcm._config.device)
 
     return fcm._J_tt @ fcm._J_lt @ labelling_jacobian
 

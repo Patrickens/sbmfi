@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Union, List
+from typing import Optional, Union, List
 import math
 import scipy
 import pandas as pd
@@ -11,14 +11,13 @@ from sympy import nsimplify, Matrix
 from sympy.core.numbers import One
 import cvxpy as cp
 import cdd
-from sbmfi.settings import CVXPY_SOLVER as _CVXPY_SOLVER
+from sbmfi.config import SBMFIConfig
 import cdd.gmp
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
     _rev_reactions_rex, _xch_reactions_rex, get_tensor, tensormul_T, min_pos_max_neg, \
     sample_unit_hyper_sphere_ball
-from sbmfi.core.distributions import sample_bounded, bounded_log_prob, trunc_norm_log_pdf
+from sbmfi.core.distributions import sample_bounded, trunc_norm_log_pdf
 import torch
-import copy
 from PolyRound.api import PolyRoundApi, Polytope, PolyRoundSettings
 from PolyRound.static_classes.lp_utils import ChebyshevFinder
 from PolyRound.static_classes.rounding.maximum_volume_ellipsoid import MaximumVolumeEllipsoidFinder
@@ -67,7 +66,7 @@ class LabellingPolytope(Polytope):
         self._objective = val
 
     @staticmethod
-    def generate_cvxpy_LP(polytope, objective:dict=None, solve=False):
+    def generate_cvxpy_LP(polytope, objective:dict=None, solve=False, solver=None):
         # objective_reactions = cobra.util.solver.linear_reaction_coefficients(model)
         # polytope = polytope.copy()
         n = polytope.A.shape[1]
@@ -114,29 +113,33 @@ class LabellingPolytope(Polytope):
         })
 
         if solve and len(polytope._objective) > 0:
-            problem.solve(solver=_CVXPY_SOLVER, verbose=False)
-            cvx_result['solution'] = pd.Series(v_cp.value, index=polytope.A.columns, name=f'optimum', dtype=np.float64)
+            if solver is None:
+                solver = SBMFIConfig.from_env().cvxpy_solver
+            problem.solve(solver=solver, verbose=False)
+            cvx_result['solution'] = pd.Series(v_cp.value, index=polytope.A.columns, name='optimum', dtype=np.float64)
             cvx_result['optimum'] = problem.value
         return cvx_result
 
 
-def fast_FVA(polytope: Polytope, full=False):
-    cvx_result = LabellingPolytope.generate_cvxpy_LP(polytope)
+def fast_FVA(polytope: Polytope, full=False, solver=None):
+    cvx_result = LabellingPolytope.generate_cvxpy_LP(polytope, solver=solver)
     problem = cvx_result['problem']
     objective = cvx_result['objective']
     polytope = cvx_result['polytope']
     objective.value[:] = 0.0
 
     result = {}
+    if solver is None:
+        solver = SBMFIConfig.from_env().cvxpy_solver
     for i, reaction_id in zip(range(objective.value.shape[0]), polytope.A.columns):
         objective.value[i] = 1.0
-        problem.solve(solver=_CVXPY_SOLVER, ignore_dpp=True)
+        problem.solve(solver=solver, ignore_dpp=True)
         if problem.status != 'optimal':
             # raise ValueError(f'{reaction_id}: {problem.status}')
             print(f'{reaction_id}: {problem.status}')
         reac_max = round(problem.value, 4)
         objective.value[i] = -1.0
-        problem.solve(solver=_CVXPY_SOLVER, ignore_dpp=True)
+        problem.solve(solver=solver, ignore_dpp=True)
         reac_min = round(problem.value * -1, 4)
         objective.value[i] = 0.0
         if full:
@@ -759,7 +762,7 @@ class PolytopeSamplingModel(object):
             polytope: Polytope,
             pr_verbose = False,
             kernel_id ='svd',
-            device=None,
+            config: Optional[SBMFIConfig] = None,
             **kwargs
     ):
         if kernel_id not in ['rref', 'svd']:
@@ -797,7 +800,8 @@ class PolytopeSamplingModel(object):
         self._transformed_id = self._T_1.index
         self._reaction_id = polytope.A.columns.tolist()
 
-        self._device = device if device is not None else torch.device('cpu')
+        self._config = SBMFIConfig.from_env() if config is None else config
+        self._device = self._config.device
         self._G = F_round.A.values
         self._h = F_round.b.values[:, np.newaxis]
         self._Q = F_round.transformation.values
@@ -820,7 +824,10 @@ class PolytopeSamplingModel(object):
         index = None
         if isinstance(net_fluxes, pd.DataFrame):
             index = net_fluxes.index
-            net_fluxes = get_tensor(values=net_fluxes.loc[:, self._rounded_id].values, device=self._device)
+            net_fluxes = get_tensor(
+                values=net_fluxes.loc[:, self._rounded_id].values,
+                config=self._config,
+            )
 
         transformed = tensormul_T(self._T_1, net_fluxes - self._tau.T)
         rounded = tensormul_T(self._E_1, transformed - self._epsilon.T)
@@ -833,7 +840,10 @@ class PolytopeSamplingModel(object):
         index = None
         if isinstance(rounded, pd.DataFrame):
             index = rounded.index
-            rounded = get_tensor(values=rounded.loc[:, self._rounded_id].values, device=self._device)
+            rounded = get_tensor(
+                values=rounded.loc[:, self._rounded_id].values,
+                config=self._config,
+            )
 
         fluxes = tensormul_T(self._Q, rounded) + self._q.T
         if jacobian:
@@ -866,7 +876,7 @@ class PolytopeSamplingModel(object):
             value = self.__dict__[kwarg]
             if isinstance(value, pd.DataFrame) or isinstance(value, pd.Series):
                 value = value.values
-            self.__dict__[kwarg] = get_tensor(values=value, device=self._device)
+            self.__dict__[kwarg] = get_tensor(values=value, config=self._config)
 
 
 def get_rounded_polytope(psm: PolytopeSamplingModel):
@@ -886,7 +896,8 @@ class MarkovTransition():
             transition_id='peskun',
             return_log_prob_pi=True,  # if we need to compute Z, we should save the log_probs for all proposals
     ):
-        self._device = model._device
+        self._device = model._config.device
+        self._config = model._config
 
         if proposal_id not in ['gauss', 'unif']:
             raise ValueError('not a valid proposal_id')
@@ -912,7 +923,11 @@ class MarkovTransition():
             except Exception:
                 raise ValueError('not a valid covariance matrix')
             self._non_isotropic = True
-        self._chord_std = get_tensor(values=chord_std, dtype=np.float64, device=self._device)
+        self._chord_std = get_tensor(
+            values=chord_std,
+            dtype=np.float64,
+            config=self._config,
+        )
 
         self._n_chains = 0
         self._selecta = None
@@ -954,7 +969,7 @@ class MarkovTransition():
                 _uptri_probs = trunc_norm_log_pdf(
                     _uptri_x, _uptri_mu, _std, alpha_min[_cols], alpha_max[_cols]
                 )
-                log_prob = get_tensor(shape=_x.shape, device=_x.device)
+                log_prob = torch.zeros(_x.shape, dtype=self._config.dtype, device=self._config.device)
                 log_prob[_rows, _cols] = _uptri_probs
                 log_prob = log_prob + log_prob.transpose(0, 1)
                 log_prob[_diags, _diags] /= 2
@@ -969,8 +984,12 @@ class MarkovTransition():
         n_chains, n_dim = x.shape
         if self._n_chains != n_chains:
             self._selecta = torch.arange(n_chains, device=self._device)
-            self._line_xs = get_tensor(shape=(1 + self._n_cdf, n_chains, n_dim), device=self._device)
-            self._log_prob_pi = get_tensor(shape=(1 + self._n_cdf, n_chains), device=self._device)
+            self._line_xs = get_tensor(
+                shape=(1 + self._n_cdf, n_chains, n_dim), config=self._config
+            )
+            self._log_prob_pi = get_tensor(
+                shape=(1 + self._n_cdf, n_chains), config=self._config
+            )
             self._log_prob_pi[0] = self._pi.log_prob(x)
             self._axept = torch.zeros(n_chains, dtype=torch.int64, device=self._device)
             if not self._unif:
@@ -1022,7 +1041,7 @@ def sample_polytope(
         new_initial_points=False,
         return_psm = False,
         phi: float = None,
-        device=None,
+        config: Optional[SBMFIConfig] = None,
         kernel_id: str = 'svd',
         markov_transition: MarkovTransition=None,
         return_what='rounded',
@@ -1054,7 +1073,7 @@ def sample_polytope(
 
     result = {}
     if isinstance(model, Polytope):
-        model = PolytopeSamplingModel(model, kernel_id=kernel_id, device=device)
+        model = PolytopeSamplingModel(model, kernel_id=kernel_id, config=config)
         if return_psm:
             result['psm'] = model
         result['log_det_E'] = model.log_det_E
@@ -1069,7 +1088,7 @@ def sample_polytope(
 
     n_per_chain = math.ceil(n / n_chains)
     n_tot = n_burn + n_per_chain * thinning_factor
-    chains = get_tensor(shape=(n_per_chain, n_chains, K), device=model._device)  # use for PSRF computation
+    chains = torch.zeros((n_per_chain, n_chains, K), dtype=model._config.dtype, device=model._config.device)  # use for PSRF computation
 
     pbar = range(n_tot)
     if show_progress:
@@ -1083,10 +1102,12 @@ def sample_polytope(
         x = initial_points
 
     if markov_transition is not None:
-        if model._device != markov_transition._device:
-            raise ValueError(f'model and markov_transition are on different devices')
+        if model._config.device != markov_transition._device:
+            raise ValueError('model and markov_transition are on different devices')
         if markov_transition._retlp:
-            chain_log_probs = get_tensor(shape=(n_per_chain, n_chains), device=model._device)
+            chain_log_probs = torch.zeros(
+                (n_per_chain, n_chains), dtype=model._config.dtype, device=model._config.device
+            )
 
     biatch = min(5000, n_tot)  # batching this makes it a bit faster
     for i in pbar:
@@ -1250,7 +1271,6 @@ def compute_volume(
 
 if __name__ == "__main__":
     from sbmfi.models.small_models import spiro
-    import pickle
     import pandas as pd
     pd.set_option('display.max_rows', 500)
     pd.set_option('display.max_columns', 500)
@@ -1264,7 +1284,7 @@ if __name__ == "__main__":
         build_simulator=True,
         which_measurements='lcms',
     )
-    psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn, device=model._device)
+    psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn, config=model._config)
 
 
     import torch

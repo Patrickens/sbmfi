@@ -161,7 +161,7 @@ class Formula(FormulAlgebra):
             # NOTE: assume that if we are copying, that the incoming Formula is already properly formatted
             for isotop, number in formula.items():
                 k, elem = self._parse_isotope_string(isotop)
-                if not elem in _nist_mass:
+                if elem not in _nist_mass:
                     raise ValueError('Unknown chemical element: ' + elem)
                 self[self._make_isotope_string(k, elem)] += number
         elif isinstance(formula, str):
@@ -181,7 +181,7 @@ class Formula(FormulAlgebra):
                 self['-'] += z
 
             for isotope, elem, number in _isotope_rex.findall(formula):
-                if not elem in _nist_mass:
+                if elem not in _nist_mass:
                     raise ValueError('Unknown chemical element: ' + elem)
                 self[self._make_isotope_string(int(isotope) if isotope else 0, elem)] += \
                     int(number) if number else 1
@@ -193,14 +193,14 @@ class Formula(FormulAlgebra):
         num, elem, _ = _isotope_rex.match(isotope_string).groups()
         k = int(num) if num else 0
         if (elem not in _nist_mass) or (k not in _nist_mass[elem]):
-            raise ValueError(f'Not a chemical element G')
+            raise ValueError('Not a chemical element G')
         return k, elem
 
     @staticmethod
     def _make_isotope_string(k: int, elem: str):
         """Form a string label for an isotope."""
         if (elem not in _nist_mass) or (k not in _nist_mass[elem]):
-            raise ValueError(f'Conjo papi')
+            raise ValueError('Conjo papi')
 
         if k == 0:
             return elem

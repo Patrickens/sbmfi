@@ -1,15 +1,21 @@
 from sbmfi.priors.uniform import BaseRoundedPrior
-import contextlib, io
+import contextlib
+import io
 import numpy as np
 import pandas as pd
 import torch
 import random
 import scipy
 from sbmfi.core.reaction import LabellingReaction
-from sbmfi.core.polytopia import FluxCoordinateMapper
+from sbmfi.core.coordinater import FluxCoordinateMapper
 from sbmfi.priors.uniform import sampling_tasks
 from sbmfi.core.util import get_tensor
 from sbmfi.core.distributions import sample_bounded
+from sbmfi.priors.thermo_data import ThermoSamplingData, R_GAS
+from sbmfi.priors.thermo_sampler import (
+    DRGSamplingResult, sample_drg as _sample_drg_pure,
+    find_initial_points,
+)
 from collections import OrderedDict
 from torch.distributions import Distribution
 try:
@@ -21,7 +27,8 @@ try:
     from pta.constants import R
 except ImportError:
     TFSModel = None
-    R = 8.314472e-3  # kJ mol⁻¹ K⁻¹
+    FreeEnergiesSamplingResult = DRGSamplingResult
+    R = R_GAS
 
 def get_initial_points(self: TFSModel, num_points: int) -> np.ndarray:
 
@@ -71,7 +78,8 @@ def get_initial_points(self: TFSModel, num_points: int) -> np.ndarray:
     pool.close()
 
     return points_array
-TFSModel.get_initial_points = get_initial_points
+if TFSModel is not None:
+    TFSModel.get_initial_points = get_initial_points
 
 
 def append_xch_flux_samples(  # TODO make this work without things being dataframes
@@ -136,7 +144,7 @@ class ThermoPrior(BaseRoundedPrior):
     def __init__(
             self,
             model: FluxCoordinateMapper,
-            tfs_model: TFSModel,
+            tfs_model,   # TFSModel | ThermoSamplingData
             coordinates='thermo',
             cache_size: int = 20000,
             num_processes: int = 0,
@@ -162,49 +170,52 @@ class ThermoPrior(BaseRoundedPrior):
             print(f'The rho_bounds of reactions: {reset_rhos} has been set to ({0.0, LabellingReaction._RHO_MAX})')
         return model
 
-    def extract_drg_mvn(self, tfs_model: TFSModel, epsilon=1e-12, as_tensor=False) -> Distribution:
-        # NB extract mv parameters, this is a shit show due to pint and pickling...
-        tfs_reaction_ids = pd.Index(tfs_model.T.reaction_ids)
-        indices = np.array([tfs_reaction_ids.get_loc(rid) for rid in self._fcm.fwd_id])
+    def extract_drg_mvn(self, tfs_model, epsilon=1e-12, as_tensor=False) -> Distribution:
+        """Extract the marginal dG MVN, dispatching on TFSModel vs ThermoSamplingData."""
+        if isinstance(tfs_model, ThermoSamplingData):
+            drg_mean, drg_cov = tfs_model.drg_mvn_params(epsilon=epsilon)
+            # Subset to reactions in self._fcm.fwd_id
+            T_ids = list(tfs_model.T_reaction_ids)
+            indices = np.array([T_ids.index(rid) for rid in self._fcm.fwd_id])
+            drg_prime_mean = drg_mean[indices]
+            drg_prime_cov  = drg_cov[np.ix_(indices, indices)]
+        else:
+            # Legacy pta TFSModel path
+            tfs_reaction_ids = pd.Index(tfs_model.T.reaction_ids)
+            indices = np.array([tfs_reaction_ids.get_loc(rid) for rid in self._fcm.fwd_id])
 
-        T = tfs_model.T.parameters.T().model
+            T = tfs_model.T.parameters.T().model
+            R_val = R.model if hasattr(R, 'model') else R
 
-        dfg0_prime_mean = tfs_model.T.dfg0_prime_mean.model
-        log_conc_mean = tfs_model.T.log_conc_mean.model
-        dfg_prime_mean = dfg0_prime_mean + log_conc_mean * R.model * T
-        S_constraints = tfs_model.T.S_constraints
-        drg_prime_mean = (S_constraints.T @ dfg_prime_mean)[indices]
+            dfg0_prime_mean = tfs_model.T.dfg0_prime_mean.model
+            log_conc_mean   = tfs_model.T.log_conc_mean.model
+            dfg_prime_mean  = dfg0_prime_mean + log_conc_mean * R_val * T
+            S_constraints   = tfs_model.T.S_constraints
+            drg_prime_mean  = (S_constraints.T @ dfg_prime_mean)[indices]
 
-        dfg0_prime_cov_sqrt = tfs_model.T._dfg0_prime_cov_sqrt.model
-        dfg0_prime_cov = dfg0_prime_cov_sqrt @ dfg0_prime_cov_sqrt.T
-        dfg_prime_cov = dfg0_prime_cov + tfs_model.T.log_conc_cov.model * (R.model * T) ** 2
-        drg_prime_cov = (S_constraints.T @ dfg_prime_cov @ S_constraints)[:, indices][indices, :]
+            dfg0_cov_sqrt  = tfs_model.T._dfg0_prime_cov_sqrt.model
+            dfg0_cov       = dfg0_cov_sqrt @ dfg0_cov_sqrt.T
+            dfg_prime_cov  = dfg0_cov + tfs_model.T.log_conc_cov.model * (R_val * T) ** 2
+            drg_prime_cov  = (S_constraints.T @ dfg_prime_cov @ S_constraints)[:, indices][indices, :]
 
-        psd = False
-        eye = np.eye(drg_prime_cov.shape[0])
-        tot_eps = 0.0
-        while not psd:
-            try:
-                np.linalg.cholesky(drg_prime_cov)
-                psd = True
-                if self._fcm._pr_settings.verbose:
-                    print(f'total correction epsilon to make matrix PSD: {tot_eps}')
-            except:
-                # TODO this is a fancier way of fixing non-PSD, but I dont get it: https://stackoverflow.com/a/66902455
-                # u, s, v = np.linalg.svd(drg_prime_cov)
-                # s[s < 1e-12] += epsilon
-                # drg_prime_cov = u @ (np.diag(s)) @ v.T
-                tot_eps += epsilon
-                drg_prime_cov += epsilon * eye
+            eye = np.eye(drg_prime_cov.shape[0])
+            tot_eps = 0.0
+            while True:
+                try:
+                    np.linalg.cholesky(drg_prime_cov)
+                    if self._fcm._pr_settings.verbose:
+                        print(f'total correction epsilon to make matrix PSD: {tot_eps}')
+                    break
+                except np.linalg.LinAlgError:
+                    tot_eps += epsilon
+                    drg_prime_cov += epsilon * eye
 
         if as_tensor:
             return torch.distributions.MultivariateNormal(
-                # TODO this covariance matrix is degenerate, this is why we need to work in the other basis...
                 loc=torch.as_tensor(drg_prime_mean, dtype=torch.double).squeeze(),
                 covariance_matrix=torch.as_tensor(drg_prime_cov, dtype=torch.double)
             )
-        else:
-            return scipy.stats.multivariate_normal(mean=drg_prime_mean.squeeze(), cov=drg_prime_cov)
+        return scipy.stats.multivariate_normal(mean=drg_prime_mean.squeeze(), cov=drg_prime_cov)
 
     def _compute_orthant_volume(self, thermo_fluxes):
         pass
@@ -268,27 +279,37 @@ class ThermoPrior(BaseRoundedPrior):
 
     @staticmethod
     def _sample_drg_suppress_output(
-            tfs_model: TFSModel,
+            tfs_model,   # TFSModel | ThermoSamplingData
             n: int = 20000,
             num_chains: int = 4,
-            thermo_basis_points: np.array = None
+            thermo_basis_points: np.ndarray | None = None,
     ):
-        if thermo_basis_points is None:
-            thermo_basis_points = tfs_model.get_initial_points(num_chains)
-
-        num_chains = thermo_basis_points.shape[1]
-        with contextlib.redirect_stdout(io.StringIO()):
-            result = sample_drg(
+        if isinstance(tfs_model, ThermoSamplingData):
+            if thermo_basis_points is None:
+                thermo_basis_points = find_initial_points(tfs_model, num_chains)
+            num_chains = thermo_basis_points.shape[1]
+            result = _sample_drg_pure(
                 tfs_model,
                 initial_points=thermo_basis_points,
-                num_direction_samples=n,
                 num_samples=n,
-                max_psrf=1.0 + 1e-12,
                 num_chains=num_chains,
-                max_steps = 32 * n,
-                num_initial_steps = n * 2,
-                # max_threads=num_chains,
+                num_initial_steps=n * 2,
             )
+        else:
+            if thermo_basis_points is None:
+                thermo_basis_points = tfs_model.get_initial_points(num_chains)
+            num_chains = thermo_basis_points.shape[1]
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = sample_drg(
+                    tfs_model,
+                    initial_points=thermo_basis_points,
+                    num_direction_samples=n,
+                    num_samples=n,
+                    max_psrf=1.0 + 1e-12,
+                    num_chains=num_chains,
+                    max_steps=32 * n,
+                    num_initial_steps=n * 2,
+                )
         new_points_idx = np.random.choice(n, num_chains)
         new_thermo_basis_points = result.basis_samples.values[new_points_idx, :].T
         return result, new_thermo_basis_points

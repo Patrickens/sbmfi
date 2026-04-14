@@ -18,7 +18,6 @@ from sbmfi.core.observation import (
     BoundaryObservationModel,
     MDV_ObservationModel,
 )
-from sbmfi.core.coordinater import make_theta_polytope
 from sbmfi.core.util import (
     hdf_opener_and_closer,
     make_multidex,
@@ -64,7 +63,7 @@ class _BaseSimulator(object):
             model.set_substrate_labelling(substrate_df.loc[labelling_id])  # NB check whether valid susbtrate_df
             if not model.state_id.equals(obmod.state_id):
                 raise ValueError
-            if model._device != obmod._device:
+            if model._config.device != obmod._device:
                 raise ValueError
             self._obmods[labelling_id] = obmod
             has_log_prob.append(hasattr(obmod, 'log_lik'))
@@ -74,7 +73,7 @@ class _BaseSimulator(object):
         self._is_exact = all(has_log_prob) & (hasattr(boundary_observation_model, 'log_lik') if
                                               boundary_observation_model is not None else True)
         self._model = model
-        self._device = model._device
+        self._device = model._config.device
         self._fcm = model._fcm
         self._substrate_df = substrate_df.loc[list(self._obmods.keys())]
         if boundary_observation_model is not None:
@@ -82,12 +81,12 @@ class _BaseSimulator(object):
             bo_fluxes_id = bo_id.to_series().replace({v: k for k, v in model._only_rev.items()})
             if not bo_fluxes_id.isin(model.labelling_fluxes_id).all():
                 raise ValueError
-            if model._device != boundary_observation_model._device:
+            if model._config.device != boundary_observation_model._device:
                 raise ValueError
             # NB this means that we always append the boundary fluxes to the end of the last dimension!
             self._bo_idx = get_tensor(  # TODO maybe make this select from prior fluxes??
                 values=np.array([self._model.labelling_fluxes_id.get_loc(rid) for rid in bo_fluxes_id], dtype=np.int64),
-                device=self._device,
+                config=self._model._config,
             )
         self._bomsize = 0 if boundary_observation_model is None else len(self._bo_idx)
         self._bom = boundary_observation_model
@@ -137,7 +136,7 @@ class _BaseSimulator(object):
         index = None
         if isinstance(labelling_fluxes, pd.DataFrame):
             index = labelling_fluxes.index
-            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values, device=self._device)
+            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values, config=self._model._config)
 
         if len(labelling_fluxes.shape) > 2:
             raise ValueError(f'only handles (n_samples x n_fluxes) data, got {labelling_fluxes.shape}')
@@ -158,9 +157,17 @@ class _BaseSimulator(object):
         n_obshape = max(1, n_obs)
 
         if return_mdvs:
-            result = get_tensor(shape=(n_f, len(self._obmods), int(self._model._s.shape[-1])), device=self._device)
+            result = torch.zeros(
+                (n_f, len(self._obmods), int(self._model._s.shape[-1])),
+                dtype=self._model._config.dtype,
+                device=self._model._config.device,
+            )
         else:
-            result = get_tensor(shape=(n_f, n_obshape, len(self.data_id)), device=self._device)
+            result = torch.zeros(
+                (n_f, n_obshape, len(self.data_id)),
+                dtype=self._model._config.dtype,
+                device=self._model._config.device,
+            )
             if self._bomsize > 0:
                 result[:, slicer, -self._bomsize:] = self._bom.sample_observation(
                     labelling_fluxes[:, self._bo_idx], n_obs=n_obs
@@ -186,7 +193,7 @@ class _BaseSimulator(object):
         index = None
         if isinstance(data, pd.DataFrame):
             index = data.index
-            data = get_tensor(values=data.values, device=self._device)
+            data = get_tensor(values=data.values, config=self._model._config)
             if is_mdv:
                 data = data[:, None, :]
 
@@ -304,7 +311,7 @@ class _BaseSimulator(object):
         xcsarr = hdf.root[dataset_id][what].read(start, stop, step) # .squeeze()  # TODO why did we squeeze before?
 
         if not pandalize:
-            return get_tensor(values=xcsarr, device=self._device)
+            return get_tensor(values=xcsarr, config=self._model._config)
 
         labelling_id = substrate_df.index.rename('labelling_id')
 
@@ -410,27 +417,35 @@ class DataSetSim(_BaseSimulator):
     ) -> {}:
 
         if isinstance(labelling_fluxes, pd.DataFrame):
-            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values, device=self._device)
+            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values, config=self._model._config)
 
         if labelling_fluxes.ndim > 2:
             raise ValueError(f'only handles (n_samples x n_fluxes) data, got {labelling_fluxes.shape}')
 
         result = {}
-        result['validx'] = get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods)), dtype=np.bool_, device=self._device)
+        result['validx'] = torch.zeros((labelling_fluxes.shape[0], len(self._obmods)), dtype=torch.bool, device=self._model._config.device)
         result['fluxes'] = labelling_fluxes
 
         labelling_fluxes = self._model._fcm.frame_fluxes(labelling_fluxes, trim=True)
 
         if what not in ('all', 'data', 'mdv'):
             raise ValueError('not sure what to simulate')
-        if labelling_fluxes.shape[0] < self._model._batch_size:
-            raise ValueError(f'n must be at least batch size: {self._model._batch_size}')
+        if labelling_fluxes.shape[0] < self._model._config.batch_size:
+            raise ValueError(f'n must be at least batch size: {self._model._config.batch_size}')
 
         if what != 'data':
-            result['mdv'] = get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods), len(self._model.state_id)), device=self._device)
+            result['mdv'] = torch.zeros(
+                (labelling_fluxes.shape[0], len(self._obmods), len(self._model.state_id)),
+                dtype=self._model._config.dtype,
+                device=self._model._config.device,
+            )
         if what != 'mdv':
             n_obshape = max(1, n_obs)
-            result['data'] = get_tensor(shape=(labelling_fluxes.shape[0], n_obshape, len(self.data_id)), device=self._device)
+            result['data'] = torch.zeros(
+                (labelling_fluxes.shape[0], n_obshape, len(self.data_id)),
+                dtype=self._model._config.dtype,
+                device=self._model._config.device,
+            )
 
         if (self._bomsize > 0) and (what != 'mdv'):
             slicer = 0 if n_obs == 0 else slice(None)

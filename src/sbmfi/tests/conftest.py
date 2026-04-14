@@ -1,10 +1,7 @@
 import pytest
 from sbmfi.core.model import (
     LabellingModel,
-    EMU_Model,
-    create_full_metabolite_kwargs,
-    model_builder_from_dict,
-    process_biomass_reaction
+    model_builder_from_dict
 )
 
 @pytest.fixture

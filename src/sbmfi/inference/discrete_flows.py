@@ -1,7 +1,5 @@
 import torch
-from pyknos.nflows.transforms import PointwiseAffineTransform
 from torch import nn
-from typing import Optional
 import warnings
 
 from normflows.distributions.base import Uniform, UniformGaussian
@@ -31,15 +29,11 @@ from normflows.core import ConditionalNormalizingFlow
 from normflows.distributions.base import DiagGaussian
 
 from sbmfi.core.coordinater import FluxCoordinateMapper
-from sbmfi.core.simulator import _BaseSimulator
-from sbmfi.priors.uniform import _BasePrior
 import numpy as np
 import tqdm
-from typing import Dict
 from torch.utils.data import (
     Dataset,
-    DataLoader,
-    random_split
+    DataLoader
 )
 import inspect
 import types
@@ -139,7 +133,7 @@ def flow_constructor(
         device = 'cpu'
 
     if coordinate_id not in ['cylinder', 'rounded']:
-        raise ValueError(f'can only flow for cylinder and rounded')
+        raise ValueError('can only flow for cylinder and rounded')
     elif coordinate_id == 'rounded':
         ind = list(range(n_theta - fcm._nx, n_theta))
         scale = torch.ones(n_theta)

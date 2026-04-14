@@ -68,4 +68,4 @@ _default_adducts = [
 
 emzed_adducts = pd.DataFrame(
     _default_adducts, columns=["adduct_name", "m_multiplier", "adduct_add", "adduct_sub", "z"]
-).set_index(keys='adduct_name') 
+).set_index(keys='adduct_name')

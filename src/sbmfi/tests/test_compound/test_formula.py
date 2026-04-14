@@ -1,5 +1,4 @@
 import pytest
-import numpy as np
 from sbmfi.compound import Formula, isotopologues
 from sbmfi.compound.formula import _nist_mass
 
@@ -95,7 +94,7 @@ def test_formula_mz():
 
 def test_formula_isotopes():
     f = Formula('C6H12O6')
-    
+
     # Test adding C13
     f_new = f.add_C13(2)
     assert f_new['[13]C'] == 2
@@ -199,7 +198,7 @@ def test_isotopologues():
     )
     isos = list(isotopologues(f, elements_with_isotopes=('C')))
     assert isos == check
-    
+
     # Test with abundance reporting
     isos_with_abundance = list(isotopologues(f, report_abundance=True))
     assert all(len(x) == 2 for x in isos_with_abundance)
@@ -211,22 +210,22 @@ def test_isotopologues():
     )
     isos = list(isotopologues(f, isotope_threshold=0.01))
     assert isos == check
-    
+
 def test_formula_equality():
     f1 = Formula('C6H12O6')
     f2 = Formula('C6H12O6')
     f3 = Formula('C6H12O6-')
-    
+
     assert f1 == f2
     assert f1 != f3
 
 def test_formula_copy():
     f1 = Formula('C6H12O6')
     f2 = f1.copy()
-    
+
     assert f1 == f2
     assert f1 is not f2
-    
+
     f2['C'] = 5
     assert f1['C'] == 6
-    assert f2['C'] == 5 
+    assert f2['C'] == 5

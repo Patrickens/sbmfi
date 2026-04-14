@@ -3,12 +3,7 @@ from sbmfi.core.util import _optlang_reverse_id_rex, hdf_opener_and_closer
 import lxml.etree as etree
 import numpy as np
 import re
-from cobra.util import constraint_matrices
-import itertools
-import copy, sys
 from string import printable, digits
-from cobra import Metabolite
-from sympy import Matrix, matrix2numpy
 
 _long_str = printable.replace('"', '').replace('', '').replace('\n', '').replace('\t', '').replace('\n', '').replace(' ', '')
 
@@ -71,7 +66,7 @@ def parse_result_fml(fml):
         results[method] = simulated_new
 
     measurements = []
-    for el in tree.find(f'measurements'):
+    for el in tree.find('measurements'):
         if el.attrib['type'] == 'MS':
             spec = el[0]
             met_pos, pos = spec.text.split('#M')
@@ -355,10 +350,10 @@ def fml_to_sbml(fml_file):
 
 # NOTE: dont do fwd and reverse fluxes but rather do xch; this is advice from Beyss
 if __name__ == "__main__":
-    from sbmfi.models.build_models import spiro, e_coli_glc, e_coli_succ, multi_modal
+    from sbmfi.models.build_models import multi_modal
     from sbmfi.settings import MODEL_DIR
-    from sbmfi.core.observation import LCMS_ObservationModel
-    import io, os
+    import io
+    import os
 
     # ding = parse_result_fml('out_multi_modal.fml')
 

@@ -1,14 +1,6 @@
 import pandas as pd
 from collections import OrderedDict
-from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
-from sbmfi.core.cumodel import CumomerModel
-from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
-import sys, os
-import cobra
-from cobra.io import read_sbml_model
-from cobra import Reaction, Metabolite, DictList, Model
-from pta import ConcentrationsPrior
 
 def e_coli_glc(amino_acids='core', load_conc_prior=False):
     # TODO: maybe add methylglyoxal pathway! https://en.wikipedia.org/wiki/Methylglyoxal_pathway
@@ -99,9 +91,7 @@ def e_coli_glc(amino_acids='core', load_conc_prior=False):
 
     conc_prior = None
     if load_conc_prior:
-        conc_prior = ConcentrationsPrior.load('ecoli_M9_glc')
-        aero_prior = ConcentrationsPrior.load('M9_aerobic')
-        conc_prior.add(aero_prior)
+        raise NotImplementedError("ConcentrationsPrior requires pta (Docker). Use load_conc_prior=False.")
 
     measured_metabolites = pd.Series({
         'gly_c': 1e4,
@@ -201,9 +191,7 @@ def e_coli_succ(amino_acids='core', load_conc_prior=False):
 
     conc_prior = None
     if load_conc_prior:
-        conc_prior = ConcentrationsPrior.load('ecoli_M9_succ')
-        aero_prior = ConcentrationsPrior.load('M9_aerobic')
-        conc_prior.add(aero_prior)
+        raise NotImplementedError("ConcentrationsPrior requires pta (Docker). Use load_conc_prior=False.")
 
 
     kwargs = {
@@ -263,9 +251,7 @@ def e_coli_pyr(amino_acids='core', load_conc_prior=False):
 
     conc_prior = None
     if load_conc_prior:
-        conc_prior = ConcentrationsPrior.load('ecoli_M9_pyr')
-        aero_prior = ConcentrationsPrior.load('M9_aerobic')
-        conc_prior.add(aero_prior)
+        raise NotImplementedError("ConcentrationsPrior requires pta (Docker). Use load_conc_prior=False.")
 
     columns = [
         'pyr_e/000', 'pyr_e/100', 'pyr_e/010', 'pyr_e/001', 'pyr_e/110',
@@ -356,9 +342,7 @@ def e_coli_glyc(amino_acids='core', load_conc_prior=False):
 
     conc_prior = None
     if load_conc_prior:
-        conc_prior = ConcentrationsPrior.load('ecoli_M9_glyc')
-        aero_prior = ConcentrationsPrior.load('M9_aerobic')
-        conc_prior.add(aero_prior)
+        raise NotImplementedError("ConcentrationsPrior requires pta (Docker). Use load_conc_prior=False.")
 
     kwargs = {
         'ratio_repo': glyc_ratio_repo,

@@ -13,7 +13,7 @@ class MixtureOfGaussians(torch.distributions.Distribution):
         :param covariances: Tensor of shape (num_components, num_dimensions, num_dimensions) representing the covariance matrices.
         :param weights: Tensor of shape (num_components,) representing the mixture weights. Should sum to 1.
         """
-        assert means.device == covariances.device == weights.device, f'not same device'
+        assert means.device == covariances.device == weights.device, 'not same device'
 
         self.means = means
         self.covariances = covariances
