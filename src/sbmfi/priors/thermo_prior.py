@@ -8,14 +8,20 @@ import scipy
 from sbmfi.core.reaction import LabellingReaction
 from sbmfi.core.polytopia import FluxCoordinateMapper
 from sbmfi.priors.uniform import sampling_tasks
+from sbmfi.core.util import get_tensor
+from sbmfi.core.distributions import sample_bounded
 from collections import OrderedDict
 from torch.distributions import Distribution
-from pta.sampling.tfs import (
-    FreeEnergiesSamplingResult, sample_drg,
-    TFSModel, _find_point,
-    PmoProblemPool
-)
-from pta.constants import R
+try:
+    from pta.sampling.tfs import (
+        FreeEnergiesSamplingResult, sample_drg,
+        TFSModel, _find_point,
+        PmoProblemPool
+    )
+    from pta.constants import R
+except ImportError:
+    TFSModel = None
+    R = 8.314472e-3  # kJ mol⁻¹ K⁻¹
 
 def get_initial_points(self: TFSModel, num_points: int) -> np.ndarray:
 
@@ -76,10 +82,10 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
 
     if isinstance(net_fluxes, pd.DataFrame):
         index = net_fluxes.index
-        net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self._Fn.A.columns].values)
+        net_fluxes = get_tensor(values=net_fluxes.loc[:, self._Fn.A.columns].values)
     if isinstance(net_basis_samples, pd.DataFrame):
         index = net_basis_samples.index
-        net_basis_samples = self._la.get_tensor(values=net_basis_samples.loc[:, self.make_net_theta_id].values)
+        net_basis_samples = get_tensor(values=net_basis_samples.loc[:, self.make_net_theta_id].values)
 
     if net_fluxes is None:
         n = net_basis_samples.shape[0]
@@ -94,13 +100,13 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
 
     if self._fcm._nx > 0:
         if xch_fluxes is None:
-            xch_fluxes = self._la.sample_bounded_distribution(
+            xch_fluxes = sample_bounded(
                 shape=(n,), lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1]
             )
         elif isinstance(xch_fluxes, pd.DataFrame):
-            xch_fluxes = self._la.get_tensor(values=xch_fluxes.loc[:, self._fwd_id + '_xch'].values)
+            xch_fluxes = get_tensor(values=xch_fluxes.loc[:, self._fwd_id + '_xch'].values)
         if return_type in ['fluxes', 'both']:
-            thermo_fluxes = self._la.cat([net_fluxes, xch_fluxes], dim=-1)
+            thermo_fluxes = torch.cat([net_fluxes, xch_fluxes], dim=-1)
     else:
         thermo_fluxes = net_fluxes
 
@@ -108,19 +114,19 @@ def append_xch_flux_samples(  # TODO make this work without things being datafra
         fluxes = self.map_thermo_2_fluxes(thermo_fluxes)
 
     if pandalize and (return_type in ['fluxes', 'both']):
-        fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self._F.A.columns)
+        fluxes = pd.DataFrame(fluxes.detach().cpu().numpy(), index=index, columns=self._F.A.columns)
     if return_type == 'fluxes':
         return fluxes
 
     if self._fcm._nx > 0:
         if self._logxch:
             xch_fluxes = self.logit_xch(xch_fluxes)
-        theta = self._la.cat([net_basis_samples, xch_fluxes], dim=-1)
+        theta = torch.cat([net_basis_samples, xch_fluxes], dim=-1)
     else:
         theta = net_basis_samples
 
     if pandalize:
-        theta = pd.DataFrame(self._la.tonp(theta), index=index, columns=self.theta_id)
+        theta = pd.DataFrame(theta.detach().cpu().numpy(), index=index, columns=self.theta_id)
     if return_type == 'theta':
         return theta
     elif return_type == 'both':

@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
-import multiprocessing as mp  # TODO maybe dynamically change this import to torch.multiprocessing based on linalg?
+import torch
+import multiprocessing as mp
 from typing import Iterable, Union, Dict, Tuple
 from sbmfi.core.model import LabellingModel, RatioMixin, EMU_Model
 from sbmfi.core.observation import MDV_ObservationModel, MDV_LogRatioTransform
+from sbmfi.core.util import get_tensor
 
 
 def init_simulator(model: LabellingModel, epsilon=1e-12):
@@ -32,26 +34,26 @@ def simulator_worker(task: dict, model=None) -> dict:
         MODEL = _MODEL
 
     n_state = len(MODEL.state_id)
-    la = MODEL._la
 
     if MODEL.labelling_id != input_labelling.name:
         MODEL.set_substrate_labelling(substrate_labelling=input_labelling)
 
-    mdv_chunk = la.get_tensor(  # by making this a tensor with -np.inf values, we can filter failed simulations
-        values=np.full(shape=(fluxes_chunk.shape[0], n_state), fill_value=-np.inf, dtype=np.double)
+    mdv_chunk = get_tensor(  # by making this a tensor with -np.inf values, we can filter failed simulations
+        values=np.full(shape=(fluxes_chunk.shape[0], n_state), fill_value=-np.inf, dtype=np.double),
+        device=MODEL._device,
     )
 
     if type_jacobian is not None:
         n = len(MODEL.labelling_fluxes_id)
         if type_jacobian == 'free':
             n = len(MODEL._fcm.theta_id)
-        jacobian_chunk = la.get_tensor(values=np.full(
+        jacobian_chunk = get_tensor(values=np.full(
             shape=(fluxes_chunk.shape[0], n, n_state),
             fill_value=-np.inf,
             dtype=np.double
-        ))
+        ), device=MODEL._device)
 
-    step = la._batch_size
+    step = MODEL._batch_size
     stop = max(fluxes_chunk.shape[0], step)
 
     for i in range(0, stop, step, ):
@@ -76,9 +78,9 @@ def simulator_worker(task: dict, model=None) -> dict:
             jacobian_chunk[i: j] = jacobian_batch
 
     # NB filter failed simulations (metabolite not summing to 1 or values outside of [0, 1]
-    sum_1 = la.isclose(
+    sum_1 = torch.isclose(
         MODEL._sum @ mdv_chunk.T,
-        la.ones(fluxes_chunk.shape[0], dtype=mdv_chunk.dtype), atol=_EPSILON
+        torch.ones(fluxes_chunk.shape[0], dtype=mdv_chunk.dtype, device=MODEL._device), atol=_EPSILON
     ).T.all(1)
     bounds = (mdv_chunk < 1.0 + _EPSILON).all(1) & (mdv_chunk > 0.0 - _EPSILON).all(1)
     # valid_idx = la.where(sum_1 & bounds)[0]
@@ -115,8 +117,8 @@ def obervervator_worker(task: dict, model=None):
     observation_model = _OBSMODS[task['input_labelling'].name]
     n_obshape = max(1, n_obs)
     slicer = 0 if n_obs == 0 else slice(None)
-    data_chunk = MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], n_obshape, observation_model._nd))
-    bs = MODEL._la._batch_size
+    data_chunk = get_tensor(shape=(mdv_chunk.shape[0], n_obshape, observation_model._nd), device=MODEL._device)
+    bs = MODEL._batch_size
 
     for i in range(0, mdv_chunk.shape[0], bs):
         data_slice = observation_model(mdv=mdv_chunk[i: i + bs, :], n_obs=n_obs)  # TODO sizing!
@@ -143,16 +145,16 @@ def designer_worker(task):
 
     if x_coordinate_sys in ('sigma_v', 'all'):
         n_free = len(_MODEL._fcm.theta_id)
-        summary_v_chunk = _MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], 3))  # TODO
-        sigma_v_chunk = _MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], n_free, n_free))  # TODO
+        summary_v_chunk = get_tensor(shape=(mdv_chunk.shape[0], 3), device=_MODEL._device)  # TODO
+        sigma_v_chunk = get_tensor(shape=(mdv_chunk.shape[0], n_free, n_free), device=_MODEL._device)  # TODO
     if x_coordinate_sys in ('sigma_r', 'all') and isinstance(_MODEL, RatioMixin):
         validx = result_chunk['validx_chunk']
         fluxes_chunk = simulator_task['fluxes_chunk'][validx]
         n_ratio = len(_MODEL.ratios_id)
-        summary_r_chunk = _MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], 2 * n_ratio))
-        sigma_r_chunk = _MODEL._la.get_tensor(shape=(mdv_chunk.shape[0], n_ratio, n_ratio))
+        summary_r_chunk = get_tensor(shape=(mdv_chunk.shape[0], 2 * n_ratio), device=_MODEL._device)
+        sigma_r_chunk = get_tensor(shape=(mdv_chunk.shape[0], n_ratio, n_ratio), device=_MODEL._device)
 
-    bs = _MODEL._la._batch_size
+    bs = _MODEL._batch_size
     for i in range(0, mdv_chunk.shape[0], bs):
         sigma_v, summary_v = observation_model.sigma_v(mdv=mdv_chunk[i: i + bs], J_sv=jacobian_chunk[i: i + bs])
         if x_coordinate_sys in ('sigma_v', 'all'):

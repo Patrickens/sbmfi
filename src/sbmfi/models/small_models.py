@@ -9,7 +9,6 @@ from sbmfi.core.observation import (
     MVN_BoundaryObservationModel,
     MDV_ObservationModel
 )
-from sbmfi.core.linalg import LinAlg
 from sbmfi.models.build_models import simulator_factory, _correct_base_bayes_lcms
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.core.util import _strip_bigg_rex
@@ -20,7 +19,6 @@ from cobra import Reaction, Metabolite, DictList, Model
 from sbmfi.compound import Formula
 
 def spiro(
-        backend='numpy',
         batch_size=1,
         add_biomass=True,
         add_cofactor=False,
@@ -37,7 +35,9 @@ def spiro(
         L_12_omega = 1.0,
         clip_min=None,
         transformation='ilr',
-        device='cpu'
+        device='cpu',
+        # legacy kwarg silently ignored
+        backend=None,
 ):
     # NOTE: this one has 2 interesting flux ratios!
     # NOTE this has been parametrized to exactly match the Wiechert fml file: C:\python_projects\pysumo\src\sumoflux\models\fml\spiro.fml
@@ -202,16 +202,12 @@ def spiro(
         measured_boundary_fluxes.append(biomass_id)
 
     model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs, model_id='spiro', name='spiralus')
-    linalg = LinAlg(
-        backend=backend, batch_size=batch_size, solver='lu_solve', device=device,
-        fkwargs=None, seed=seed
-    )
     if ratios:
         model_type = RatioEMU_Model
     else:
         model_type = EMU_Model
 
-    model = model_type(linalg=linalg, model=model)
+    model = model_type(model=model, batch_size=batch_size, device=device)
     model.add_labelling_kwargs(
         reaction_kwargs=reaction_kwargs,
         metabolite_kwargs=metabolite_kwargs

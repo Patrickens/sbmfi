@@ -2,7 +2,6 @@ import pandas as pd
 from collections import OrderedDict
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.core.cumodel import CumomerModel
-from sbmfi.core.linalg import LinAlg
 from sbmfi.settings import MODEL_DIR, SIM_DIR
 from sbmfi.lcmsanalysis.util import _strip_bigg_rex
 import sys, os

@@ -1,5 +1,5 @@
 from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU, ConvolutedEMU
-from sbmfi.core.util import _get_dictlist_idxs, _read_atom_map_str_rex, _find_biomass_rex, _strip_bigg_rex
+from sbmfi.core.util import _get_dictlist_idxs, _read_atom_map_str_rex, _find_biomass_rex, _strip_bigg_rex, get_tensor
 import numpy as np
 import pandas as pd
 from cobra import Reaction, DictList, Metabolite
@@ -672,9 +672,9 @@ class EMU_Reaction(LabellingReaction):
             A_elem = np.array(A_elem)
             A_indices = _get_dictlist_idxs(xemus[weight], A_elem[:, 1:])
             A_values = A_elem[:, 0].astype(np.double)
-            self.A_tensors[weight] = self.model._la.get_tensor(
+            self.A_tensors[weight] = get_tensor(
                 shape=(len(xemus[weight]), len(xemus[weight])),
-                indices=A_indices, values=A_values
+                indices=A_indices, values=A_values, device=self.model._device,
             )
 
             B_elem = self.B_elements.get(weight, None)
@@ -684,9 +684,9 @@ class EMU_Reaction(LabellingReaction):
                 B_yidx = _get_dictlist_idxs(yemus[weight], B_elem[:, 2])
                 B_indices = np.concatenate((B_xidx[:, None], B_yidx[:, None]), axis=1)
                 B_values = B_elem[:, 0].astype(np.double)
-                self.B_tensors[weight] = self.model._la.get_tensor(
+                self.B_tensors[weight] = get_tensor(
                     shape=(len(xemus[weight]), len(yemus[weight])),
-                    indices=B_indices, values=B_values
+                    indices=B_indices, values=B_values, device=self.model._device,
                 )
 
     def pretty_tensors(self, weight: int):
@@ -704,15 +704,14 @@ class EMU_Reaction(LabellingReaction):
         bdx = self.model._yemus[weight].list_attr('id')
 
         if A is not None:
-            result['A'] = pd.DataFrame(self._model._la.tonp(A), index=adx, columns=adx)
+            result['A'] = pd.DataFrame(A.detach().cpu().numpy(), index=adx, columns=adx)
         if B is not None:
-            result['B'] = pd.DataFrame(self._model._la.tonp(B), index=adx, columns=bdx)
+            result['B'] = pd.DataFrame(B.detach().cpu().numpy(), index=adx, columns=bdx)
         return result
 
 
 if __name__ == "__main__":
     from sbmfi.core.model import model_builder_from_dict, LabellingModel
-    from sbmfi.core.linalg import LinAlg
 
     reaction_kwargs = {
         # Original reactions
@@ -770,7 +769,7 @@ if __name__ == "__main__":
             'M': {'formula': 'C2H6O'},  # Another pseudo metabolite
         }
     model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
-    model = LabellingModel(LinAlg('numpy'), model)
+    model = LabellingModel(model)
     for r_id, r_kwargs in reaction_kwargs.items():
         single_r_kwargs = {r_id: reaction_kwargs[r_id]}
         model.add_labelling_kwargs(single_r_kwargs, metabolite_kwargs)

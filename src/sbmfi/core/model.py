@@ -4,12 +4,15 @@ import math
 import sys
 import operator
 import pandas as pd
-from sbmfi.core.linalg import LinAlg
+import torch
 from sbmfi.core.util   import (
     _read_atom_map_str_rex,
     _find_biomass_rex,
     _rev_reactions_rex,
     _biomass_coeff_rex,
+    get_tensor,
+    convolve,
+    tonp,
 )
 from sbmfi.core.polytopia import (
     extract_labelling_polytope,
@@ -227,15 +230,17 @@ class LabellingModel(Model):
     _TYPE_REACTION = LabellingReaction
     def __init__(
             self,
-            linalg: LinAlg,
             model: Model,
+            batch_size: int = 1,
+            device=None,
     ):
         if isinstance(model, LabellingModel):
             raise NotImplementedError('Cannot instantiate LabellingModel with another LabellingModel')
         elif not isinstance(model, Model):
             raise ValueError('Need to instantiate with an existing cobra model')
         super(LabellingModel, self).__init__(id_or_model=model)
-        self._la = linalg
+        self._batch_size = batch_size
+        self._device = device if device is not None else torch.device('cpu')
 
         # flags
         self._is_built = False  # signals that the all the variables and matrices have not been built yet
@@ -287,8 +292,7 @@ class LabellingModel(Model):
             self._measurements = DictList()
             self.set_measurements(measurement_list=measurements)
         self._labelling_reactions = DictList()  # gets set in metabolites_in_state; which calls labelling_fluxes_id
-        linalg = state.get('_la')
-        if linalg is not None:
+        if state.get('_batch_size') is not None:
             self._initialize_state()
 
     def __getstate__(self):
@@ -314,10 +318,10 @@ class LabellingModel(Model):
 
     def _initialize_state(self):
         # state and jacobian variables
-        self._s = self._la.get_tensor(shape=(0,))  # state vector
-        self._sum = self._la.get_tensor(shape=(0,))  # sums metabolites to 1
-        self._dsdv = self._la.get_tensor(shape=(0,))  # ds / dvi, vector that stores sensitivity of state wrt some reaction
-        self._jacobian = self._la.get_tensor(shape=(0,))  # dim(reaction x output variabless)
+        self._s = get_tensor(shape=(0,), device=self._device)  # state vector
+        self._sum = get_tensor(shape=(0,), device=self._device)  # sums metabolites to 1
+        self._dsdv = get_tensor(shape=(0,), device=self._device)  # ds / dvi
+        self._jacobian = get_tensor(shape=(0,), device=self._device)  # dim(reaction x output variables)
 
     @property
     def is_built(self):
@@ -352,14 +356,14 @@ class LabellingModel(Model):
     def state(self):
         if not self._is_built:
             raise ValueError('MUST BUILD')
-        state = np.atleast_2d(self._la.tonp(self._format_return(s=self._s)))
+        state = np.atleast_2d(self._format_return(s=self._s).detach().cpu().numpy())
         return pd.DataFrame(state, index=self._fcm.samples_id, columns=self.state_id).round(decimals=3)
 
     @property
     def jacobian(self):
         if not self._is_built:
             raise ValueError('MUST BUILD')
-        jac = self._la.tonp(self._jacobian)
+        jac = self._jacobian.detach().cpu().numpy()
         framed_jacs = [pd.DataFrame(sub_jac, index=self.labelling_fluxes_id, columns=self.state_id) for sub_jac in jac]
         return pd.concat(framed_jacs, keys=self._fcm._samples_id)
 
@@ -402,8 +406,9 @@ class LabellingModel(Model):
                             metabolite._reaction.remove(reaction)
                         metabolite._reaction.add(reaction._rev_reaction)
 
-        self._jacobian = self._la.get_tensor(
-            shape=(self._la._batch_size, len(self._labelling_reactions), self.state_id.shape[0])
+        self._jacobian = get_tensor(
+            shape=(self._batch_size, len(self._labelling_reactions), self.state_id.shape[0]),
+            device=self._device,
         )
         return self._labelling_reactions
 
@@ -419,8 +424,8 @@ class LabellingModel(Model):
         labelling_fluxes = self._fcm.frame_fluxes(labelling_fluxes, samples_id, trim)
         if len(labelling_fluxes.shape) > 2:
             raise ValueError('can only deal with 2D stratified fluxes!')
-        if labelling_fluxes.shape[0] != self._la._batch_size:
-            raise ValueError(f'batch_size = {self._la._batch_size}; fluxes.shape[0] = {labelling_fluxes.shape[0]}')
+        if labelling_fluxes.shape[0] != self._batch_size:
+            raise ValueError(f'batch_size = {self._batch_size}; fluxes.shape[0] = {labelling_fluxes.shape[0]}')
         self._fluxes = labelling_fluxes
 
     def set_substrate_labelling(self, substrate_labelling: pd.Series):
@@ -456,9 +461,9 @@ class LabellingModel(Model):
                 if reaction.boundary and isinstance(reaction, LabellingReaction) and not reaction.pseudo:
                     if not reaction.rho_max == 0.0:
                         raise ValueError(f'substrate reaction is illegaly reversible {reaction.id}')
-                    if reaction.lower_bound >= 0.0:
+                    if reaction.lower_bound > 0.0:
                         substrate_reactions.append(reaction)
-                    elif reaction.upper_bound <= 0.0:
+                    elif reaction.upper_bound < 0.0:
                         substrate_reactions.append(reaction._rev_reaction)
                     else:
                         raise ValueError(f'substrate reaction {reaction.id} '
@@ -787,7 +792,6 @@ class LabellingModel(Model):
         self._fcm = FluxCoordinateMapper(
             model=self,
             pr_verbose=verbose,
-            linalg=self._la,
         )
         self._is_built = False  # set True by the child class again after  build-steps are completed successfully
         self._set_state()
@@ -836,30 +840,29 @@ class RatioMixin(LabellingModel):
         index = None
         if isinstance(fluxes, pd.DataFrame):
             index = fluxes.index
-            fluxes = self._la.get_tensor(values=fluxes.loc[:, self.labelling_reactions.list_attr('id')].values)
+            fluxes = get_tensor(values=fluxes.loc[:, self.labelling_reactions.list_attr('id')].values, device=self._device)
 
         num = self._ratio_num_sum @ fluxes.T
         den = self._ratio_den_sum @ fluxes.T
         den[den == 0.0] += tol
 
-        with np.errstate(invalid='ignore'):
-            ratios = self._la.divide(num, den).T
+        ratios = (num / den).T
 
         if pandalize:
-            return pd.DataFrame(self._la.tonp(ratios), index=index, columns=self.ratios_id)
+            return pd.DataFrame(ratios.detach().cpu().numpy(), index=index, columns=self.ratios_id)
         return ratios
 
     def _initialize_state(self):
         super(RatioMixin, self)._initialize_state()
-        self._ratio_num_sum = self._la.get_tensor(shape=(0,))
-        self._ratio_den_sum = self._la.get_tensor(shape=(0,))
-        self._ratio_repo = {}  # repository of all flux-ratios (with names as keys) that we are interested in in a particular model
+        self._ratio_num_sum = get_tensor(shape=(0,), device=self._device)
+        self._ratio_den_sum = get_tensor(shape=(0,), device=self._device)
+        self._ratio_repo = {}  # repository of all flux-ratios (with names as keys) that we are interested in
 
     @staticmethod
-    def _sum_getter(key, ratio_repo: dict, linalg: LinAlg, index: pd.Index):
+    def _sum_getter(key, ratio_repo: dict, index: pd.Index, device=None):
         # TODO THIS FUNCTION IS CURRENTLY WRONG!
         if not ratio_repo:
-            return linalg.get_tensor(shape=(0,))
+            return get_tensor(shape=(0,), device=device)
         indices = []
         coeffs = []
         # essential to be ratio_repo because _ratio_repo is condensed
@@ -871,8 +874,9 @@ class RatioMixin(LabellingModel):
                     reac_idx = index.get_loc(reac_id)
                     indices.append((i, reac_idx))
                     coeffs.append(coeff)
-        return linalg.get_tensor(
-            shape=(i + 1, len(index)), indices=np.array(indices), values=np.array(coeffs, dtype=np.double)
+        return get_tensor(
+            shape=(i + 1, len(index)), indices=np.array(indices), values=np.array(coeffs, dtype=np.double),
+            device=device,
         )
 
     @property
@@ -932,8 +936,8 @@ class RatioMixin(LabellingModel):
             repo[ratio_id] = {'numerator': numerator, 'denominator': denominator}
 
         self._ratio_repo = repo  # condensed representation!
-        self._ratio_num_sum = self._sum_getter('numerator', repo, self._la, self.labelling_fluxes_id)
-        self._ratio_den_sum = self._sum_getter('denominator', repo, self._la, self.labelling_fluxes_id)
+        self._ratio_num_sum = self._sum_getter('numerator', repo, self.labelling_fluxes_id, self._device)
+        self._ratio_den_sum = self._sum_getter('denominator', repo, self.labelling_fluxes_id, self._device)
 
     def prepare_polytopes(self, free_reaction_id=None, verbose=False):
         if free_reaction_id is None:
@@ -948,9 +952,11 @@ class RatioMixin(LabellingModel):
         ratio_NS = self._fcm.null_space.loc[
             self.ratio_reactions.list_attr('id')]  # null-space that contributes to ratio reactions
         # _free_idx are the reactions that contribute to ratio_reactions
-        self._ratio_free_idx = self._la.get_tensor(values=np.where(~(ratio_NS == 0.0).all(0))[0])
+        self._ratio_free_idx = get_tensor(values=np.where(~(ratio_NS == 0.0).all(0))[0], device=self._device)
         # _dept_idx are dependent reactions that contrubute to the free reactions that contribute to the ratio reactions
-        self._ratio_dept_idx = np.where(self._la.tonp(abs(self._fcm._NS[:, self._ratio_free_idx]).sum(1) > 0.0))[0]
+        self._ratio_dept_idx = np.where(
+            abs(self._fcm._NS[:, self._ratio_free_idx]).sum(1).detach().cpu().numpy() > 0.0
+        )[0]
 
 
 class EMU_Model(LabellingModel):
@@ -1016,12 +1022,13 @@ class EMU_Model(LabellingModel):
                 self._xemus.setdefault(i, DictList())
                 self._yemus.setdefault(i, DictList())
             emus[met_weight].append(met_emu)
-        self._s    = self._la.get_tensor(shape=(self._la._batch_size, num_el_s))
-        self._dsdv = self._la.get_tensor(shape=(self._la._batch_size, num_el_s))
-        self._sum  = self._la.get_tensor(
+        self._s    = get_tensor(shape=(self._batch_size, num_el_s), device=self._device)
+        self._dsdv = get_tensor(shape=(self._batch_size, num_el_s), device=self._device)
+        self._sum  = get_tensor(
             shape=(len(self.measurements), len(self.state_id)),
             indices=np.array(sum_indices, dtype=np.int64),
-            values=np.ones(len(sum_indices), dtype=np.double)
+            values=np.ones(len(sum_indices), dtype=np.double),
+            device=self._device,
         )
 
     def reset_state(self):
@@ -1113,14 +1120,14 @@ class EMU_Model(LabellingModel):
                     if isocumo.metabolite == yemu.metabolite:
                         emu_label = isocumo._label[yemu.positions]
                         M_plus = emu_label.sum()
-                        for j in range(self._la._batch_size):
+                        for j in range(self._batch_size):
                             Y_values.append(fraction)
                             Y_indices.append((j, i, M_plus))
 
             Y_indices = np.array(Y_indices, dtype=np.int64)
             Y_values = np.array(Y_values, dtype=np.double)
             # TODO we can also create this via tiling!
-            Y = self._la.get_tensor(shape=(self._la._batch_size, len(yemus), weight + 1), indices=Y_indices, values=Y_values)
+            Y = get_tensor(shape=(self._batch_size, len(yemus), weight + 1), indices=Y_indices, values=Y_values, device=self._device)
             self._Y[weight] = Y
 
             for yemu in yemus:
@@ -1137,11 +1144,11 @@ class EMU_Model(LabellingModel):
 
     def _initialize_tensors(self):
         for (weight, xemus), yemus in zip(self._xemus.items(), self._yemus.values()):
-            self._A_tot[weight] = self._la.get_tensor(shape=(self._la._batch_size, len(xemus), len(xemus)))
-            self._B_tot[weight] = self._la.get_tensor(shape=(self._la._batch_size, len(xemus), len(yemus)))
-            self._X[weight]     = self._la.get_tensor(shape=(self._la._batch_size, len(xemus), weight + 1))
-            self._dXdv[weight]  = self._la.get_tensor(shape=(self._la._batch_size, len(xemus), weight + 1))
-            self._dYdv[weight]  = self._la.get_tensor(shape=(self._la._batch_size, len(yemus), weight + 1))
+            self._A_tot[weight] = get_tensor(shape=(self._batch_size, len(xemus), len(xemus)), device=self._device)
+            self._B_tot[weight] = get_tensor(shape=(self._batch_size, len(xemus), len(yemus)), device=self._device)
+            self._X[weight]     = get_tensor(shape=(self._batch_size, len(xemus), weight + 1), device=self._device)
+            self._dXdv[weight]  = get_tensor(shape=(self._batch_size, len(xemus), weight + 1), device=self._device)
+            self._dYdv[weight]  = get_tensor(shape=(self._batch_size, len(yemus), weight + 1), device=self._device)
         self._initialize_Y()
 
     def _initialize_emu_indices(self):
@@ -1189,7 +1196,7 @@ class EMU_Model(LabellingModel):
                     mdv = mdv_xemu
                 else:
                     # slowest part of slowest function
-                    mdv = self._la.convolve(a=mdv, v=mdv_xemu)
+                    mdv = convolve(a=mdv, v=mdv_xemu)
             self._Y[weight][:, i, :] = mdv
         return self._Y[weight]
 
@@ -1251,10 +1258,10 @@ class EMU_Model(LabellingModel):
                 batches[sid] = pd.DataFrame(sub_vals, index=index, columns=columns)
             return pd.concat(batches.values(), keys=batches.keys())
 
-        As = batch_corrector(values=self._la.tonp(self._A_tot[weight]), index=adx, columns=adx)
-        Bs = batch_corrector(values=self._la.tonp(self._B_tot[weight]), index=adx, columns=bdx)
-        Xs = batch_corrector(values=self._la.tonp(self._X[weight]), index=adx)
-        Ys = batch_corrector(values=self._la.tonp(self._Y[weight]), index=bdx)
+        As = batch_corrector(values=self._A_tot[weight].detach().cpu().numpy(), index=adx, columns=adx)
+        Bs = batch_corrector(values=self._B_tot[weight].detach().cpu().numpy(), index=adx, columns=bdx)
+        Xs = batch_corrector(values=self._X[weight].detach().cpu().numpy(), index=adx)
+        Ys = batch_corrector(values=self._Y[weight].detach().cpu().numpy(), index=bdx)
         return {'A': As, 'B': Bs, 'X': Xs, 'Y': Ys}
 
     def cascade(self, pandalize=False):
@@ -1268,14 +1275,15 @@ class EMU_Model(LabellingModel):
             if A.shape[1] == 0:
                 continue
             Y = self._build_Y(weight=weight)
-            LU = self._la.LU(A=A)
+            LU_data, pivots = torch.linalg.lu_factor(A)
+            LU = (LU_data, pivots)
             self._LUA[weight] = LU  # NOTE: store for computation of Jacobian
-            A_B = self._la.solve(LU=LU, b=B)
+            A_B = torch.linalg.lu_solve(LU_data, pivots, B)
             X = A_B @ Y
             self._X[weight] += X
         state = self._format_return(s=self._s, derivative=False)
         if pandalize:
-            state = pd.DataFrame(self._la.tonp(state), index=self._fcm.samples_id, columns=self.state_id)
+            state = pd.DataFrame(state.detach().cpu().numpy(), index=self._fcm.samples_id, columns=self.state_id)
         return state
 
     def _build_dYdvi(self, weight):
@@ -1298,8 +1306,8 @@ class EMU_Model(LabellingModel):
                     if mdv is None:
                         mdv = mdv_b
                     else:
-                        mdv = self._la.convolve(a=mdv, v=mdv_b)
-                self._dYdv[weight][:, i, :] += self._la.convolve(a=mdv, v=dmdvdv_a)
+                        mdv = convolve(a=mdv, v=mdv_b)
+                self._dYdv[weight][:, i, :] += convolve(a=mdv, v=dmdvdv_a)
         return self._dYdv[weight]
 
     def dsdv(self, reaction_i: EMU_Reaction):
@@ -1316,7 +1324,7 @@ class EMU_Model(LabellingModel):
             Y = self._Y[weight]
 
             if dBdvi is None:
-                dBdv_Y = self._la.get_tensor(shape=X.shape)
+                dBdv_Y = get_tensor(shape=X.shape, device=self._device)
             else:
                 dBdv_Y = dBdvi @ Y
 
@@ -1331,7 +1339,7 @@ class EMU_Model(LabellingModel):
             LU = self._LUA.get(weight)
 
             if LU is not None:
-                dXdvi[:] = self._la.solve(LU=LU, b=lhs)
+                dXdvi[:] = torch.linalg.lu_solve(*LU, lhs)
         return self._format_return(s=self._dsdv, derivative=True)
 
 
@@ -1453,7 +1461,7 @@ if __name__ == "__main__":
         }
     model = model_builder_from_dict(reaction_kwargs, metabolite_kwargs)
     print(model.reactions)
-    model = LabellingModel(linalg=LinAlg('numpy'), model=model)
+    model = LabellingModel(model=model)
     model.add_labelling_kwargs(reaction_kwargs, metabolite_kwargs)
     print(model.reactions)
     print(model)

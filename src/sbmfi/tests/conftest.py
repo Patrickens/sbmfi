@@ -1,96 +1,60 @@
 import pytest
-from collections import OrderedDict
-import pandas as pd
-from sbmfi.core.model import LabellingModel, EMU_Model
+from sbmfi.core.model import (
+    LabellingModel,
+    EMU_Model,
+    create_full_metabolite_kwargs,
+    model_builder_from_dict,
+    process_biomass_reaction
+)
 
-# Test data for model tests
-reaction_kwargs = {
-    'EX_A': {
-        'lower_bound': 100.0, 'upper_bound': 100.0, 'atom_map_str': '∅ --> A_e/abc'
-    },
-    'EX_E': {
-        'upper_bound': 100.0, 'atom_map_str': 'E_c/a --> ∅'
-    },
-    'EX_F': {
-        'upper_bound': 100.0, 'atom_map_str': 'F_c/abc --> ∅'
-    },
-
-    'v1': {
-        'upper_bound': 100.0, 'atom_map_str': 'A_e/abc --> B_c/abc'
-    },
-    'v2': {
-        'lower_bound': -100.0, 'upper_bound': 100.0,
-        'xch_ub': 0.5,
-        'atom_map_str': 'B_c/abc <=> D_c/abc',
-    },
-    'v4': {
-        'upper_bound': 100.0, 'atom_map_str': 'B_c/abc --> C_c/bc + E_c/a'
-    },
-    'v5': {
-        'upper_bound': 100.0, 'atom_map_str': 'B_c/abc + C_c/de --> D_c/bcd + E_c/a + E_c/e'
-    },
-    'v6': {
-        'upper_bound': 100.0, 'atom_map_str': 'D_c/abc --> F_c/abc'
-    },
-    'vp': { # pseudo-reaction
-        'pseudo': True, 'upper_bound': 0.0,
-        'atom_map_str': 'B_c/abc + D_c/def + C_c/gh + E_c/i + A_e/jkl --> L_c/abdgil'
-    },
-
-    'cobra_R': { # cobra-reaction
-        'upper_bound': 10.0,
+@pytest.fixture
+def basic_reaction_kwargs():
+    return {
+        'a_in': {
+            'atom_map_str': '--> A/ab',  # exchange reaction
+            'upper_bound': 100.0,
+            'lower_bound': 0.0
+        },
+        'r1': {
+            'atom_map_str': 'A/ab + J --> P/ab',  # has a co-factor
+            'upper_bound': 100.0,
+            'lower_bound': 0.0
+        },
+        'r2': {
+            'atom_map_str': 'A/ab + B/cd --> Q/acdb',  # default bounds
+        },
+        'r3': {
+            'atom_map_str': 'Q/acdb --> R/cd + S/ba',
+            'upper_bound': 100.0,
+            'lower_bound': 0.0
+        },
+        'bm': {
+            'atom_map_str': 'biomass --> ',  # biomass reaction
+            'reaction_str': '0.3H + 0.6P + 0.5B + 0.1Q --> ∅',
+            'upper_bound': 100.0,
+            'lower_bound': 0.0
+        },
+        'rp': {
+            'atom_map_str': 'A/ab + B/cd + A/ef --> L/acf',  # pseudo-reaction
+            'pseudo': True
+        },
     }
-}
 
-ratio_repo = {
-    'E|v2': {
-        'numerator': OrderedDict({'v5': 1}),
-        'denominator': OrderedDict({'v2': 1, 'v2_rev': -1, 'v5': 1})},
-}
+@pytest.fixture
+def basic_metabolite_kwargs():
+    return {
+        'A': {'formula': 'C2H4O2', 'compartment': 'c', 'charge': -1},
+        'B': {'formula': 'C2H6O', 'compartment': 'c', 'charge': 0},
+        'P': {'formula': 'C2H3O2', 'compartment': 'c', 'charge': -1},
+        # 'Q': {},  # to test a metabolite without annotations
+        'R': {}, # metabolite without formula
+        'S': {'formula': 'C2H4O3', 'compartment': 'p', 'charge': -1},
+        'J': {'formula': 'C1H1O1', 'compartment': 'c', 'charge': 0}  # cofactor
+    }
 
-input_labelling = OrderedDict([('A_e/010', 1.0)])
-measured_metabolites = ['F_c', 'B_c']
-
-fluxes = pd.Series({ # NOTE: from the EMU paper
-    'EX_A': 100,
-    'EX_E': 60,
-    'EX_F': 80,
-    'v1': 100,
-    'v2': 110,
-    'v2_rev': 50,
-    'v4': 20,
-    'v5': 20,
-    'v6': 80,
-}, dtype=float, name='emu_paper')
-
-def parametrize(model):
-    model.add_reactions(reaction_kwargs=reaction_kwargs)
-    model.map_fluxes(fluxes=fluxes)
-    model.set_ratio_repo(ratio_repo=ratio_repo)
-    model.set_substrate_labelling(substrate_labelling=input_labelling)
-    model.set_measurements(measurement_list=measured_metabolites, exclude=False)
+@pytest.fixture
+def labelling_model(basic_reaction_kwargs, basic_metabolite_kwargs):
+    cobra_model = model_builder_from_dict(basic_reaction_kwargs, basic_metabolite_kwargs)
+    model = LabellingModel(cobra_model)
+    model.add_labelling_kwargs(basic_reaction_kwargs, basic_metabolite_kwargs)
     return model
-
-@pytest.fixture(scope="function")
-def emu_SUModel():
-    M = LabellingModel(
-        id_or_model='test_SUModel',
-        name='test_SUModel',
-    )
-    return parametrize(model=M)
-
-
-@pytest.fixture(scope="function")
-def emu_EMUdel():
-    M = EMU_Model(
-        id_or_model='test_SUModel',
-        name='test_SUModel',
-    )
-    return parametrize(model=M)
-
-def nofix_emu_EMUdel():
-    M = EMU_Model(
-        id_or_model='test_SUModel',
-        name='test_SUModel',
-    )
-    return parametrize(model=M) 

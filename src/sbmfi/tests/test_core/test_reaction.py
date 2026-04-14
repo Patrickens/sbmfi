@@ -4,7 +4,6 @@ from cobra import Reaction, Metabolite, Model
 from sbmfi.core.reaction import LabellingReaction, EMU_Reaction
 from sbmfi.core.metabolite import LabelledMetabolite, EMU_Metabolite, EMU
 from sbmfi.core.model import LabellingModel, EMU_Model, model_builder_from_dict
-from sbmfi.core.linalg import LinAlg
 
 @pytest.fixture
 def metabolite_kwargs():
@@ -221,7 +220,7 @@ class TestLabellingReactionAtomMapping:
 
     @pytest.fixture
     def model(self, cobra_model):
-        return LabellingModel(LinAlg('numpy'), cobra_model)
+        return LabellingModel(cobra_model)
 
     @pytest.fixture
     def expected_atom_maps(self):
@@ -343,7 +342,7 @@ class TestLabellingReactionAtomMapping:
         """Test all error-raising conditions in LabellingReaction.set_atom_map."""
 
         reaction = LabellingReaction(model.reactions.get_by_id('r1'))
-        other_model = LabellingModel(LinAlg('numpy'), cobra_model)
+        other_model = LabellingModel(cobra_model)
         other_model.add_labelling_kwargs(
             reaction_kwargs={'r1': reaction_kwargs['r1']}, metabolite_kwargs=metabolite_kwargs
         )

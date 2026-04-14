@@ -3,7 +3,6 @@ import numpy as np
 from sbmfi.core.model import LabellingModel, EMU_Model, RatioEMU_Model
 from sbmfi.core.observation import LCMS_ObservationModel, MVN_BoundaryObservationModel, ClassicalObservationModel, MDV_ObservationModel
 from sbmfi.core.reaction import LabellingReaction
-from sbmfi.core.linalg import LinAlg
 from sbmfi.core.util import make_multidex
 from sbmfi.inference.sampling import _BaseBayes
 from sbmfi.priors.uniform import UniformRoundedFleXchPrior
@@ -2210,12 +2209,7 @@ def build_e_coli_tomek(
 
 def simulator_factory(
         id_or_file_or_model='dummy',
-        name=None,
-        backend='numpy',
-        solver='lu_solve',
         batch_size=1,
-        auto_diff=False,
-        fkwargs=None,
         reaction_list=None,
         reaction_kwargs=None,
         metabolite_kwargs=None,
@@ -2225,8 +2219,14 @@ def simulator_factory(
         build_simulator=False,
         device='cpu',
         ratios=True,
-        seed=None,
         free_reaction_id=None,
+        # legacy keyword arguments silently ignored
+        backend=None,
+        name=None,
+        solver=None,
+        auto_diff=None,
+        fkwargs=None,
+        seed=None,
 ) -> LabellingModel:
     if id_or_file_or_model is not None:
         try:
@@ -2234,23 +2234,12 @@ def simulator_factory(
         except:
             pass
 
-    linalg = LinAlg(
-        backend=backend, batch_size=batch_size, solver=solver, device=device,
-        fkwargs=fkwargs, auto_diff=auto_diff, seed=seed
-    )
-
-    kwargs = {
-        'id_or_model':      id_or_file_or_model,
-        'name':             name,
-        'linalg':           linalg,
-    }
-
     if ratios:
         model_type = RatioEMU_Model
     else:
         model_type = EMU_Model
 
-    model = model_type(**kwargs)
+    model = model_type(model=id_or_file_or_model, batch_size=batch_size, device=device)
     model.add_reactions(
         reaction_list=reaction_list,
         reaction_kwargs=reaction_kwargs,

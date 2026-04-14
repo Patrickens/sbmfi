@@ -11,10 +11,13 @@ from sympy import nsimplify, Matrix
 from sympy.core.numbers import One
 import cvxpy as cp
 import cdd
+from sbmfi.settings import CVXPY_SOLVER as _CVXPY_SOLVER
 import cdd.gmp
 from sbmfi.core.util import _optlang_reverse_id_rex, _rho_constraints_rex, _net_constraint_rex, \
-    _rev_reactions_rex, _xch_reactions_rex
-from sbmfi.core.linalg import LinAlg
+    _rev_reactions_rex, _xch_reactions_rex, get_tensor, tensormul_T, min_pos_max_neg, \
+    sample_unit_hyper_sphere_ball
+from sbmfi.core.distributions import sample_bounded, bounded_log_prob, trunc_norm_log_pdf
+import torch
 import copy
 from PolyRound.api import PolyRoundApi, Polytope, PolyRoundSettings
 from PolyRound.static_classes.lp_utils import ChebyshevFinder
@@ -111,7 +114,7 @@ class LabellingPolytope(Polytope):
         })
 
         if solve and len(polytope._objective) > 0:
-            problem.solve(solver=cp.GUROBI, verbose=False)
+            problem.solve(solver=_CVXPY_SOLVER, verbose=False)
             cvx_result['solution'] = pd.Series(v_cp.value, index=polytope.A.columns, name=f'optimum', dtype=np.float64)
             cvx_result['optimum'] = problem.value
         return cvx_result
@@ -127,13 +130,13 @@ def fast_FVA(polytope: Polytope, full=False):
     result = {}
     for i, reaction_id in zip(range(objective.value.shape[0]), polytope.A.columns):
         objective.value[i] = 1.0
-        problem.solve(solver=cp.GUROBI, ignore_dpp=True)
+        problem.solve(solver=_CVXPY_SOLVER, ignore_dpp=True)
         if problem.status != 'optimal':
             # raise ValueError(f'{reaction_id}: {problem.status}')
             print(f'{reaction_id}: {problem.status}')
         reac_max = round(problem.value, 4)
         objective.value[i] = -1.0
-        problem.solve(solver=cp.GUROBI, ignore_dpp=True)
+        problem.solve(solver=_CVXPY_SOLVER, ignore_dpp=True)
         reac_min = round(problem.value * -1, 4)
         objective.value[i] = 0.0
         if full:
@@ -756,7 +759,7 @@ class PolytopeSamplingModel(object):
             polytope: Polytope,
             pr_verbose = False,
             kernel_id ='svd',
-            linalg: LinAlg = None,
+            device=None,
             **kwargs
     ):
         if kernel_id not in ['rref', 'svd']:
@@ -794,16 +797,12 @@ class PolytopeSamplingModel(object):
         self._transformed_id = self._T_1.index
         self._reaction_id = polytope.A.columns.tolist()
 
-        if linalg == None:
-            linalg = LinAlg(backend='numpy')
-
-        self._la = linalg
+        self._device = device if device is not None else torch.device('cpu')
         self._G = F_round.A.values
         self._h = F_round.b.values[:, np.newaxis]
         self._Q = F_round.transformation.values
         self._q = F_round.shift.values[:, np.newaxis]
-        new = self.to_linalg(linalg)
-        self.__dict__.update(new.__dict__)
+        self._init_tensors()
 
     @property
     def log_det_E(self):
@@ -821,12 +820,12 @@ class PolytopeSamplingModel(object):
         index = None
         if isinstance(net_fluxes, pd.DataFrame):
             index = net_fluxes.index
-            net_fluxes = self._la.get_tensor(values=net_fluxes.loc[:, self._rounded_id].values)
+            net_fluxes = get_tensor(values=net_fluxes.loc[:, self._rounded_id].values, device=self._device)
 
-        transformed = self._la.tensormul_T(self._T_1, net_fluxes - self._tau.T)
-        rounded = self._la.tensormul_T(self._E_1, transformed - self._epsilon.T)
+        transformed = tensormul_T(self._T_1, net_fluxes - self._tau.T)
+        rounded = tensormul_T(self._E_1, transformed - self._epsilon.T)
         if pandalize:
-            rounded = pd.DataFrame(self._la.tonp(rounded), index=index, columns=self._rounded_id)
+            rounded = pd.DataFrame(rounded.numpy(), index=index, columns=self._rounded_id)
             rounded.index.name = 'samples_id'
         return rounded
 
@@ -834,24 +833,23 @@ class PolytopeSamplingModel(object):
         index = None
         if isinstance(rounded, pd.DataFrame):
             index = rounded.index
-            rounded = self._la.get_tensor(values=rounded.loc[:, self._rounded_id].values)
+            rounded = get_tensor(values=rounded.loc[:, self._rounded_id].values, device=self._device)
 
-        fluxes = self._la.tensormul_T(self._Q, rounded) + self._q.T
+        fluxes = tensormul_T(self._Q, rounded) + self._q.T
         if jacobian:
             J = self._Q[None, ...]  # need to add a dimension for batches of samples
 
         if pandalize:
-            fluxes = pd.DataFrame(self._la.tonp(fluxes), index=index, columns=self.reaction_id)
+            fluxes = pd.DataFrame(fluxes.numpy(), index=index, columns=self.reaction_id)
             fluxes.index.name = 'samples_id'
-        if  jacobian:
+        if jacobian:
             return fluxes, J
         return fluxes
 
     def get_initial_points(self, num_points: int):
-        # UniformSamplingModel.get_initial_points(self, num_points)
-        distances = self._h / self._la.norm(self._G, ord=2, axis=1)  # the arguments are ord and axis
+        distances = self._h / torch.linalg.vector_norm(self._G, ord=2, dim=1, keepdim=True)
         radius = distances.min()
-        samples = self._la.sample_unit_hyper_sphere_ball(shape=(num_points, self.dimensionality), ball=True)
+        samples = sample_unit_hyper_sphere_ball((num_points, self.dimensionality), ball=True)
         return samples * radius
 
     @property
@@ -863,20 +861,17 @@ class PolytopeSamplingModel(object):
     def rounded_id(self):
         return self._rounded_id.copy(name='net_theta_id')
 
-    def to_linalg(self, linalg: LinAlg):
-        new = copy.copy(self)
-        new._la = linalg
+    def _init_tensors(self):
         for kwarg in ['_T', '_T_1', '_tau', '_E', '_E_1', '_epsilon', '_G', '_h', '_Q', '_q']:
-            value = new.__dict__[kwarg]
+            value = self.__dict__[kwarg]
             if isinstance(value, pd.DataFrame) or isinstance(value, pd.Series):
                 value = value.values
-            new.__dict__[kwarg] = linalg.get_tensor(values=value)
-        return new
+            self.__dict__[kwarg] = get_tensor(values=value, device=self._device)
 
 
 def get_rounded_polytope(psm: PolytopeSamplingModel):
-    A = pd.DataFrame(psm._la.tonp(psm._G), columns=psm.rounded_id)
-    b = pd.Series(psm._la.tonp(psm._h)[:, 0], name='ub')
+    A = pd.DataFrame(psm._G.numpy(), columns=psm.rounded_id)
+    b = pd.Series(psm._h[:, 0].numpy(), name='ub')
     return Polytope(A=A, b=b)
 
 
@@ -891,7 +886,7 @@ class MarkovTransition():
             transition_id='peskun',
             return_log_prob_pi=True,  # if we need to compute Z, we should save the log_probs for all proposals
     ):
-        self._la = model._la
+        self._device = model._device
 
         if proposal_id not in ['gauss', 'unif']:
             raise ValueError('not a valid proposal_id')
@@ -913,11 +908,11 @@ class MarkovTransition():
             if (chord_std.ndim != 2) or (chord_std.shape[0] != model.dimensionality):
                 raise ValueError('check shape of covariance matrix')
             try:
-                self._la.LU(chord_std)
-            except:
+                torch.linalg.lu_factor(chord_std)
+            except Exception:
                 raise ValueError('not a valid covariance matrix')
             self._non_isotropic = True
-        self._chord_std = self._la.get_tensor(values=chord_std, dtype=np.float64)
+        self._chord_std = get_tensor(values=chord_std, dtype=np.float64, device=self._device)
 
         self._n_chains = 0
         self._selecta = None
@@ -931,26 +926,38 @@ class MarkovTransition():
         log_prob = None
 
         if self._unif:
-            alpha = self._la.sample_bounded_distribution(  # dont need log_probs, since they cancel out
-                shape=(self._n_cdf, ), lo=alpha_min, hi=alpha_max
+            alpha = sample_bounded(
+                (self._n_cdf,), alpha_min, alpha_max, which='unif',
             )
         else:
             if self._non_isotropic:  # std in the direction of direction
-                chord_std = self._la.sqrt(self._la.sum(((direction @ self._chord_std) * direction), -1))
+                chord_std = torch.sqrt(((direction @ self._chord_std) * direction).sum(-1))
             else:
                 chord_std = self._chord_std
-            alpha = self._la.sample_bounded_distribution(  #  mu = 0.0, since the current alpha = 0.0
-                shape=(self._n_cdf, ), lo=alpha_min, hi=alpha_max, std=chord_std,
-                which='gauss', return_log_prob=self._barker
+            alpha = sample_bounded(
+                (self._n_cdf,), alpha_min, alpha_max,
+                mu=torch.zeros_like(alpha_min), sigma=chord_std.item() if chord_std.ndim == 0 else chord_std.mean().item(),
+                which='gauss', return_log_prob=self._barker,
             )
             if self._barker:
                 alpha, log_prob = alpha
             else:
                 self._alpha[1:] = alpha
-                log_prob = self._la.bounded_distribution_log_prob(
-                    x=self._alpha, lo=alpha_min, hi=alpha_max, mu=self._alpha, std=chord_std,
-                    which='gauss', old_is_new=True, k=1
-                    )
+                # Peskun cross-probability: log q(x_i | x_j) for all upper-triangle pairs (i,j)
+                _x = self._alpha
+                _n = _x.shape[1]  # n_chains
+                _rows, _cols = torch.triu_indices(_n, _n, offset=1, device=_x.device)
+                _diags = torch.arange(_n, device=_x.device)
+                _uptri_x = _x[0, _cols]
+                _uptri_mu = _x[_rows, 0]
+                _std = chord_std if chord_std.ndim == 0 else chord_std[_cols]
+                _uptri_probs = trunc_norm_log_pdf(
+                    _uptri_x, _uptri_mu, _std, alpha_min[_cols], alpha_max[_cols]
+                )
+                log_prob = get_tensor(shape=_x.shape, device=_x.device)
+                log_prob[_rows, _cols] = _uptri_probs
+                log_prob = log_prob + log_prob.transpose(0, 1)
+                log_prob[_diags, _diags] /= 2
         return x + alpha[..., None] * direction, log_prob
 
     def __call__(self, x, direction, alpha_min, alpha_max):
@@ -961,13 +968,13 @@ class MarkovTransition():
 
         n_chains, n_dim = x.shape
         if self._n_chains != n_chains:
-            self._selecta = self._la.arange(n_chains)
-            self._line_xs = self._la.get_tensor(shape=(1 + self._n_cdf, n_chains, n_dim))
-            self._log_prob_pi = self._la.get_tensor(shape=(1 + self._n_cdf, n_chains))
+            self._selecta = torch.arange(n_chains, device=self._device)
+            self._line_xs = get_tensor(shape=(1 + self._n_cdf, n_chains, n_dim), device=self._device)
+            self._log_prob_pi = get_tensor(shape=(1 + self._n_cdf, n_chains), device=self._device)
             self._log_prob_pi[0] = self._pi.log_prob(x)
-            self._axept = self._la.zeros(n_chains, dtype=int)
+            self._axept = torch.zeros(n_chains, dtype=torch.int64, device=self._device)
             if not self._unif:
-                self._alpha = self._la.zeros((self._n_cdf + 1, n_chains))
+                self._alpha = torch.zeros((self._n_cdf + 1, n_chains), dtype=torch.double, device=self._device)
             self._n_chains = n_chains
 
         self._line_xs[0] = x
@@ -983,8 +990,8 @@ class MarkovTransition():
             else:
                 log_probs = self._log_prob_pi + log_q.sum(1)
 
-        log_probs = log_probs - self._la.max(log_probs, dim=0)
-        probs = self._la.exp(log_probs)
+        log_probs = log_probs - log_probs.max(dim=0).values
+        probs = torch.exp(log_probs)
 
         if self._barker:
             probs = probs / probs.sum(0)
@@ -992,9 +999,9 @@ class MarkovTransition():
             probs[1:] = (probs[1:] / probs[0])  # R = pi(x_i)K(x/i | x_i) / pi(x_0)K(x/0 | x_0)
             probs[1:][probs[1:] > 1.0] = 1.0    # min(1, R)
             probs[1:] *= 1 / self._n_cdf        # 1 / m
-            probs[0] = 1.0 - self._la.sum(probs[1:], 0)  # A[i,i] = 1 - sum(A[i,j]) j!=i
+            probs[0] = 1.0 - probs[1:].sum(0)  # A[i,i] = 1 - sum(A[i,j]) j!=i
 
-        accept_idx = self._la.multinomial(1, p=probs.T)[:, 0]
+        accept_idx = torch.multinomial(probs.T, 1)[:, 0]
         new_x = self._line_xs[accept_idx, self._selecta]
         self._log_prob_pi[0] = self._log_prob_pi[accept_idx, self._selecta]
 
@@ -1015,7 +1022,7 @@ def sample_polytope(
         new_initial_points=False,
         return_psm = False,
         phi: float = None,
-        linalg: LinAlg = None,
+        device=None,
         kernel_id: str = 'svd',
         markov_transition: MarkovTransition=None,
         return_what='rounded',
@@ -1047,7 +1054,7 @@ def sample_polytope(
 
     result = {}
     if isinstance(model, Polytope):
-        model = PolytopeSamplingModel(model, kernel_id=kernel_id, linalg=linalg)
+        model = PolytopeSamplingModel(model, kernel_id=kernel_id, device=device)
         if return_psm:
             result['psm'] = model
         result['log_det_E'] = model.log_det_E
@@ -1062,7 +1069,7 @@ def sample_polytope(
 
     n_per_chain = math.ceil(n / n_chains)
     n_tot = n_burn + n_per_chain * thinning_factor
-    chains = model._la.get_tensor(shape=(n_per_chain, n_chains, K))  # use for PSRF computation
+    chains = get_tensor(shape=(n_per_chain, n_chains, K), device=model._device)  # use for PSRF computation
 
     pbar = range(n_tot)
     if show_progress:
@@ -1076,10 +1083,10 @@ def sample_polytope(
         x = initial_points
 
     if markov_transition is not None:
-        if not model._la == markov_transition._la:
-            raise ValueError(f'unequal backends')
+        if model._device != markov_transition._device:
+            raise ValueError(f'model and markov_transition are on different devices')
         if markov_transition._retlp:
-            chain_log_probs = model._la.get_tensor(shape=(n_per_chain, n_chains))
+            chain_log_probs = get_tensor(shape=(n_per_chain, n_chains), device=model._device)
 
     biatch = min(5000, n_tot)  # batching this makes it a bit faster
     for i in pbar:
@@ -1091,33 +1098,32 @@ def sample_polytope(
         if i % biatch == 0:
             # pre-sample samples from hypersphere
             # uniform samples from unit ball in d dims
-            sphere_samples = model._la.sample_unit_hyper_sphere_ball(shape=(biatch, n_chains, K))
+            sphere_samples = sample_unit_hyper_sphere_ball((biatch, n_chains, K))
             # batch compute distances to all planes
-            A_dist = model._la.tensormul_T(model._G, sphere_samples)
+            A_dist = tensormul_T(model._G, sphere_samples)
             if markov_transition is None:
-                rands = model._la.randu((biatch, n_chains), dtype=model._G.dtype)
+                rands = torch.rand((biatch, n_chains), dtype=model._G.dtype)
 
         sphere_sample = sphere_samples[i % biatch]
         ar = A_dist[i % biatch]
-        dist = model._h.T - model._la.tensormul_T(model._G, x)
+        dist = model._h.T - tensormul_T(model._G, x)
         dist[dist < 0.0] = 0.0
         allpha = dist / ar
 
-        alpha_min, alpha_max = model._la.min_pos_max_neg(allpha, return_what=0)
+        alpha_min, alpha_max = min_pos_max_neg(allpha, return_what=0)
 
         if phi is not None:
             # this is ellipsoid aware sampling for volume computation, meaning that
             # we choose the next step to be in the intersection of the polytope and a ball of radius rho
-            # a = 1  # length of ball(1)-vector is 1...
             b = (sphere_sample * x).sum(1) * 2
             c = (x * x).sum(1) - phi ** 2   # elements of ax**2 + bx + c = 0
-            sqrt = model._la.sqrt(b ** 2 - 4 * c)
+            sqrt = torch.sqrt(b ** 2 - 4 * c)
 
             phi_max = (-b + sqrt) / 2
             phi_min = (-b - sqrt) / 2
 
-            alpha_max = model._la.minimum(phi_max, alpha_max)
-            alpha_min = model._la.maximum(phi_min, alpha_min)
+            alpha_max = torch.minimum(phi_max, alpha_max)
+            alpha_min = torch.maximum(phi_min, alpha_min)
 
         if markov_transition is None:
             # this means we do vanilla hit-and-run with uniform proposal along the line
@@ -1144,9 +1150,9 @@ def sample_polytope(
         pbar.close()
 
     if return_what != 'chains':
-        chains = model._la.view(chains, (n_chains * n_per_chain, K))[:n, :]
+        chains = chains.view(n_chains * n_per_chain, K)[:n, :]
         if new_initial_points:
-            new_points_idx = model._la.choice(n_chains, n)
+            new_points_idx = torch.randperm(n)[:n_chains]
             result['new_initial_points'] = chains[new_points_idx, :]
 
         if return_what in ('rounded', 'all'):
@@ -1205,15 +1211,15 @@ def compute_volume(
         else:
             if verbose:
                 print('vertices done')
-            phis = model._la.norm(vertices, 2, 1)
-            phi_max = model._la.max(phis)
+            phis = torch.linalg.vector_norm(vertices, ord=2, dim=1)
+            phi_max = phis.max()
     else:
         sampling_result = sample_polytope(
             model=model, n=n * n0_multiplier, thinning_factor=thinning_factor, return_what='basis'
         )
         basis_samples = sampling_result['basis']
-        phis = model._la.norm(basis_samples, 2, 1)
-        phi_max = model._la.max(phis)  # this is the radius of the max ball that almost fully encloses the polytope
+        phis = torch.linalg.vector_norm(basis_samples, ord=2, dim=1)
+        phi_max = phis.max()  # this is the radius of the max ball that almost fully encloses the polytope
 
     beta = math.ceil(K * np.log(phi_max))
     ball_phis = np.array([np.exp(i / K) for i in range(0, beta + 1)])
@@ -1229,7 +1235,7 @@ def compute_volume(
 
     for i, phi_i_1 in enumerate(ball_phis[1:]):
         samples = sample_polytope(model, n=n, thinning_factor=thinning_factor, phi=phi_i_1, return_what='rounded')['rounded']
-        sample_phis = model._la.norm(samples, 2, 1)
+        sample_phis = torch.linalg.vector_norm(samples, ord=2, dim=1)
         n_ball_i = (sample_phis <= ball_phis[i]).sum()
         ratios[i] = n / n_ball_i
 
@@ -1258,7 +1264,7 @@ if __name__ == "__main__":
         build_simulator=True,
         which_measurements='lcms',
     )
-    psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn, linalg=model._la)
+    psm = PolytopeSamplingModel(model.flux_coordinate_mapper._Fn, device=model._device)
 
 
     import torch

@@ -4,6 +4,7 @@ import psutil
 import math
 import numpy as np
 import pandas as pd
+import torch
 import multiprocessing as mp
 from typing import Union, Dict
 import tqdm
@@ -21,6 +22,7 @@ from sbmfi.core.coordinater import make_theta_polytope
 from sbmfi.core.util import (
     hdf_opener_and_closer,
     make_multidex,
+    get_tensor,
 )
 
 
@@ -62,7 +64,7 @@ class _BaseSimulator(object):
             model.set_substrate_labelling(substrate_df.loc[labelling_id])  # NB check whether valid susbtrate_df
             if not model.state_id.equals(obmod.state_id):
                 raise ValueError
-            if not model._la == obmod._la:
+            if model._device != obmod._device:
                 raise ValueError
             self._obmods[labelling_id] = obmod
             has_log_prob.append(hasattr(obmod, 'log_lik'))
@@ -72,7 +74,7 @@ class _BaseSimulator(object):
         self._is_exact = all(has_log_prob) & (hasattr(boundary_observation_model, 'log_lik') if
                                               boundary_observation_model is not None else True)
         self._model = model
-        self._la = model._la
+        self._device = model._device
         self._fcm = model._fcm
         self._substrate_df = substrate_df.loc[list(self._obmods.keys())]
         if boundary_observation_model is not None:
@@ -80,11 +82,12 @@ class _BaseSimulator(object):
             bo_fluxes_id = bo_id.to_series().replace({v: k for k, v in model._only_rev.items()})
             if not bo_fluxes_id.isin(model.labelling_fluxes_id).all():
                 raise ValueError
-            if not model._la == boundary_observation_model._la:  # TODO make sure that device also matches
+            if model._device != boundary_observation_model._device:
                 raise ValueError
             # NB this means that we always append the boundary fluxes to the end of the last dimension!
-            self._bo_idx = self._la.get_tensor(  # TODO maybe make this select from prior fluxes??
-                values=np.array([self._model.labelling_fluxes_id.get_loc(rid) for rid in bo_fluxes_id], dtype=np.int64)
+            self._bo_idx = get_tensor(  # TODO maybe make this select from prior fluxes??
+                values=np.array([self._model.labelling_fluxes_id.get_loc(rid) for rid in bo_fluxes_id], dtype=np.int64),
+                device=self._device,
             )
         self._bomsize = 0 if boundary_observation_model is None else len(self._bo_idx)
         self._bom = boundary_observation_model
@@ -110,12 +113,12 @@ class _BaseSimulator(object):
         if return_mdvs:
             columns = make_multidex({k: self._model.state_id for k in self._obmods}, 'labelling_id', 'mdv_id')
             n_f, n_mdv, n_s = data.shape
-            data = self._la.tonp(data).reshape(n_f, n_mdv * n_s)
+            data = data.detach().cpu().numpy().reshape(n_f, n_mdv * n_s)
             return pd.DataFrame(data, index=index, columns=columns)
         else:
             n_f = data.shape[0]
             n_obshape = max(1, n_obs)
-            data = self._la.tonp(data).transpose(1, 0, 2).reshape((n_f * n_obshape, len(self.data_id)))
+            data = data.detach().cpu().numpy().transpose(1, 0, 2).reshape((n_f * n_obshape, len(self.data_id)))
             if index is None:
                 index = pd.RangeIndex(n_f)
             if n_obs > 0:
@@ -134,7 +137,7 @@ class _BaseSimulator(object):
         index = None
         if isinstance(labelling_fluxes, pd.DataFrame):
             index = labelling_fluxes.index
-            labelling_fluxes = self._la.get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values)
+            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values, device=self._device)
 
         if len(labelling_fluxes.shape) > 2:
             raise ValueError(f'only handles (n_samples x n_fluxes) data, got {labelling_fluxes.shape}')
@@ -155,9 +158,9 @@ class _BaseSimulator(object):
         n_obshape = max(1, n_obs)
 
         if return_mdvs:
-            result = self._la.get_tensor(shape=(n_f, len(self._obmods), int(self._model._s.shape[-1])))
+            result = get_tensor(shape=(n_f, len(self._obmods), int(self._model._s.shape[-1])), device=self._device)
         else:
-            result = self._la.get_tensor(shape=(n_f, n_obshape, len(self.data_id)))
+            result = get_tensor(shape=(n_f, n_obshape, len(self.data_id)), device=self._device)
             if self._bomsize > 0:
                 result[:, slicer, -self._bomsize:] = self._bom.sample_observation(
                     labelling_fluxes[:, self._bo_idx], n_obs=n_obs
@@ -183,7 +186,7 @@ class _BaseSimulator(object):
         index = None
         if isinstance(data, pd.DataFrame):
             index = data.index
-            data = self._la.get_tensor(values=data.values)
+            data = get_tensor(values=data.values, device=self._device)
             if is_mdv:
                 data = data[:, None, :]
 
@@ -206,9 +209,9 @@ class _BaseSimulator(object):
         if (self._bomsize > 0) and append_bom and not is_mdv:
             processed.append(data[..., -self._bomsize:])
             columns['BOM'] = self._bom.boundary_id.get_level_values(1)
-        processed = self._la.cat(processed, -1)
+        processed = torch.cat(processed, -1)
         if pandalize:
-            processed = pd.DataFrame(self._la.tonp(processed), index=index, columns=make_multidex(columns, name1='data_id'))
+            processed = pd.DataFrame(processed.detach().cpu().numpy(), index=index, columns=make_multidex(columns, name1='data_id'))
         return processed
 
     def _verify_hdf(self, hdf: pt.file):
@@ -261,7 +264,7 @@ class _BaseSimulator(object):
             if isinstance(array, pd.DataFrame):
                 array = array.values
             if not isinstance(array, np.ndarray):
-                array = self._la.tonp(array)
+                array = array.detach().cpu().numpy()
             if item in hdf.root[dataset_id]:
                 ptarray = hdf.root[dataset_id][item]
             else:
@@ -301,7 +304,7 @@ class _BaseSimulator(object):
         xcsarr = hdf.root[dataset_id][what].read(start, stop, step) # .squeeze()  # TODO why did we squeeze before?
 
         if not pandalize:
-            return self._la.get_tensor(values=xcsarr)
+            return get_tensor(values=xcsarr, device=self._device)
 
         labelling_id = substrate_df.index.rename('labelling_id')
 
@@ -339,7 +342,7 @@ class _BaseSimulator(object):
         if pandalize:
             return data
         n_obshape = max(1, n_obs)
-        return self._la.view(data, shape=(*vape[:-1], n_obshape, vape[-1]))
+        return data.view(*vape[:-1], n_obshape, vape[-1])
 
 
 class DataSetSim(_BaseSimulator):
@@ -380,7 +383,7 @@ class DataSetSim(_BaseSimulator):
         input_labelling = worker_result['input_labelling']
         labelling_id = input_labelling.name
         start, stop = worker_result['start_stop']
-        start_stop_idx = self._la.arange(start, stop)
+        start_stop_idx = torch.arange(start, stop, device=self._device)
         i, j = self._obsize[labelling_id]
         i_obs = self._substrate_df.index.get_loc(labelling_id)
         result['validx'][start_stop_idx, i_obs] = worker_result['validx_chunk']
@@ -407,27 +410,27 @@ class DataSetSim(_BaseSimulator):
     ) -> {}:
 
         if isinstance(labelling_fluxes, pd.DataFrame):
-            labelling_fluxes = self._la.get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values)
+            labelling_fluxes = get_tensor(values=labelling_fluxes.loc[:, self._fcm.fluxes_id].values, device=self._device)
 
         if labelling_fluxes.ndim > 2:
             raise ValueError(f'only handles (n_samples x n_fluxes) data, got {labelling_fluxes.shape}')
 
         result = {}
-        result['validx'] = self._la.get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods)), dtype=np.bool_)
+        result['validx'] = get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods)), dtype=np.bool_, device=self._device)
         result['fluxes'] = labelling_fluxes
 
         labelling_fluxes = self._model._fcm.frame_fluxes(labelling_fluxes, trim=True)
 
         if what not in ('all', 'data', 'mdv'):
             raise ValueError('not sure what to simulate')
-        if labelling_fluxes.shape[0] < self._la._batch_size:
-            raise ValueError(f'n must be at least batch size: {self._la._batch_size}')
+        if labelling_fluxes.shape[0] < self._model._batch_size:
+            raise ValueError(f'n must be at least batch size: {self._model._batch_size}')
 
         if what != 'data':
-            result['mdv'] = self._la.get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods), len(self._model.state_id)))
+            result['mdv'] = get_tensor(shape=(labelling_fluxes.shape[0], len(self._obmods), len(self._model.state_id)), device=self._device)
         if what != 'mdv':
             n_obshape = max(1, n_obs)
-            result['data'] = self._la.get_tensor(shape=(labelling_fluxes.shape[0], n_obshape, len(self.data_id)))
+            result['data'] = get_tensor(shape=(labelling_fluxes.shape[0], n_obshape, len(self.data_id)), device=self._device)
 
         if (self._bomsize > 0) and (what != 'mdv'):
             slicer = 0 if n_obs == 0 else slice(None)
@@ -488,7 +491,7 @@ class DataSetSim(_BaseSimulator):
 
         if pandalize:
             return self._pandalize_data(data, index, n_obs)
-        data = self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
+        data = data.view(*vape[:-1], n_obshape, len(self._did))
         if return_time and show_progress:
             return data, result['running_time']
         return data

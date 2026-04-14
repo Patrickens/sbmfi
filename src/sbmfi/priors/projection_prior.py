@@ -59,9 +59,9 @@ class ProjectionPrior(BaseRoundedPrior):
             pbar.close()
 
         if fn == sample_polytope:
-            whatensor = self._la.cat([torch.as_tensor(r[what]) for r in results])
+            whatensor = torch.cat([torch.as_tensor(r[what]) for r in results])
             if scramble:
-                scramble_indices = self._la.randperm(whatensor.shape[0])
+                scramble_indices = torch.randperm(whatensor.shape[0])
                 whatensor = whatensor[scramble_indices]
             if 'new_initial_points' in results[0]:
                 self._initial_points = results[0]['new_initial_points']
@@ -118,7 +118,7 @@ class ProjectionPrior(BaseRoundedPrior):
         )
         if self._fcm._nx > 0:
             xch_basis_samples = self._xch_prior.sample((n_boundary * n_flux, ))
-            thermo_fluxes = self._la.cat([thermo_fluxes, xch_basis_samples], dim=-1)
+            thermo_fluxes = torch.cat([thermo_fluxes, xch_basis_samples], dim=-1)
             self._fcm.map
 
     def sample(self, n_boundary=1000, n_flux=10, rel_tol=0.01, **kwargs) -> torch.Tensor:
@@ -188,7 +188,7 @@ class ProjectionPrior(BaseRoundedPrior):
         theta = self._fcm._sampler.map_fluxes_2_rounded(net_fluxes)
         if self._fcm._nx > 0:
             xch_basis_samples = self._xch_prior.sample((n * n_flux, ))
-            theta = self._la.cat([theta, xch_basis_samples], dim=-1)
+            theta = torch.cat([theta, xch_basis_samples], dim=-1)
 
         self._theta_cache = theta
 

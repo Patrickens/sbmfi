@@ -1,3 +1,4 @@
+import torch
 import torch.distributions
 import psutil
 import multiprocessing as mp
@@ -6,6 +7,8 @@ from sbmfi.priors.uniform import _BasePrior, BaseRoundedPrior
 from sbmfi.core.observation import MDV_ObservationModel, BoundaryObservationModel
 from sbmfi.core.model import LabellingModel
 from sbmfi.core.simulfuncs import init_observer
+from sbmfi.core.util import get_tensor, tensormul_T, min_pos_max_neg, sample_unit_hyper_sphere_ball
+from sbmfi.core.distributions import sample_bounded, bounded_log_prob
 import math
 import arviz as az
 import numpy as np
@@ -35,6 +38,7 @@ class _BaseBayes(_BaseSimulator):
     ):
         super(_BaseBayes, self).__init__(model, substrate_df, mdv_observation_models, boundary_observation_model)
 
+        self._device = model._device
         self._prior = prior
         if prior is not None:
             if not prior._fcm.labelling_fluxes_id.equals(model.labelling_fluxes_id):
@@ -65,13 +69,13 @@ class _BaseBayes(_BaseSimulator):
 
     @property
     def measurements(self):
-        return pd.DataFrame(self._la.tonp(self._x_meas), index=self._x_meas_id, columns=self.data_id)
+        return pd.DataFrame(self._x_meas.detach().cpu().numpy(), index=self._x_meas_id, columns=self.data_id)
 
     @property
     def true_theta(self):
         if self._true_theta is None:
             return
-        return pd.Series(self._la.tonp(self._true_theta[0]), index=self.theta_id, name=self._true_theta_id)
+        return pd.Series(self._true_theta[0].detach().cpu().numpy(), index=self.theta_id, name=self._true_theta_id)
 
     def set_measurement(self, x_meas: pd.Series, atol=1e-3):
         if isinstance(x_meas, pd.Series):
@@ -85,12 +89,12 @@ class _BaseBayes(_BaseSimulator):
             x_meas_index = pd.RangeIndex(x_meas.shape[0])
         elif isinstance(x_meas_index, pd.MultiIndex):
             raise ValueError
-        self._x_meas = self._la.atleast_2d(self._la.get_tensor(values=x_meas))
+        self._x_meas = torch.atleast_2d(get_tensor(values=x_meas, device=self._device))
         self._x_meas_id = x_meas_index
         if (self._bomsize > 0) and self._bom._check:
-            if not self._la.transax((self._bom._A @ self._x_meas[:, -self._bomsize].T <= self._bom._b)).all():
+            if not (self._bom._A @ self._x_meas[:, -self._bomsize].T <= self._bom._b).T.all():
                 raise ValueError('boundary measurements are outside polytope')
-        x_meas_df = pd.DataFrame(self._la.tonp(self._x_meas), index=x_meas_index, columns=self.data_id)
+        x_meas_df = pd.DataFrame(self._x_meas.detach().cpu().numpy(), index=x_meas_index, columns=self.data_id)
         for labelling_id, obmod in self._obmods.items():
             obmod.check_x_meas(x_meas_df.loc[:, labelling_id], atol=atol)
 
@@ -101,7 +105,7 @@ class _BaseBayes(_BaseSimulator):
             if theta.shape[0] > 1:
                 raise ValueError
             theta = theta.iloc[0]
-        true_theta = self._la.atleast_2d(self._la.get_tensor(values=theta.loc[self.theta_id].values))
+        true_theta = torch.atleast_2d(get_tensor(values=theta.loc[self.theta_id].values, device=self._device))
         prior_support = self._prior.support
         prior_support.to(true_theta.device)
         within_bounds = prior_support.check(true_theta)
@@ -113,7 +117,7 @@ class _BaseBayes(_BaseSimulator):
     def simulate_true_data(self, n_obs=0, pandalize=True):
         if self._true_theta is None:
             raise ValueError('set true_theta')
-        tt = self._la.tile(self._true_theta.T, (self._la._batch_size, )).T
+        tt = torch.tile(self._true_theta.T, (self._model._batch_size, )).T
         true_labelling_fluxes = self._fcm.map_theta_2_fluxes(tt, return_thermo=False)
         true_data = self.simulate(true_labelling_fluxes, n_obs, pandalize=pandalize)
         if not pandalize:
@@ -138,7 +142,7 @@ class _BaseBayes(_BaseSimulator):
 
         vape = theta.shape
         if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+            theta = theta.view(math.prod(vape[:-1]), vape[-1])
         labelling_fluxes = self._fcm.map_theta_2_fluxes(theta)
         mu_o = self.simulate(labelling_fluxes, n_obs=0)
 
@@ -146,7 +150,7 @@ class _BaseBayes(_BaseSimulator):
         n_meas = self._x_meas.shape[0]
         n_bom = 1 if self._bomsize > 0 else 0
 
-        log_lik = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
+        log_lik = get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom), device=self._device)
 
         # FUCKING AROOND
         # difff = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
@@ -177,7 +181,7 @@ class _BaseBayes(_BaseSimulator):
             # difff[..., i] = (diff ** 2).sum(-1)
 
         if sum:
-            log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
+            log_lik = log_lik.sum((1, 2))
 
         if return_data:
             return log_lik, mu_o
@@ -196,12 +200,12 @@ class _BaseBayes(_BaseSimulator):
 
         vape = theta.shape
         if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+            theta = theta.view(math.prod(vape[:-1]), vape[-1])
 
         n_f = theta.shape[0]
         k = len(self._obmods) + (1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
         n_meas = self._x_meas.shape[0]
-        log_prob = self._la.get_tensor(shape=(n_f, n_meas, k))
+        log_prob = get_tensor(shape=(n_f, n_meas, k), device=self._device)
 
         if evaluate_prior:
             # NB not necessary for uniform prior
@@ -215,9 +219,9 @@ class _BaseBayes(_BaseSimulator):
             log_lik, mu_o = log_lik
 
         log_prob[..., :-1] = log_lik
-        log_prob = self._la.view(self._la.sum(log_prob, axis=(1, 2), keepdims=False), shape=vape[:-1])
+        log_prob = log_prob.sum((1, 2)).view(vape[:-1])
         if return_data:
-            return log_prob, self._la.view(mu_o, shape=(*vape[:-1], len(self._did)))
+            return log_prob, mu_o.view(*vape[:-1], len(self._did))
         return log_prob
 
     def compute_distance(
@@ -235,7 +239,7 @@ class _BaseBayes(_BaseSimulator):
 
         vape = theta.shape
         if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+            theta = theta.view(math.prod(vape[:-1]), vape[-1])
         labelling_fluxes = self._fcm.map_theta_2_fluxes(theta)
         data = self.__call__(labelling_fluxes, n_obs=n_obs, **kwargs)
 
@@ -243,7 +247,7 @@ class _BaseBayes(_BaseSimulator):
         if isinstance(data, tuple):
             data, time = data
 
-        data = self._la.unsqueeze(data, 0)  # artificially add a chains dimension!
+        data = data.unsqueeze(0)  # artificially add a chains dimension!
         if metric == 'rmse':
             fobmod = next(iter(self._obmods.values()))
             distances = fobmod.rmse(data, self._x_meas).squeeze(0)
@@ -252,10 +256,10 @@ class _BaseBayes(_BaseSimulator):
             raise ValueError
 
         n_obshape = max(1, n_obs)
-        distances = self._la.view(distances, shape=vape[:-1])
+        distances = distances.view(vape[:-1])
         if epsilon > -float('inf'):
             distances[distances > epsilon] = float('nan')  # this indicates we reject samples with a large distance!
-        data = self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
+        data = data.view(*vape[:-1], n_obshape, len(self._did))
         if return_data:
             distances = distances, data
         if time is not None:
@@ -270,7 +274,7 @@ class _BaseBayes(_BaseSimulator):
             return_data=False,
     ):
         vape = theta.shape
-        theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+        theta = theta.view(math.prod(vape[:-1]), vape[-1])
         if return_data:
             raise NotImplementedError(
                 'its more efficient to sample all paramters and then use a DataSim to simulate all data'
@@ -327,33 +331,33 @@ class _BaseBayes(_BaseSimulator):
         vape = theta.shape
         # shape into matrix with variables along rows and samples in columns
         if theta.ndim > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+            theta = theta.view(math.prod(vape[:-1]), vape[-1])
 
         if prev_cov:
             # Calculate weighted covariance of particles.
             # For variant C, Beaumont et al. 2009, the kernel variance comes from the
             # previous population.
-            population_cov = self._la.cov(theta.T, aweights=weights)  # rowvar=False,
+            population_cov = torch.cov(theta.T, aweights=weights)  # rowvar=False,
             # Make sure variance is nonsingular.
             # I'd rather have this crash out if the singular, means that the parameters are not independent
             #    or constrained to a single value
-            # diagonal = self._la.diag(population_cov)
+            # diagonal = torch.diag(population_cov)
             # diagonal += 0.01
-            self._la.cholesky(kernel_std_scale * population_cov)
+            torch.linalg.cholesky(kernel_std_scale * population_cov)
             return kernel_std_scale * population_cov
         else:
             # Toni et al. and Sisson et al. it comes from the parameter ranges.
-            indices = self._la.multinomial(samples_per_dim * theta.shape[1], p=weights)
+            indices = torch.multinomial(weights, samples_per_dim * theta.shape[1])
             samples = theta[indices]
-            particle_ranges = self._la.max(samples, 0) - self._la.min(samples, 0)
-            return kernel_std_scale * self._la.diag(particle_ranges)
+            particle_ranges = samples.max(0).values - samples.min(0).values
+            return kernel_std_scale * torch.diag(particle_ranges)
 
     def quantile_indices(self, distances, quantiles=0.8):
-        dist_cumsum = self._la.cumsum(distances, 0)
+        dist_cumsum = torch.cumsum(distances, 0)
         dist_cdf = dist_cumsum / dist_cumsum[-1]
-        bigger_than_quantile = self._la.get_tensor(values=(dist_cdf >= quantiles), dtype=np.uint8)
+        bigger_than_quantile = (dist_cdf >= quantiles).to(torch.uint8)
         # select the first 1 in the bigger_than_quantile matrix above along the 0 axis
-        return self._la.argmax(bigger_than_quantile, 0)
+        return torch.argmax(bigger_than_quantile, 0)
 
     def _format_dims_coords(self, n_obs=0):
         data_dims = ['data_id']
@@ -396,25 +400,25 @@ class _BaseBayes(_BaseSimulator):
             # TODO: https://link.springer.com/article/10.1007/BF02591694
             #  implement coordinate hit-and-run (might be faster??)
             # uniform samples from unit ball in batch_shape dims
-            self._sphere_samples = self._la.sample_unit_hyper_sphere_ball(shape=(*batch_shape, self._K))
+            self._sphere_samples = sample_unit_hyper_sphere_ball(shape=(*batch_shape, self._K))
             # batch compute distances to all planes
-            self._A_dist = self._la.tensormul_T(self._sampler._G, self._sphere_samples)
+            self._A_dist = tensormul_T(self._sampler._G, self._sphere_samples)
 
         sphere_sample = self._sphere_samples[[ii]]
         A_dist = self._A_dist[ii]
 
-        pol_dist = self._sampler._h.T - self._la.tensormul_T(self._sampler._G, theta[..., :self._K])
+        pol_dist = self._sampler._h.T - tensormul_T(self._sampler._G, theta[..., :self._K])
         pol_dist[pol_dist < 0.0] = 0.0
         allpha = pol_dist / A_dist
-        alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
+        alpha_min, alpha_max = min_pos_max_neg(allpha, return_what=0)
 
         if not isinstance(chord_std, float) and chord_std.ndim > 1:
             # this means that we passed a covariance matrix and we need to compute std along the line
-            chord_std = self._la.sqrt(self._la.sum(((sphere_sample @ chord_std) * sphere_sample), -1))
+            chord_std = torch.sqrt(((sphere_sample @ chord_std) * sphere_sample).sum(-1))
 
-        chord_alphas = self._la.sample_bounded_distribution(
+        chord_alphas = sample_bounded(
             shape=(n_cdf,), lo=alpha_min, hi=alpha_max, which=chord_proposal,
-            std=chord_std, return_log_prob=return_what>0
+            sigma=chord_std, return_log_prob=return_what>0
         )
         if return_what > 0:
             chord_alphas, log_probs = chord_alphas
@@ -422,15 +426,15 @@ class _BaseBayes(_BaseSimulator):
         if self._nx > 0:
             # in case there are exchange fluxes, construct them here
             current_xch = theta[..., -self._nx:]
-            xch_fluxes = self._la.sample_bounded_distribution(
+            xch_fluxes = sample_bounded(
                 shape=perturbed_particles.shape[:-1],
                 lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                mu=current_xch, which=xch_proposal, std=xch_std, return_log_prob=return_what>0,
+                mu=current_xch, which=xch_proposal, sigma=xch_std, return_log_prob=return_what>0,
             )
             if return_what > 0:
                 xch_fluxes, xch_log_probs = xch_fluxes
-                log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
-            perturbed_particles = self._la.cat([perturbed_particles, xch_fluxes], dim=-1)
+                log_probs += xch_log_probs.sum(-1)
+            perturbed_particles = torch.cat([perturbed_particles, xch_fluxes], dim=-1)
 
         if return_what == 0:
             return perturbed_particles
@@ -453,54 +457,53 @@ class _BaseBayes(_BaseSimulator):
     ):
         old_pol = old_particles[..., :self._K]
         new_pol = new_particles[..., :self._K]
-        old_pol = self._la.unsqueeze_like(old_pol, new_pol)
+        old_pol = old_pol[(None,) * (new_pol.ndim - old_pol.ndim) + (...,)]
 
-        diff = self._la.unsqueeze(old_pol, 1) - self._la.unsqueeze(new_pol, 0)
+        diff = old_pol.unsqueeze(1) - new_pol.unsqueeze(0)
         directions = diff
         if old_is_new:
             # along a chord, directions are the same, per chain we only need 1 direction computation
             directions = diff[0, 1]
 
-        directions = directions / self._la.norm(directions, 2, -1, True)
+        directions = directions / torch.linalg.vector_norm(directions, ord=2, dim=-1, keepdim=True)
 
-        A_dist = self._la.tensormul_T(self._sampler._G, directions)  # this one has wrong sign on first row
-        particle_pol_dist = self._la.unsqueeze(self._sampler._h.T - self._la.tensormul_T(self._sampler._G, old_pol), 1)
+        A_dist = tensormul_T(self._sampler._G, directions)  # this one has wrong sign on first row
+        particle_pol_dist = (self._sampler._h.T - tensormul_T(self._sampler._G, old_pol)).unsqueeze(1)
         allpha = -particle_pol_dist / A_dist
-        alpha_min, alpha_max = self._la.min_pos_max_neg(allpha, return_what=0)
+        alpha_min, alpha_max = min_pos_max_neg(allpha, return_what=0)
 
         alpha = diff[..., 0] / directions[..., 0]  # alpha is the same for all dimensions, so we only need to select 1
 
-        mu = self._la.zeros(alpha.shape)  # TODO: could we just pass 0.0??
+        mu = torch.zeros(alpha.shape, dtype=torch.float64, device=self._device)  # TODO: could we just pass 0.0??
 
         if chord_std.ndim > 1:
             # this means that we passed a covariance matrix and we need to compute std along the line
-            chord_std = self._la.sqrt(self._la.sum(((directions @ chord_std) * directions), -1))
+            chord_std = torch.sqrt(((directions @ chord_std) * directions).sum(-1))
 
         # print(alpha[..., None] * directions + old_pol)
         # print(new_pol)  # check whether we recover newpol from oldpol
 
-        log_probs = self._la.bounded_distribution_log_prob(
-            x=alpha, lo=alpha_min, hi=alpha_max, mu=mu, std=chord_std, which=chord_proposal, old_is_new=False,
-            unsqueeze=False,
+        log_probs = bounded_log_prob(
+            x=alpha, lo=alpha_min, hi=alpha_max, mu=mu, sigma=chord_std, which=chord_proposal,
         )
         if self._nx > 0:
             old_xch = old_particles[..., -self._nx:]
             new_xch = new_particles[..., -self._nx:]
-            old_xch = self._la.unsqueeze_like(old_xch, new_xch)
+            old_xch = old_xch[(None,) * (new_xch.ndim - old_xch.ndim) + (...,)]
 
-            xch_log_probs = self._la.bounded_distribution_log_prob(
+            xch_log_probs = bounded_log_prob(
                 x=new_xch, mu=old_xch,
                 lo=self._fcm._rho_bounds[:, 0], hi=self._fcm._rho_bounds[:, 1],
-                std=xch_std, which=xch_proposal, old_is_new=old_is_new
+                sigma=xch_std, which=xch_proposal, old_is_new=old_is_new,
             )
-            log_probs += self._la.sum(xch_log_probs, -1, keepdims=False)
+            log_probs += xch_log_probs.sum(-1)
         return log_probs
 
 
 class _BasePotential():
     def __init__(self, model: _BaseBayes, return_data: bool=True):
         self._m = model
-        self._la = model._la
+        self._device = model._device
         self._return_data = return_data
 
     def _simulate_data(self, theta):
@@ -523,7 +526,7 @@ class Exact(_BasePotential):
     def log_lik(self, theta):
         vape = theta.shape
         if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+            theta = theta.view(math.prod(vape[:-1]), vape[-1])
         labelling_fluxes = self._m._fcm.map_theta_2_fluxes(theta)
         mu_o = self._m.simulate(labelling_fluxes, n_obs=0)
 
@@ -531,7 +534,7 @@ class Exact(_BasePotential):
         n_meas = self._m._x_meas.shape[0]
         n_bom = 1 if self._m._bomsize > 0 else 0
 
-        log_lik = self._la.get_tensor(shape=(n_f, n_meas, len(self._m._obmods) + n_bom))
+        log_lik = get_tensor(shape=(n_f, n_meas, len(self._m._obmods) + n_bom), device=self._device)
 
         # FUCKING AROOND
         # difff = self._la.get_tensor(shape=(n_f, n_meas, len(self._obmods) + n_bom))
@@ -562,7 +565,7 @@ class Exact(_BasePotential):
             # difff[..., i] = (diff ** 2).sum(-1)
 
         if sum:  # summing over observation models and over
-            log_lik = self._la.sum(log_lik, axis=(1, 2), keepdims=False)
+            log_lik = log_lik.sum((1, 2))
 
         if self._return_data:
             return log_lik, mu_o
@@ -571,12 +574,12 @@ class Exact(_BasePotential):
     def log_prob(self, theta):
         vape = theta.shape
         if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+            theta = theta.view(math.prod(vape[:-1]), vape[-1])
 
         n_f = theta.shape[0]
         k = len(self._m._obmods) + (1 if self._bom is None else 2)  # the 2 is for a column of prior and boundary probabilities
         n_meas = self._m._x_meas.shape[0]
-        log_prob = self._la.get_tensor(shape=(n_f, n_meas, k))
+        log_prob = get_tensor(shape=(n_f, n_meas, k), device=self._device)
 
         # if evaluate_prior:
         #     # NB not necessary for uniform prior
@@ -590,9 +593,9 @@ class Exact(_BasePotential):
             log_lik, mu_o = log_lik
 
         log_prob[..., :-1] = log_lik
-        log_prob = self._la.view(self._la.sum(log_prob, axis=(1, 2), keepdims=False), shape=vape[:-1])
+        log_prob = log_prob.sum((1, 2)).view(vape[:-1])
         if self._return_data:
-            return log_prob, self._la.view(mu_o, shape=(*vape[:-1], len(self._did)))
+            return log_prob, mu_o.view(*vape[:-1], len(self._did))
         return log_prob
 
     def __call__(self, theta):
@@ -614,7 +617,7 @@ class DistanceKernel(_BasePotential):
 
         vape = theta.shape
         if len(vape) > 2:
-            theta = self._la.view(theta, shape=(math.prod(vape[:-1]), vape[-1]))
+            theta = theta.view(math.prod(vape[:-1]), vape[-1])
         labelling_fluxes = self._fcm.map_theta_2_fluxes(theta)
         data = self.__call__(labelling_fluxes, n_obs=n_obs, **kwargs)
 
@@ -622,7 +625,7 @@ class DistanceKernel(_BasePotential):
         if isinstance(data, tuple):
             data, time = data
 
-        data = self._la.unsqueeze(data, 0)  # artificially add a chains dimension!
+        data = data.unsqueeze(0)  # artificially add a chains dimension!
         if metric == 'rmse':
             fobmod = next(iter(self._obmods.values()))
             distances = fobmod.rmse(data, self._x_meas).squeeze(0)
@@ -631,10 +634,10 @@ class DistanceKernel(_BasePotential):
             raise ValueError
 
         n_obshape = max(1, n_obs)
-        distances = self._la.view(distances, shape=vape[:-1])
+        distances = distances.view(vape[:-1])
         if epsilon > -float('inf'):
             distances[distances > epsilon] = float('nan')  # this indicates we reject samples with a large distance!
-        data = self._la.view(data, shape=(*vape[:-1], n_obshape, len(self._did)))
+        data = data.view(*vape[:-1], n_obshape, len(self._did))
         if return_data:
             distances = distances, data
         if time is not None:
@@ -667,11 +670,9 @@ class PerturbParticle():
 class Transition(object):
     def __init__(
             self,
-            linalg,
             n_cdf: int,
-
     ):
-        self._P = linalg.get_tensor  # transition kernel G
+        pass  # transition kernel G
 
     def barker(self):
         pass
@@ -700,34 +701,34 @@ class MCMC(_BaseBayes):
             ii = i % pre_sample_batch
             if ii == 0:
                 if i == 0:
-                    self._accept_index = self._la.zeros((n_chains, ), dtype=np.int64)
-                self._rnd = self._la.log(self._la.randu((pre_sample_batch,)))
+                    self._accept_index = torch.zeros((n_chains, ), dtype=torch.int64, device=self._device)
+                self._rnd = torch.log(torch.rand((pre_sample_batch,), dtype=torch.float64, device=self._device))
             self._accept_index[:] = 0
             rnd = self._rnd[ii]
             log_mh_ratio = P_l[1] - P_l[0]
             self._accept_index[rnd <= log_mh_ratio] = 1
             return self._accept_index
 
-        P_l -= self._la.max(P_l, 0)
-        P_l = self._la.exp(P_l)
+        P_l -= P_l.max(0).values
+        P_l = torch.exp(P_l)
         P_l = P_l / P_l.sum(0)
         if not peskunize:
             # this corresponds to Barkers acceptance probability, which is sub-optimal, thus longer ESS
-            return self._la.multinomial(n=1, p=P_l.T).T[0]
+            return torch.multinomial(P_l.T, num_samples=1).T[0]
 
         if i == 0:
-            self._didx = self._la.arange(n_cdf_1)
-            self._where = self._la.zeros(n_cdf_1, dtype=np.float64)
-            self._ut = self._la.zeros(n_cdf_1)
+            self._didx = torch.arange(n_cdf_1, device=self._device)
+            self._where = torch.zeros(n_cdf_1, dtype=torch.float64, device=self._device)
+            self._ut = torch.zeros(n_cdf_1, dtype=torch.float64, device=self._device)
 
-            self._non_diag = self._la.ones((n_cdf_1, n_cdf_1)) - self._la.eye(n_cdf_1)
+            self._non_diag = torch.ones((n_cdf_1, n_cdf_1), dtype=torch.float64, device=self._device) - torch.eye(n_cdf_1, dtype=torch.float64, device=self._device)
 
-        P_kl = self._la.tile(P_l, (n_cdf_1, 1, 1))
+        P_kl = torch.tile(P_l, (n_cdf_1, 1, 1))
         for chain_i in range(n_chains):
             P_j = P_kl[..., chain_i]
             for j in range(n_cdf_1):
                 diags = P_j[self._didx, self._didx]
-                diag_idxs = self._la.where(diags > 0.0)[0]
+                diag_idxs = torch.where(diags > 0.0)[0]
 
                 if diag_idxs.shape[0] < 2:
                     print('mah mann')
@@ -741,19 +742,19 @@ class MCMC(_BaseBayes):
                     self._where[:] = 1
                     self._where[k] = 0
                     numerator = 1 - self._where @ P_j[k]
-                    wheres.append(self._la.vecopy(self._where))
+                    wheres.append(self._where.clone())
 
                     self._where[:] = 0
                     self._where[diag_idxs] = 1
                     self._where[k] = 0
                     denominor = self._where @ P_j[k]
-                    wheres2.append(self._la.vecopy(self._where))
+                    wheres2.append(self._where.clone())
 
                     self._ut[k] = numerator / denominor
-                ut = self._la.min(self._ut)
+                ut = self._ut.min()
 
-                print(self._la.stack(wheres))
-                print(self._la.stack(wheres2))
+                print(torch.stack(wheres))
+                print(torch.stack(wheres2))
 
                 for k in diag_idxs:
                     for l in diag_idxs:
@@ -820,28 +821,28 @@ class MCMC(_BaseBayes):
         #  doi:10.1080/01621459.2000.10473908
         #  doi:10.1007/BF02591694  Rinooy Kan article
 
-        chord_std = self._la.get_tensor(values=np.array([chord_std]))
-        xch_std = self._la.get_tensor(values=np.array([xch_std]))
+        chord_std = get_tensor(values=np.array([chord_std]), device=self._device)
+        xch_std = get_tensor(values=np.array([xch_std]), device=self._device)
 
         batch_size = n_chains * n_cdf
-        if self._la._batch_size != batch_size:
+        if self._model._batch_size != batch_size:
             # this way the batch processing is corrected
-            self._la._batch_size = batch_size
+            self._model._batch_size = batch_size
             self._model.build_model(free_reaction_id=self._model._free_reaction_id)
 
-        chains = self._la.get_tensor(shape=(n, n_chains, len(self.theta_id)))  # TODO this should be the number of dimensions in rounded coord system!
-        post_probs = self._la.get_tensor(shape=(n, n_chains))
-        accept_rate = self._la.get_tensor(shape=(n_chains,), dtype=np.int64)
+        chains = get_tensor(shape=(n, n_chains, len(self.theta_id)), device=self._device)  # TODO this should be the number of dimensions in rounded coord system!
+        post_probs = get_tensor(shape=(n, n_chains), device=self._device)
+        accept_rate = get_tensor(shape=(n_chains,), dtype=np.int64, device=self._device)
 
         if return_data:
-            sim_data = self._la.get_tensor(shape=(n, n_chains, len(self.data_id)))
+            sim_data = get_tensor(shape=(n, n_chains, len(self.data_id)), device=self._device)
 
         if initial_points is None:
             y = self._prior.sample((max(6, n_chains), ))[:n_chains, :]  # this is necessary since rsample in the prior has 6 chains
         else:
             y = initial_points
 
-        y = self._la.tile(y, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
+        y = torch.tile(y, (n_cdf, 1))  # remember that the new batch size is n_chains x n_cdf
 
         self._set_potential(potentype, **dict(return_data=return_data, evaluate_prior=evaluate_prior, **potential_kwargs))
         if (self._potentype == 'approx'):
@@ -854,18 +855,18 @@ class MCMC(_BaseBayes):
                 )
             raise NotImplementedError('this is complicated, since we need to weight samples by the prior somehow')
 
-        chord_ys = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.true_theta)))
-        chord_post_probs = self._la.get_tensor(shape=(1 + n_cdf, n_chains))
-        chord_prop_probs = self._la.get_tensor(shape=(1 + n_cdf, 1 + n_cdf, n_chains))
+        chord_ys = get_tensor(shape=(1 + n_cdf, n_chains, len(self.true_theta)), device=self._device)
+        chord_post_probs = get_tensor(shape=(1 + n_cdf, n_chains), device=self._device)
+        chord_prop_probs = get_tensor(shape=(1 + n_cdf, 1 + n_cdf, n_chains), device=self._device)
         pert_post_probs = self.potential(y)
 
         if return_data:
-            chord_data = self._la.get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)))
+            chord_data = get_tensor(shape=(1 + n_cdf, n_chains, len(self.data_id)), device=self._device)
             pert_post_probs, data = pert_post_probs
             chord_data[0] = data[:n_chains]
 
         chord_post_probs[0] = pert_post_probs[:n_chains]  # ordering of the samples from the PDF does not matter for inverse sampling
-        chain_selector = self._la.arange(n_chains)
+        chain_selector = torch.arange(n_chains, device=self._device)
 
         y = y[: n_chains, :]
         chord_ys[0] = y
@@ -931,7 +932,7 @@ class MCMC(_BaseBayes):
                     if n_cdf > 1:
                         accept_idx[accept_idx > 0] = 1
                     accept_rate += accept_idx
-                    avg_rate = self._la.mean(accept_rate / j)
+                    avg_rate = (accept_rate / j).mean()
                     if j % 50 == 0:
                         pbar.set_postfix(avg_acc=avg_rate.item())
 
@@ -954,7 +955,7 @@ class MCMC(_BaseBayes):
             posterior_predictive = None
             if return_data:
                 posterior_predictive = {
-                    'data': self._la.transax(sim_data, dim0=1, dim1=0)
+                    'data': sim_data.transpose(1, 0)
                 }
 
             attrs = {
@@ -962,26 +963,26 @@ class MCMC(_BaseBayes):
                 'evaluate_prior': str(evaluate_prior),
                 'potential_kwargs': [(k, v if not isinstance(v, bool) else str(v)) for k, v in potential_kwargs.items()],
                 'n_burn': n_burn,
-                'acceptance_rate': self._la.tonp(accept_rate) / j,
+                'acceptance_rate': accept_rate.detach().cpu().numpy() / j,
                 'thinning_factor': thinning_factor,
                 'n_cdf': n_cdf,
                 'line_kernel': chord_proposal,
-                'line_variance': self._la.tonp(chord_std),
+                'line_variance': chord_std.detach().cpu().numpy(),
                 'xch_kernel': xch_proposal,
-                'xch_variance': self._la.tonp(xch_std),
+                'xch_variance': xch_std.detach().cpu().numpy(),
                 'running_time': pbar.format_dict['elapsed'],
                 'pbar_n': pbar.format_dict['n'],
                 'peskunize': int(peskunize),
             }
             if self.true_theta is not None:
-                attrs['true_theta'] = self._la.tonp(self._true_theta)
+                attrs['true_theta'] = self._true_theta.detach().cpu().numpy()
                 attrs['true_theta_id'] = self._true_theta_id
 
             n_obs = potential_kwargs.get('n_obs', 0)
             dims, coords = self._format_dims_coords(n_obs=n_obs if self.potentype == 'approx' else 0)
             return az.from_dict(
                 posterior={
-                    'theta': self._la.transax(chains, dim0=1, dim1=0)  # chains x draws x param
+                    'theta': chains.transpose(1, 0)  # chains x draws x param
                 },
                 dims=dims,
                 coords=coords,
@@ -1044,7 +1045,7 @@ class SMC(_BaseBayes, DataSetSim):
 
     ):
         population_batch = min(old_particles.shape[0], population_batch)
-        prop_probs = self._la.get_tensor(shape=(*old_particles.shape[:-1], *new_particles.shape[:-1]))
+        prop_probs = get_tensor(shape=(*old_particles.shape[:-1], *new_particles.shape[:-1]), device=self._device)
 
         for i in range(0, old_particles.shape[0], population_batch):
             prop_probs[i: i + population_batch] = self.compute_proposal_prob(
@@ -1056,7 +1057,7 @@ class SMC(_BaseBayes, DataSetSim):
                 xch_std,
                 old_is_new=False
             )
-        log_weighted_sum = self._la.logsumexp(old_log_weights[:, None] + prop_probs, 0)  # computes importance weights
+        log_weighted_sum = torch.logsumexp(old_log_weights[:, None] + prop_probs, 0)  # computes importance weights
 
         if evaluate_prior:
             prior_log_probs = self._prior.log_prob(new_particles)
@@ -1096,14 +1097,14 @@ class SMC(_BaseBayes, DataSetSim):
         if (chord_proposal == 'gauss') or (xch_proposal == 'gauss'):
             theta_cov = self.mvn_kernel_variance(
                 particles,
-                weights=self._la.exp(log_weights),
+                weights=torch.exp(log_weights),
                 samples_per_dim=500,
                 kernel_std_scale=kernel_variance_scale,
                 prev_cov=True,
             )
             chord_cov = theta_cov[:self._K, :self._K]
             if self._nx > 0:
-                xch_std = self._la.sqrt(self._la.diagonal(theta_cov[-self._nx:, -self._nx:]))
+                xch_std = torch.sqrt(torch.diagonal(theta_cov[-self._nx:, -self._nx:]))
 
         pbar = tqdm.tqdm(total=n, ncols=100)
         pbar.set_postfix(epsilon=float(epsilon))
@@ -1111,7 +1112,7 @@ class SMC(_BaseBayes, DataSetSim):
             sofar = 0
             while m < n:
                 # Sample from previous population and perturb.
-                sample_indices = self._la.multinomial(population_batch, self._la.exp(log_weights))
+                sample_indices = torch.multinomial(torch.exp(log_weights), population_batch)
                 sampled_particles = particles[sample_indices]
 
                 perturbed_particles = self.perturb_particles(
@@ -1130,11 +1131,11 @@ class SMC(_BaseBayes, DataSetSim):
                 if return_data:
                     dist, data = dist
 
-                is_accepted = ~self._la.isnan(dist)  # this is to filter approximations!
+                is_accepted = ~torch.isnan(dist)  # this is to filter approximations!
                 num_accepted_batch = is_accepted.sum()
 
                 if num_accepted_batch > 0:
-                    n_batch = self._la.tonp(num_accepted_batch)
+                    n_batch = num_accepted_batch.item()
                     if sofar + n_batch > n:
                         n_batch = n - sofar
                     sofar += n_batch
@@ -1167,17 +1168,17 @@ class SMC(_BaseBayes, DataSetSim):
             self._totime.append(pbar.format_dict['elapsed'])
 
         # collect lists of tensors into tensors
-        new_distances   = self._la.cat(new_distances)
-        sort_idx        = self._la.argsort(new_distances)
+        new_distances   = torch.cat(new_distances)
+        sort_idx        = torch.argsort(new_distances)
 
         new_distances   = new_distances[sort_idx][:n]
-        new_particles   = self._la.cat(new_particles)[sort_idx][:n]
-        new_log_weights = self._la.cat(new_log_weights)[sort_idx][:n]
+        new_particles   = torch.cat(new_particles)[sort_idx][:n]
+        new_log_weights = torch.cat(new_log_weights)[sort_idx][:n]
         if return_data:
-            new_data    = self._la.cat(new_data)[sort_idx][:n]
+            new_data    = torch.cat(new_data)[sort_idx][:n]
 
         # normalize the new weights
-        new_log_weights -= self._la.logsumexp(new_log_weights, dim=0)
+        new_log_weights -= torch.logsumexp(new_log_weights, dim=0)
 
         return (
             new_particles,
@@ -1197,9 +1198,9 @@ class SMC(_BaseBayes, DataSetSim):
         post_pred = result.posterior_predictive.lr_data.values
         prior_pred = result.prior_predictive.lr_data.values
         observed = result.observed_data.lr_observed_data.values
-        post_pred = self._la.tonp(self.to_partial_mdvs(post_pred, pandalize=False))
-        prior_pred = self._la.tonp(self.to_partial_mdvs(prior_pred, pandalize=False))
-        observed = self._la.tonp(self.to_partial_mdvs(observed, pandalize=False))
+        post_pred = self.to_partial_mdvs(post_pred, pandalize=False).detach().cpu().numpy()
+        prior_pred = self.to_partial_mdvs(prior_pred, pandalize=False).detach().cpu().numpy()
+        observed = self.to_partial_mdvs(observed, pandalize=False).detach().cpu().numpy()
 
         cols = self.to_partial_mdvs(post_pred[:, 0, 0, :], pandalize=True)
         cols = [f'{i[0]}: {i[1]}' for i in cols.columns.tolist()]
@@ -1268,7 +1269,7 @@ class SMC(_BaseBayes, DataSetSim):
             # we dont evaluate the prior in log_probs since we do this is computing the weights!
             potential_kwargs['evaluate_prior'] = False
 
-        xch_std = self._la.get_tensor(values=np.array([xch_std]))
+        xch_std = get_tensor(values=np.array([xch_std]), device=self._device)
 
         self._set_potential(potentype, **dict(n_obs=n_obs, metric=metric, return_data=return_data, **potential_kwargs))
         if self._potentype != 'approx':
@@ -1285,20 +1286,17 @@ class SMC(_BaseBayes, DataSetSim):
             for i in range(n_smc_steps):
                 if i == 0:
                     prior_theta = self._prior.sample(sample_shape=(int(n * n0_multiplier), ))
-                    if self._la.backend != 'torch':
-                        prior_theta = self._prior._fcm._la.tonp(prior_theta)
-
                     dist, prior_time = self.potential(prior_theta, epsilon=-float('inf'), show_progress=True, return_time=True)
                     self._totime.append(prior_time)
                     if return_data:
                         dist, data = dist
                         prior_data = data
 
-                    sortidx = self._la.argsort(dist)
+                    sortidx = torch.argsort(dist)
                     particles = prior_theta[sortidx][:n]
                     dist = dist[sortidx][:n]
                     epsilon = dist[-1]
-                    log_weights = self._la.log(1 / n * self._la.ones(n))
+                    log_weights = torch.log(torch.ones(n, dtype=torch.float64, device=self._device) / n)
 
                     if return_all_populations:
                         self._all_particles = [particles]
@@ -1339,12 +1337,12 @@ class SMC(_BaseBayes, DataSetSim):
                 raise
         finally:
             if return_all_populations:
-                particles = self._la.stack(self._all_particles, 0)
-                log_weights = self._la.stack(self._all_log_weights, 0)
-                dist = self._la.stack(self._all_distances, 0)
-                epsilon = self._la.stack(self._all_epsilons, 0)
+                particles = torch.stack(self._all_particles, 0)
+                log_weights = torch.stack(self._all_log_weights, 0)
+                dist = torch.stack(self._all_distances, 0)
+                epsilon = torch.stack(self._all_epsilons, 0)
                 if return_data:
-                    data = self._la.stack(self._all_data, 0)
+                    data = torch.stack(self._all_data, 0)
             else:
                 # add the 'chains' dimension
                 particles = particles[None, ...]
@@ -1368,7 +1366,7 @@ class SMC(_BaseBayes, DataSetSim):
             attrs = {
                 'potentype': potentype,
                 'population_batch': population_batch,
-                'epsilons': self._la.tonp(epsilon),
+                'epsilons': epsilon.detach().cpu().numpy(),
                 'evaluate_prior': str(evaluate_prior),
                 'n_smc_steps': n_smc_steps,
                 'potential_kwargs': [(k, v if not isinstance(v, bool) else str(v)) for k, v in potential_kwargs.items()],
@@ -1380,11 +1378,11 @@ class SMC(_BaseBayes, DataSetSim):
                 'epsilon_decay': epsilon_decay,
                 'line_kernel': chord_proposal,
                 'xch_kernel': xch_proposal,
-                'xch_variance': self._la.tonp(xch_std),
+                'xch_variance': xch_std.detach().cpu().numpy(),
                 'running_time': np.array(self._totime),
             }
             if self.true_theta is not None:
-                attrs['true_theta'] = self._la.tonp(self._true_theta)
+                attrs['true_theta'] = self._true_theta.detach().cpu().numpy()
                 attrs['true_theta_id'] = self._true_theta_id
 
             dims, coords = self._format_dims_coords(n_obs=n_obs if self.potentype == 'approx' else 0)
@@ -1422,7 +1420,6 @@ if __name__ == "__main__":
     from sbmfi.core.polytopia import FluxCoordinateMapper
 
     model, kwargs = spiro(
-        backend='torch',
         auto_diff=False,
         batch_size=1,
         add_biomass=True,

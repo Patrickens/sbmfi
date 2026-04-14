@@ -10,7 +10,7 @@ from flow_matching.utils import gradient, ModelWrapper
 import torch
 from torch import Tensor
 import math
-from sbmfi.core.linalg import LinAlg
+from sbmfi.core.util import sample_unit_hyper_sphere_ball
 from torch import nn
 from sbmfi.inference.manifolds import BallManifold, ConvexPolytopeManifold
 import matplotlib.pyplot as plt
@@ -40,7 +40,7 @@ def plot_losses_vs_steps(losses, axmin=None, axmax=None):
 class UniformBall(Distribution):
     def __init__(self, K: int, dtype=np.float32, device='cpu'):
         self._K = K
-        self._la = LinAlg(backend='torch', device=device, dtype=dtype)
+        self._device = torch.device(device)
         self._log_ball_vol = (K / 2) * np.log(np.pi) - gammaln(K / 2 + 1)
 
     def sample(self, shape):
@@ -48,7 +48,7 @@ class UniformBall(Distribution):
             shape = (shape, self._K)
         else:
             shape = (*shape, self._K)
-        return self._la.sample_unit_hyper_sphere_ball(shape, ball=True)
+        return sample_unit_hyper_sphere_ball(shape, ball=True)
 
     def log_prob(self, values):
         return torch.full(values.shape[:-1], -self._log_ball_vol, dtype=values.dtype, device=values.device)
@@ -359,7 +359,7 @@ if __name__ == "__main__":
     # from manifolds import BallManifold
     # from scipy.special import gammaln
     #
-    # torch_linalg = LinAlg(backend='torch', device=device, dtype=np.float32)
+    # device = torch.device(device)
     # def sample_ball(shape):
     #     return torch_linalg.sample_unit_hyper_sphere_ball(shape, ball=True)
     #

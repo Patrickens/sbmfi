@@ -8,7 +8,6 @@ from torch.distributions.constraints import Constraint, _Dependent, _Interval
 from torch.types import _size
 
 from sbmfi.core.model import LabellingModel
-from sbmfi.core.linalg import LinAlg
 from sbmfi.core.polytopia import (
     LabellingPolytope,
     PolytopeSamplingModel,
@@ -17,6 +16,7 @@ from sbmfi.core.polytopia import (
     get_rounded_polytope,
 )
 from sbmfi.core.coordinater import FluxCoordinateMapper, make_theta_polytope
+from sbmfi.core.distributions import sample_bounded, trunc_norm_log_pdf
 from typing import Iterable, Union, List, Dict
 from torch.distributions import constraints
 from torch.distributions import Distribution
@@ -36,7 +36,7 @@ def sampling_tasks(
         thinning_factor: int = 5,
         n_chains: int = 4,
         sampling_function = sample_polytope,
-        linalg: LinAlg = None,
+        device = None,
         return_psm = False,
         return_what = 'rounded',
 ):
@@ -89,7 +89,7 @@ def sampling_tasks(
             'new_initial_points': False,
             'return_psm': return_psm,
             'phi': None,
-            'linalg': linalg,
+            'device': device,
             'kernel_id': kernel_id,
             'density': None,
             'n_cdf': 1,
@@ -180,12 +180,9 @@ class _BasePrior(Distribution):
         # prior sampling variables
         if isinstance(model, LabellingModel):
             model = model.flux_coordinate_mapper
-        if model._la.backend != 'torch':
-            linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
-            model = model.to_linalg(linalg)
 
         self._fcm = model
-        self._la = model._la
+        self._device = model._device
 
         if num_processes < 0:
             num_processes = psutil.cpu_count(logical=False)
@@ -229,7 +226,7 @@ class _BasePrior(Distribution):
         raise NotImplementedError
 
     def sample_pandalize(self, n: int):
-        return pd.DataFrame(self._la.tonp(self.sample_n(n)), columns=self.theta_id)
+        return pd.DataFrame(self.sample_n(n).detach().cpu().numpy(), columns=self.theta_id)
 
 
 class BaseRoundedPrior(_BasePrior):
@@ -277,15 +274,12 @@ class _BaseXchFluxPrior(Distribution):
         #   UniFluxPrior anyways
         if isinstance(model, LabellingModel):
             model = model.flux_coordinate_mapper
-        if model._la.backend != 'torch':
-            linalg = LinAlg('torch', seed=model._la._backwargs['seed'])
-            model = model.to_linalg(linalg)
 
         if model._nx == 0:
             raise ValueError('no boundary fluxes')
 
         self._fcm = model
-        self._la = model._la
+        self._device = model._device
         self._rho_bounds = model._rho_bounds
         super().__init__(event_shape=torch.Size((model._nx, )), validate_args={})
 
@@ -320,10 +314,10 @@ class XchFluxPrior(_BaseXchFluxPrior):  # TODO rename
 
     @format_sample_shape
     def rsample(self, sample_shape: torch.Size = torch.Size()) -> torch.Tensor:
-        result = self._la.sample_bounded_distribution(
+        result = sample_bounded(
             shape=sample_shape,
             lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1],
-            mu=self._mu, std=self._std, which=self._which
+            which=self._which,
         )
         return result.view(self._extended_shape(sample_shape))
 
@@ -332,8 +326,11 @@ class XchFluxPrior(_BaseXchFluxPrior):  # TODO rename
         if self._validate_args:
             self._validate_sample(value)
         if self._which == 'gauss':
-            return self._la.trunc_norm_log_pdf(
-                value, lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1], mu=self._mu, std=self._std
+            mu = torch.tensor(self._mu, dtype=value.dtype, device=value.device)
+            sigma = torch.tensor(self._std, dtype=value.dtype, device=value.device)
+            return trunc_norm_log_pdf(
+                value, mu=mu, sigma=sigma,
+                lo=self._rho_bounds[:, 0], hi=self._rho_bounds[:, 1],
             )
         return torch.zeros((*value.shape[:-1], 1))
 
@@ -363,7 +360,7 @@ class UniformRoundedFleXchPrior(BaseRoundedPrior):
         rounded_xch = super(UniformRoundedFleXchPrior, self).rsample(sample_shape)
         if self._fcm._nx > 0:
             xch_samples = self._xch_prior.sample(sample_shape)
-            rounded_xch = self._la.cat([rounded_xch, xch_samples], dim=-1)
+            rounded_xch = torch.cat([rounded_xch, xch_samples], dim=-1)
         return rounded_xch
 
     def log_prob(self, value):
@@ -393,7 +390,7 @@ if __name__ == "__main__":
     # pickle.dump(fcm, open('spiro_fcm.p', 'wb'))
     #
     model, kwargs = spiro(
-        backend='numpy', add_biomass=True, ratios=False, build_simulator=False, v2_reversible=True, v5_reversible=True,
+        add_biomass=True, ratios=False, build_simulator=False, v2_reversible=True, v5_reversible=True,
         kernel_id='rref',
     )
     fcm = FluxCoordinateMapper(

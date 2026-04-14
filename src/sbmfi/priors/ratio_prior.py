@@ -1,6 +1,7 @@
 import multiprocessing as mp
 import math
 import cvxpy as cp
+from sbmfi.settings import CVXPY_SOLVER as _CVXPY_SOLVER
 import numpy as np
 import pandas as pd
 import warnings
@@ -8,7 +9,6 @@ import torch
 from torch.distributions.constraints import Constraint
 from PolyRound.api import PolyRoundApi
 from sbmfi.core.model import RatioMixin
-from sbmfi.core.linalg import NumpyBackend
 from sbmfi.core.polytopia import LabellingPolytope, FluxCoordinateMapper, \
     PolytopeSamplingModel, project_polytope, transform_polytope_keep_transform, \
     H_representation, V_representation
@@ -154,7 +154,7 @@ class _RatioSupport(Constraint):
             ratio_sample = viewlue[i, :]
             self._lhs.value = self.construct_polytope_constraints(ratio_sample=ratio_sample)[0, ...]
             try:
-                optimum = self._problem.solve(solver=cp.GUROBI, verbose=False, max_iter=1000)
+                optimum = self._problem.solve(solver=_CVXPY_SOLVER, verbose=False)
                 # NOTE sometimes the polytope is not empty according to cvxpy but sampling still fails
                 if optimum is not None:
                     self._accepted[i] = True
@@ -330,7 +330,7 @@ class RatioPrior(_BasePrior):
                 objective=cp.Minimize(objective @ v),
                 constraints=constraints
             )
-            lfp.solve(solver=cp.GUROBI)
+            lfp.solve(solver=_CVXPY_SOLVER)
             val_min = lfp.value
             if lfp.status != 'optimal':
                 raise ValueError(f'ish not a valid ratio: {ratio_id}')
@@ -338,7 +338,7 @@ class RatioPrior(_BasePrior):
                 print(f'minimum ratio {ratio_id} is: {round(val_min, 3)}')
             ratio_min = max(round(val_min, 3), 0.0)
             objective.value *= -1
-            lfp.solve(solver=cp.GUROBI)
+            lfp.solve(solver=_CVXPY_SOLVER)
             val_max = lfp.value
             if lfp.status != 'optimal':
                 raise ValueError(f'ish not a valid ratio: {ratio_id}')
@@ -354,9 +354,8 @@ class RatioPrior(_BasePrior):
 
         rref_pol, T_1, x = transform_polytope_keep_transform(F_simp, fcm._sampler._pr_settings, 'rref')
         net_flux_vertices = V_representation(rref_pol, number_type='float')
-        linalg = NumpyBackend()
-        num = model._sum_getter('numerator', model._ratio_repo, linalg, rref_pol.A.columns)
-        den = model._sum_getter('denominator', model._ratio_repo, linalg, rref_pol.A.columns)
+        num = model._sum_getter('numerator', model._ratio_repo, rref_pol.A.columns)
+        den = model._sum_getter('denominator', model._ratio_repo, rref_pol.A.columns)
         ratio_num = num @ net_flux_vertices.T
         ratio_den = den @ net_flux_vertices.T
         ratio_den[ratio_den <= 0.0] = tolerance
@@ -374,9 +373,8 @@ class RatioPrior(_BasePrior):
         F_simp = PolyRoundApi.simplify_polytope(fcm._sampler, settings=self._pr_settings, normalize=normalize)
         F_simp = LabellingPolytope.from_Polytope(F_simp, polytope)
         rref_pol = transform_polytope_keep_transform(F_simp, fcm._sampler._pr_settings, 'rref')
-        linalg = NumpyBackend()
-        num = model._sum_getter('numerator', model._ratio_repo, linalg, rref_pol.A.columns)
-        den = model._sum_getter('denominator', model._ratio_repo, linalg, rref_pol.A.columns)
+        num = model._sum_getter('numerator', model._ratio_repo, rref_pol.A.columns)
+        den = model._sum_getter('denominator', model._ratio_repo, rref_pol.A.columns)
         num_sum = pd.DataFrame(num, columns=rref_pol.A.columns, index=model.ratios_id + '_num')
         den_sum = pd.DataFrame(den, columns=rref_pol.A.columns, index=model.ratios_id + '_den')
         P = pd.concat([
@@ -445,7 +443,7 @@ class RatioPrior(_BasePrior):
                 kwargs = {'A_constraint_df': constraint_df}
             sampling_task_generator = sampling_tasks(
                 polytope=self._support._ratio_pol, transform_type=self._fcm._sampler.kernel_id,
-                basis_coordinates=self._fcm._sampler.basis_coordinates, linalg=self._fcm._la,
+                basis_coordinates=self._fcm._sampler.basis_coordinates, device=self._fcm._device,
                 counts=n_flux, return_kwargs=self._num_processes == 0, return_basis_samples=True,
                 **kwargs
             )
@@ -460,7 +458,7 @@ class RatioPrior(_BasePrior):
             print(self._theta_cache.shape)
             self._theta_cache = self._model.compute_ratios(self._flux_cache)
             # # otherwise subsequent samples will have similar ratio values
-            # scramble_indices = self._fcm._la.randperm(n * n_flux)
+            # scramble_indices = torch.randperm(n * n_flux)
             # self._theta_cache = self._theta_cache[scramble_indices]
             # self._flux_cache = self._flux_cache[scramble_indices]
 
